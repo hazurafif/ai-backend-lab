@@ -107,6 +107,14 @@ class Settings:
         default_factory=lambda: os.environ.get("SECRET_KEY", "dev-secret-change-me")
     )
 
+    # --- Default admin (seeded on first start when the users store is empty) ---
+    default_admin_username: str = field(
+        default_factory=lambda: os.environ.get("DEFAULT_ADMIN_USERNAME", "admin")
+    )
+    default_admin_password: str = field(
+        default_factory=lambda: os.environ.get("DEFAULT_ADMIN_PASSWORD", "admin")
+    )
+
     def load_mcp_servers(self) -> dict[str, dict[str, Any]]:
         if self.mcp_servers_json:
             return json.loads(self.mcp_servers_json)

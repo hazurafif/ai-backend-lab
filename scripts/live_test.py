@@ -52,7 +52,7 @@ def _post_sse(path, body, token):
 
 
 # login (OAuth2 form)
-status, text = req("POST", "/login", body={"username": "johndoe", "password": "secret"}, form=True)
+status, text = req("POST", "/login", body={"username": "admin", "password": "admin"}, form=True)
 token = json.loads(text)["access_token"]
 print("[OK] login")
 

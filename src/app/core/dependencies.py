@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
+from .database import persistence
 from .security import decode_access_token
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -21,10 +22,14 @@ def _credentials_exception() -> HTTPException:
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Validate the JWT and load the user from the users store."""
     token_data = decode_access_token(token)
     if token_data is None or token_data.username is None:
         raise _credentials_exception()
-    return {"username": token_data.username}
+    user = await persistence.users.get_user(token_data.username)
+    if user is None:
+        raise _credentials_exception()
+    return user
 
 
 async def get_optional_current_user(

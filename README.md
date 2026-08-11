@@ -68,11 +68,18 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET /users/me` | Bearer | Current user |
 | `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on, searxng, execute, agent_resources |
 
+### Auth
+
+On first start with an empty users store, a default admin account is seeded:
+`admin` / `admin` (override via `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD`).
+Users are stored in Postgres (`users` table, created by the SQL migrations in
+`migrations/`), or in-memory when `DATABASE_URI` is unset (dev mode).
+
 ### Chat
 
 ```bash
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/login \
-  -d "username=johndoe&password=secret" | jq -r .access_token)
+  -d "username=admin&password=admin" | jq -r .access_token)
 
 curl -N -X POST http://127.0.0.1:8000/chat \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -258,7 +265,7 @@ files and keeps unlisted ones; `DELETE /agent/skills/{name}/files/{path}`
 removes a single file.
 
 ```bash
-TOKEN=$(curl -s -X POST http://127.0.0.1:8000/login -d "username=johndoe&password=secret" | jq -r .access_token)
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/login -d "username=admin&password=admin" | jq -r .access_token)
 AUTH="Authorization: Bearer $TOKEN"
 
 # --- skills (skill-creator layout: SKILL.md + optional scripts/, references/, assets/) ---
@@ -301,11 +308,12 @@ src/app/          package (src layout, installed editable by uv sync)
   core/           cross-cutting infrastructure
     config.py         settings (env-driven, sectioned)
     constants.py      store namespaces, SSE headers, default system prompt
-    database.py       Postgres checkpointer + store (in-memory fallback)
-    dependencies.py   get_current_user
+    database.py       Postgres checkpointer + store + chat_messages + users (in-memory fallback)
+    migrations.py     SQL migration runner (applies migrations/*.sql at startup)
+    dependencies.py   get_current_user (validates JWT against the users store)
     security.py       bcrypt + JWT
     exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)
-    fake_users.py     demo user store (stand-in for a real DB)
+  migrations/      SQL migrations (0001_create_users.sql, 0002_create_chat_messages.sql)
   schema/         per-domain API models
     auth_schema.py    Token, TokenData, User, UserInDB
     chat_schema.py    ChatRequest, ThreadOut, AiSdkChatRequest, ResumeRequest

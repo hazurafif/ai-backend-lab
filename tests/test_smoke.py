@@ -321,6 +321,8 @@ async def test_http_end_to_end(memory_persistence):
         app.state.agent = build_scripted_agent(
             memory_persistence.checkpointer, memory_persistence.store
         )
+        # get_current_user validates against the users store.
+        await memory_persistence.users.create_user(username="tester", hashed_password="x")
         token = create_access_token(data={"sub": "tester"})
 
         async with httpx.AsyncClient(

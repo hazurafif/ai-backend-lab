@@ -34,11 +34,12 @@ src/app/          package (src layout, installed editable by uv sync)
   core/           cross-cutting infrastructure
     config.py         settings (env-driven, sectioned)
     constants.py      store namespaces, SSE headers, default system prompt
-    database.py       Postgres checkpointer + store + chat_messages history (in-memory fallback)
-    dependencies.py   get_current_user
+    database.py       Postgres checkpointer + store + chat_messages history + users (in-memory fallback)
+    migrations.py     SQL migration runner (applies migrations/*.sql at startup)
+    dependencies.py   get_current_user (loads the user from the users store)
     security.py       bcrypt + JWT
     exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)
-    fake_users.py     demo user store (stand-in for a real DB)
+  migrations/      SQL migrations (0001_create_users.sql, 0002_create_chat_messages.sql)
   schema/         per-domain API models
     auth_schema.py    Token, TokenData, User, UserInDB
     chat_schema.py    ChatRequest, ThreadOut, AiSdkChatRequest, ResumeRequest

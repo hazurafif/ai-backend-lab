@@ -317,6 +317,9 @@ async def test_http_chat_enable_search_field(monkeypatch):
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as http,
         ):
+            # get_current_user validates against the users store (lifespan
+            # restart above re-initialized it, so create the user in here).
+            await persistence.users.create_user(username="tester", hashed_password="x")
             headers = {"Authorization": f"Bearer {token}"}
 
             r = await http.post(
