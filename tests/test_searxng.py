@@ -25,8 +25,9 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
-from app import auth, db
 from app.core import config
+from app.core.database import persistence
+from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent
 from app.services.chat import agent_stream
@@ -163,8 +164,8 @@ async def collect_stream(agent, username, **kwargs) -> list[tuple[str, dict]]:
 
 async def start_memory_persistence():
     config.settings.database_uri = None
-    await db.persistence.start()
-    return db.persistence
+    await persistence.start()
+    return persistence
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +309,7 @@ async def test_http_chat_enable_search_field(monkeypatch):
         client = httpx.AsyncClient(transport=httpx.MockTransport(fake_searxng_handler))
         agent = build_search_agent(persistence.checkpointer, persistence.store, client=client)
         app = create_app(agent=agent)
-        token = auth.create_access_token(data={"sub": "tester"})
+        token = create_access_token(data={"sub": "tester"})
 
         async with (
             app.router.lifespan_context(app),

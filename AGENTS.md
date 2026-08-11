@@ -13,32 +13,97 @@ uv run pytest -q                            # offline suite, no API key needed
 uv run python scripts/live_test.py          # live E2E (needs running server + key)
 ```
 
+## Architecture
+
+Follows the
+[fastapi-clean-architecture](https://github.com/jujumilk3/fastapi-clean-architecture)
+template: versioned endpoints in `api/`, cross-cutting infrastructure in
+`core/`, per-domain schemas in `schema/`, business logic in `services/`,
+helpers in `util/`.
+
+```
+src/app/          package (src layout, installed editable by uv sync)
+  main.py         thin FastAPI factory: lifespan (agent startup), CORS, routers
+  api/v1/
+    routes.py         aggregates all endpoint routers into api_router
+    endpoints/        one router per domain
+      auth.py         /login, /users/me
+      chat.py         /chat (SSE), /api/chat (AI SDK), /threads
+      agent.py        /agent/skills + /agent/tools CRUD, reconnect
+      health.py       /health
+  core/           cross-cutting infrastructure
+    config.py         settings (env-driven, sectioned)
+    constants.py      store namespaces, SSE headers, default system prompt
+    database.py       Postgres checkpointer + store (in-memory fallback)
+    dependencies.py   get_current_user
+    security.py       bcrypt + JWT
+    exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)
+    fake_users.py     demo user store (stand-in for a real DB)
+  schema/         per-domain API models
+    auth_schema.py    Token, TokenData, User, UserInDB
+    chat_schema.py    ChatRequest, ThreadOut, AiSdkChatRequest, ResumeRequest
+    agent_schema.py   SkillIn/Out, ToolServerIn/Out
+  services/       business logic
+    agent.py          create_deep_agent factory + shared durable backend
+    chat.py           agent streaming -> normalized SSE events (normative contract)
+    ai_sdk_chat.py    AI SDK data-stream protocol bridge
+    mcp.py            MultiServerMCPClient (store-first, streamable_http / stdio)
+    resources.py      skills + MCP tool server CRUD on the durable store
+    searxng.py        web_search tool (toggleable client + tool factory)
+  util/
+    date.py           time helpers (now_iso)
+tests/            offline pytest suite (scripted model, no API key)
+scripts/          live E2E + MCP test server helpers
+```
+
+Rules:
+
+- **New endpoint** → add a router module in `api/v1/endpoints/` and include it
+  in `api/v1/routes.py`. Don't invent new router folders.
+- **New schema** → `schema/<domain>_schema.py` (Pydantic v2, `Field(...)`
+  constraints). One module per domain, not one big `schemas.py`.
+- **New business logic** → `services/`; keep routers thin (validate + call
+  service + respond). No repository layer: persistence is the LangGraph
+  checkpointer/store singleton in `core/database.py`.
+- The SSE event contract in `app/main.py`'s module docstring is **normative** —
+  keep it in sync with `services/chat.py`.
+- Cross-module imports use explicit module paths (e.g.
+  `from app.services import resources`), never `import *`.
+- Never import from the repo root — only from `src/app/` (editable install).
+
 ## Code style
 
 - **Ruff is the only linter/formatter.** Config in `pyproject.toml` — line-length
   100, target py3.12. No blanket `noqa`; fix the code instead.
 - Type hints on all public functions; `from __future__ import annotations` for
-  forward references. Prefer dataclasses/pydantic models over ad-hoc dicts.
-- **Async-first** — never block the event loop in request paths.
-- Concise Google-style docstrings; the SSE event contract in `app/main.py`'s
-  module docstring is normative — keep it in sync.
+  forward references. Prefer pydantic models over ad-hoc dicts.
+- Concise Google-style docstrings.
 
-## Structure
+## Async rules
 
-- **src layout**: package in `src/app/` (installed editable via `uv sync`) —
-  never import from the repo root.
-- `main.py` thin app factory; routes in `api/` (`routes_auth`, `routes_chat`,
-  `routes_agent`, `routes_health`); business logic in `services/` (`agent`,
-  `chat`, `mcp`, `searxng`, `resources`); settings/constants in `core/`;
-  `db.py` persistence, `schemas.py` API models, `exceptions.py` HTTP errors.
-- New routes: add an `APIRouter` in `api/` (or a new `routes_*.py` module)
-  and include it in `api/__init__.py`.
-- Offline tests in `tests/`; live helpers in `scripts/`.
+- `async def` for awaitable I/O; plain `def` for blocking I/O (FastAPI runs it
+  in a threadpool); `await run_in_threadpool(...)` for a sync call inside an
+  async route.
+- Never call blocking code (`time.sleep`, `requests.get`, sync DB drivers,
+  `open()`) inside `async def` — it freezes the event loop.
+- Dependencies and routes: prefer `async def` unless the body is blocking.
+
+## Dependencies & schemas
+
+- Use `Annotated[T, Depends(...)]` for new route dependencies (modern FastAPI
+  form). Existing legacy `= Depends(...)` defaults are tolerated.
+- `Depends` is cached per request — reuse dependencies instead of re-querying.
+- Validate inside dependencies (load + validate + return), not in the route
+  body.
+- Pydantic v2 only: no `json_encoders` (use `@field_serializer`), no `.dict()`.
 
 ## Testing
 
 - `uv run pytest -q` must be green before every commit.
-- Offline tests: no network, no API keys, no Postgres.
+- Offline tests: no network, no API keys, no Postgres (in-memory checkpointer
+  + store). Use `httpx.AsyncClient` + `ASGITransport`, never
+  `async_asgi_testclient`.
+- Override auth in tests with `app.dependency_overrides`, not monkeypatching.
 - Changes to the agent pipeline (streaming, middleware, persistence) → extend
   `tests/test_smoke.py` with a scripted-model test.
 

@@ -26,8 +26,9 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field
 
-from app import auth, db
 from app.core.config import settings
+from app.core.database import persistence
+from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent
 from app.services.chat import agent_stream
@@ -46,9 +47,9 @@ pytestmark = pytest.mark.filterwarnings(
 async def memory_persistence():
     """Force in-memory checkpointer/store and start the app singleton."""
     settings.database_uri = None
-    await db.persistence.start()
-    yield db.persistence
-    await db.persistence.stop()
+    await persistence.start()
+    yield persistence
+    await persistence.stop()
 
 
 @tool
@@ -200,7 +201,7 @@ async def test_interrupt_and_resume(memory_persistence):
 
 
 async def test_ai_sdk_extract_user_message():
-    from app.ai_sdk_chat import extract_user_message
+    from app.services.ai_sdk_chat import extract_user_message
 
     # parts format (what useChat sends)
     parts = [
@@ -281,7 +282,7 @@ async def test_http_end_to_end(memory_persistence):
         app.state.agent = build_scripted_agent(
             memory_persistence.checkpointer, memory_persistence.store
         )
-        token = auth.create_access_token(data={"sub": "tester"})
+        token = create_access_token(data={"sub": "tester"})
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"

@@ -265,28 +265,41 @@ curl -X POST http://127.0.0.1:8000/agent/tools/reconnect -H "$AUTH"      # apply
 
 ## Code layout
 
+Follows the [fastapi-clean-architecture](https://github.com/jujumilk3/fastapi-clean-architecture)
+template: versioned endpoints under `api/`, core infrastructure, per-domain
+schema modules, and a service layer.
+
 ```
 src/app/          package (src layout, installed editable by uv sync)
   main.py         thin FastAPI factory: lifespan (agent startup), CORS, routers
-  api/            routers + shared deps (production-template style)
-    routes_auth.py    /login, /users/me
-    routes_chat.py    /chat (SSE), /api/chat (AI SDK), /threads
-    routes_agent.py   /agent/skills + /agent/tools CRUD, reconnect
-    routes_health.py  /health
-    deps.py           get_current_user
-  core/           config.py (settings) + constants.py (namespaces, SSE headers)
-  services/       business logic (per best-practices guide)
+  api/v1/
+    routes.py         router aggregation for API v1
+    endpoints/        one router per domain
+      auth.py             /login, /users/me
+      chat.py             /chat (SSE), /api/chat (AI SDK), /threads
+      agent.py            /agent/skills + /agent/tools CRUD, reconnect
+      health.py           /health
+  core/           cross-cutting infrastructure
+    config.py         settings (env-driven, sectioned)
+    constants.py      store namespaces, SSE headers, default system prompt
+    database.py       Postgres checkpointer + store (in-memory fallback)
+    dependencies.py   get_current_user
+    security.py       bcrypt + JWT
+    exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)
+    fake_users.py     demo user store (stand-in for a real DB)
+  schema/         per-domain API models
+    auth_schema.py    Token, TokenData, User, UserInDB
+    chat_schema.py    ChatRequest, ThreadOut, AiSdkChatRequest, ResumeRequest
+    agent_schema.py   SkillIn/Out, ToolServerIn/Out
+  services/       business logic
     agent.py      create_deep_agent factory + shared durable backend
     chat.py       agent streaming -> normalized SSE events (normative contract)
+    ai_sdk_chat.py  AI SDK data-stream protocol bridge
     searxng.py    web_search tool (toggleable client + tool factory)
     mcp.py        MultiServerMCPClient (store-first, streamable_http / stdio)
     resources.py  skills + MCP tool server CRUD on the durable store
-  db.py           Postgres checkpointer + store (in-memory fallback)
-  auth.py         bcrypt + JWT
-  exceptions.py   HTTP exception hierarchy (NotFound, Conflict, ...)
-  schemas.py      API models
-  ai_sdk_chat.py  AI SDK data-stream protocol bridge
-  utils.py        shared helpers (now_iso)
+  util/
+    date.py       time helpers (now_iso)
 tests/            offline pytest suite (scripted model, no API key): uv run pytest -q
 scripts/
   live_test.py       live E2E against a running server + real model

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from ..core.config import settings
-from ..db import persistence
-from ..services import resources
-from ..services.mcp import mcp_servers
+from ....core.config import settings
+from ....core.database import persistence
+from ....services import resources
+from ....services.mcp import mcp_servers
 
 router = APIRouter(tags=["health"])
 

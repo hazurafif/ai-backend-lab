@@ -156,11 +156,11 @@ async def test_execute_timeout_cap_enforced(monkeypatch):
 
 
 async def test_health_reports_execute():
-    from app import db
     from app.core import config as app_config
+    from app.core.database import persistence
 
     app_config.settings.database_uri = None
-    await db.persistence.start()
+    await persistence.start()
     try:
         app = create_app(agent=build_execute_agent())
         async with httpx.AsyncClient(
@@ -172,4 +172,4 @@ async def test_health_reports_execute():
             assert body["enabled"] is config.settings.execute_enabled
             assert body["max_timeout"] == config.settings.execute_max_timeout
     finally:
-        await db.persistence.stop()
+        await persistence.stop()

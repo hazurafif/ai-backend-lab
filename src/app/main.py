@@ -1,8 +1,8 @@
 """AI Backend API: Deep Agents harness behind a streaming (SSE) chat endpoint.
 
-Thin app factory — routers live in `app/api/` (auth, chat, agent resources,
-health), business logic in `app/services/`. The SSE event contract below is
-normative — keep it in sync with `app/services/chat.py`.
+Thin app factory — routers live in `app/api/v1/endpoints/` (auth, chat, agent
+resources, health), business logic in `app/services/`. The SSE event contract
+below is normative — keep it in sync with `app/services/chat.py`.
 
 Endpoints:
   POST /chat                      -> SSE stream of agent events
@@ -37,9 +37,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.graph.state import CompiledStateGraph
 
-from .api import api_router
+from .api.v1.routes import api_router
 from .core.config import settings
-from .db import persistence
+from .core.database import persistence
 from .services.agent import build_agent, build_backend
 from .services.mcp import mcp_servers
 from .services.searxng import build_search_tool

@@ -27,9 +27,9 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
-from app import auth, db
-from app.core import config
+from app.core import config, database
 from app.core.constants import GLOBAL_SKILLS_NS
+from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent, build_backend
 from app.services.chat import agent_stream
@@ -79,13 +79,13 @@ def scripted_model() -> Scripted:
 @pytest_asyncio.fixture
 async def persistence():
     config.settings.database_uri = None
-    await db.persistence.start()
-    yield db.persistence
-    await db.persistence.stop()
+    await database.persistence.start()
+    yield database.persistence
+    await database.persistence.stop()
 
 
 async def client_for(app) -> httpx.AsyncClient:
-    token = auth.create_access_token(data={"sub": "tester"})
+    token = create_access_token(data={"sub": "tester"})
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
@@ -166,7 +166,7 @@ async def test_skill_crud(persistence):
 
 async def test_skill_file_visible_to_backend(persistence):
     """Skills written via the API land in the shared backend (/skills/ route)."""
-    from app.schemas import SkillIn
+    from app.schema.agent_schema import SkillIn
     from app.services.resources import create_skill
 
     backend = build_backend(store=persistence.store)

@@ -5,11 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from langgraph.graph.state import CompiledStateGraph
 
-from .. import ai_sdk_chat, auth, schemas
-from ..db import persistence
-from ..services.chat import _serialize_message, agent_stream, sse_response
-from ..services.searxng import set_search_enabled
-from .deps import get_current_user
+from ....core.database import persistence
+from ....core.dependencies import get_current_user
+from ....core.security import decode_access_token
+from ....schema.chat_schema import AiSdkChatRequest, ChatRequest, ResumeRequest, ThreadOut
+from ....services import ai_sdk_chat
+from ....services.chat import _serialize_message, agent_stream, sse_response
+from ....services.searxng import set_search_enabled
 
 router = APIRouter(tags=["chat"])
 
@@ -17,7 +19,7 @@ router = APIRouter(tags=["chat"])
 @router.post("/chat")
 async def chat(
     request: Request,
-    body: schemas.ChatRequest,
+    body: ChatRequest,
     current_user: dict = Depends(get_current_user),
 ):
     agent: CompiledStateGraph = request.app.state.agent
@@ -32,7 +34,7 @@ async def chat(
 @router.post("/api/chat")
 async def ai_sdk_chat_endpoint(
     request: Request,
-    body: schemas.AiSdkChatRequest,
+    body: AiSdkChatRequest,
 ):
     """AI SDK data-stream endpoint for the frontend (useChat).
 
@@ -52,7 +54,7 @@ async def ai_sdk_chat_endpoint(
     username = "guest"
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.lower().startswith("bearer "):
-        token_data = auth.decode_access_token(auth_header[7:])
+        token_data = decode_access_token(auth_header[7:])
         if token_data is not None and token_data.username:
             username = token_data.username
 
@@ -64,7 +66,7 @@ async def ai_sdk_chat_endpoint(
 async def resume_thread(
     request: Request,
     thread_id: str,
-    body: schemas.ResumeRequest,
+    body: ResumeRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Resume a run paused on a human-in-the-loop interrupt."""
@@ -92,10 +94,10 @@ async def resume_thread(
     )
 
 
-@router.get("/threads", response_model=list[schemas.ThreadOut])
+@router.get("/threads", response_model=list[ThreadOut])
 async def list_threads(current_user: dict = Depends(get_current_user)):
     items = await persistence.store.asearch(("threads", current_user["username"]))
-    threads = [schemas.ThreadOut(thread_id=it.key, **it.value) for it in items]
+    threads = [ThreadOut(thread_id=it.key, **it.value) for it in items]
     threads.sort(key=lambda t: t.updated_at or t.created_at, reverse=True)
     return threads
 

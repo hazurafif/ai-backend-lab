@@ -18,7 +18,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph.types import Checkpointer
 
-from .core.config import settings
+from .config import settings
 
 logger = logging.getLogger(__name__)
 

@@ -1,10 +1,11 @@
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import InvalidTokenError
 
-from .core.config import settings
-from .schemas import TokenData
+from ..core.config import settings
+from ..schema.auth_schema import TokenData
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -36,5 +37,5 @@ def decode_access_token(token: str) -> TokenData | None:
         if username is None:
             return None
         return TokenData(username=username)
-    except JWTError:
+    except InvalidTokenError:
         return None
