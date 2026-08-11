@@ -1,0 +1,21 @@
+{
+  "weather": {
+    "url": "http://localhost:8090/mcp",
+    "transport": "streamable_http",
+    "headers": {
+      "Authorization": "Bearer your-gofastmcp-token"
+    }
+  },
+  "docs-search": {
+    "url": "https://docs.langchain.com/mcp",
+    "transport": "streamable_http"
+  },
+  "local-cli": {
+    "command": "/path/to/gofastmcp-tool",
+    "args": ["serve"],
+    "transport": "stdio",
+    "env": {
+      "MY_TOOL_API_KEY": "xxx"
+    }
+  }
+}

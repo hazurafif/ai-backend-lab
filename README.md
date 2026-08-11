@@ -1,2 +1,164 @@
-# be-aio-ai
-be for learning ai apps
+# AI Backend — Deep Agents + Postgres + MCP (gofastmcp)
+
+A FastAPI backend wrapping **LangChain Deep Agents** as the core agent:
+
+- **Agent**: [`deepagents`](https://github.com/langchain-ai/deepagents) — planning,
+  subagents (`task` tool), virtual filesystem, context management, skills & memory.
+- **Persistence**: Postgres via `langgraph-checkpoint-postgres` —
+  `AsyncPostgresSaver` (conversations) + `AsyncPostgresStore` (long-term memory,
+  thread metadata). Falls back to in-memory when `DATABASE_URI` is unset.
+- **MCP**: connects to MCP servers (e.g. built with **gofastmcp**) over
+  `streamable_http` or `stdio` via `langchain-mcp-adapters`. MCP tool outputs are
+  streamed to the frontend as structured events — ready to render as interactive
+  UI elements (cards, charts, forms) later.
+- **Streaming**: `POST /chat` returns a Server-Sent Events (SSE) stream with typed
+  events (message deltas, tool calls, subagents, final state).
+- **Auth**: JWT login (`/login`), protected chat/thread endpoints.
+
+## Quickstart
+
+```bash
+uv sync
+cp .env.example .env      # set DEEPAGENTS_MODEL + key; DATABASE_URI for Postgres
+uv run uvicorn app.main:app --port 8000 --reload
+```
+
+Dev tooling (see `AGENTS.md` for full conventions):
+
+```bash
+uv run pytest -q                    # offline tests (no API key needed)
+uv run ruff check . && uv run ruff format .
+uv run pre-commit install           # ruff + conventional-commits hooks
+```
+
+> A `.env` already exists locally with `OPENAI_BASE_URL=https://opencode.ai/zen/go/v1`
+> and `DEEPAGENTS_MODEL=openai:deepseek-v4-flash` for testing. `.env` is gitignored.
+
+Health check: `curl http://127.0.0.1:8000/health`
+
+## Model configuration
+
+`DEEPAGENTS_MODEL` accepts any `provider:model` string understood by
+[`init_chat_model`](https://docs.langchain.com/oss/python/langchain/models)
+(`openai:...`, `anthropic:...`, `google_genai:...`, ...). For a custom
+OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
+(langchain-openai reads them) — e.g. the opencode.ai zen gateway.
+
+## API
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `POST /login` | – | OAuth2 form `username`/`password` → JWT |
+| `POST /chat` | Bearer | Run the agent; **SSE stream** of events |
+| `GET /threads` | Bearer | Conversations of the current user (newest first) |
+| `GET /threads/{id}/messages` | Bearer | Full history of a thread |
+| `GET /users/me` | Bearer | Current user |
+| `GET /health` | – | Status: persistence backend, MCP servers, model |
+
+### Chat
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/login \
+  -d "username=johndoe&password=secret" | jq -r .access_token)
+
+curl -N -X POST http://127.0.0.1:8000/chat \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"message": "What is in my workspace?", "thread_id": null}'
+```
+
+- Omit `thread_id` (or pass `null`) to start a new conversation; the new id is
+  returned in the final `done` event.
+- Pass an existing `thread_id` to continue a conversation (Postgres checkpointing).
+
+### SSE events
+
+```
+event: message_delta   {"id","delta"}                        token chunk
+event: message         {"id","message"}                      finalized message (langchain schema)
+event: tool_start      {"id","name","args"}                  tool call began
+event: tool_delta      {"id","name","delta"}                 tool output chunk
+event: tool_end        {"id","name","output","is_error"}     tool finished (output = ToolMessage)
+event: subagent        {"name","status","output"?,"error"?}  delegated task lifecycle
+event: subagent_delta  {"subagent","delta"}                  subagent token chunk
+event: error           {"source","message"}                  recoverable error
+event: done            {"thread_id","messages"[]}            final state
+```
+
+Frontend plan: `message_delta` renders the streaming bubble; `tool_*` events can
+render tool-call chips and, later, interactive components from MCP structured
+content (`tool_end.output.content` may contain multiple blocks); `subagent_*`
+events render delegation cards; `done.messages` is the source of truth to
+persist client-side.
+
+## MCP servers (gofastmcp)
+
+Server config comes from `MCP_SERVERS_JSON` (env) or `mcp_servers.json` (see
+`mcp_servers.json.example`):
+
+```json
+{
+  "weather": {
+    "url": "http://localhost:8090/mcp",
+    "transport": "streamable_http",
+    "headers": {"Authorization": "Bearer xxx"}
+  },
+  "local-cli": {
+    "command": "/path/to/gofastmcp-tool",
+    "args": ["serve"],
+    "transport": "stdio",
+    "env": {"FOO": "bar"}
+  }
+}
+```
+
+- `streamable_http` — for gofastmcp servers deployed as web services
+  (the recommended production transport; SSE transport also exists in gofastmcp).
+- `stdio` — for gofastmcp binaries run as subprocesses.
+- Tools are fetched at startup and merged into the agent alongside the built-in
+  filesystem/subagent tools. Anything an MCP tool returns (text, structured
+  content, multimodal blocks) is serialized into `tool_end` events.
+
+Quick local MCP test (protocol-identical to a gofastmcp server):
+
+```bash
+uv run python scripts/test_mcp_server.py   # exposes get_weather/list_cities at :8090/mcp
+MCP_SERVERS_JSON='{"weather-demo":{"url":"http://127.0.0.1:8090/mcp","transport":"streamable_http"}}' \
+  uv run uvicorn app.main:app --port 8000
+# GET /health -> mcp_servers: ["weather-demo"]; ask the agent about the weather in Jakarta
+```
+
+## Postgres
+
+Start Postgres, then set `DATABASE_URI`:
+
+```bash
+docker compose up -d postgres        # or: brew install postgresql@16 && brew services start postgresql@16
+# export DATABASE_URI=postgresql+psycopg://aibackend:aibackend@localhost:5432/aibackend
+```
+
+Tables are created automatically at startup (`setup()`). Without `DATABASE_URI`
+the app runs on in-memory checkpointer + store (data lost on restart).
+
+- **Threads** live in the checkpointer; thread metadata (title, timestamps) in the
+  store under namespace `("threads", <username>)` → per-user listing.
+- **Memory**: the agent's `/memories/` filesystem path is routed to the store
+  (`StoreBackend`), scoped per user, so agent memory survives across threads.
+
+## Code layout
+
+```
+src/app/          package (src layout, installed editable by uv sync)
+  main.py         FastAPI app + SSE streaming (event normalization)
+  agent.py        create_deep_agent factory (persistence, MCP tools, memory backend)
+  db.py           Postgres checkpointer + store (in-memory fallback)
+  mcp_client.py   MultiServerMCPClient from config (streamable_http / stdio)
+  config.py       settings from .env
+  auth.py         bcrypt + JWT
+  schemas.py      API models
+tests/            offline pytest suite (scripted model, no API key): uv run pytest -q
+scripts/
+  live_test.py       live E2E against a running server + real model
+  test_mcp_server.py tiny MCP server (streamable HTTP) to test MCP wiring
+```
+
+Conventions live in `AGENTS.md` (ruff, git workflow, structure).
