@@ -1,7 +1,11 @@
+"""Shared API dependencies (auth)."""
+
+from __future__ import annotations
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
-from . import auth
+from .. import auth
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 

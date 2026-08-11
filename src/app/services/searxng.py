@@ -25,7 +25,7 @@ import httpx
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
-from .config import settings
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 

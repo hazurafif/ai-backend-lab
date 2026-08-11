@@ -23,9 +23,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field
 
-from app import config
-from app.agent import build_agent
-from app.main import _agent_stream, create_app
+from app.core import config
+from app.main import create_app
+from app.services.agent import build_agent
+from app.services.chat import agent_stream
 
 pytestmark = pytest.mark.filterwarnings(
     r"ignore:The v3 streaming protocol on Pregel is experimental."
@@ -93,7 +94,7 @@ def parse_sse_chunk(chunk: str) -> tuple[str, dict]:
 
 async def collect_stream(agent, username, **kwargs) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
-    async for chunk in _agent_stream(agent, username, **kwargs):
+    async for chunk in agent_stream(agent, username, **kwargs):
         events.append(parse_sse_chunk(chunk))
     return events
 
@@ -155,8 +156,8 @@ async def test_execute_timeout_cap_enforced(monkeypatch):
 
 
 async def test_health_reports_execute():
-    from app import config as app_config
     from app import db
+    from app.core import config as app_config
 
     app_config.settings.database_uri = None
     await db.persistence.start()

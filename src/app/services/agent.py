@@ -33,16 +33,10 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
-from .config import settings
+from ..core.config import settings
+from ..core.constants import GLOBAL_SKILLS_NS, SKILLS_SOURCE
 
 logger = logging.getLogger(__name__)
-
-# Backend source where store-backed skills live (SkillsMiddleware source path).
-SKILLS_SOURCE = "/skills/"
-
-# Store namespace for agent-level (global, shared by all users) resources.
-GLOBAL_SKILLS_NS = ("agent", "skills")
-TOOL_SERVERS_NS = ("agent", "mcp_servers")
 
 
 def _user_namespace_factory(rt: Any) -> tuple[str, ...]:

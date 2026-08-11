@@ -6,7 +6,7 @@ chunks (``start``, ``text-start``/``text-delta``/``text-end``, ``custom``,
 ``error``, ``finish``), terminated by ``data: [DONE]``.
 
 This module bridges that protocol to the agent's normalized SSE events
-(``_agent_stream`` in ``main.py``) and extracts the user prompt from the AI
+(``agent_stream`` in ``app/services/chat.py``) and extracts the user prompt from the AI
 SDK request body. Endpoint: ``POST /api/chat``.
 """
 
@@ -63,13 +63,11 @@ async def sdk_stream(
 ) -> AsyncIterator[str]:
     """Translate agent SSE events into AI SDK data-stream chunks.
 
-    ``events`` is the SSE chunk generator produced by ``_agent_stream``.
+    ``events`` is the SSE chunk generator produced by ``agent_stream``.
     Yields an SSE stream of ``data:`` JSON chunks that ``useChat``
-    understands: ``start`` -> ``text-*`` (+ optional ``custom`` tool/subagent
-    chunks) -> ``finish``, then ``[DONE]``.
-
-    Tool calls and subagent activity are forwarded as ``custom`` chunks so the
-    UI can render them later; text deltas carry the answer.
+    understands: ``start`` -> ``text-*`` + native ``tool-input-*``/
+    ``tool-output-*`` chunks (typed ``tool-<name>`` UI parts) + optional
+    ``custom`` subagent chunks -> ``finish``, then ``[DONE]``.
     """
     response_id = f"resp-{uuid.uuid4().hex[:12]}"
     started_text: set[str] = set()
@@ -91,37 +89,59 @@ async def sdk_stream(
             if ms_id in started_text:
                 yield _chunk({"type": "text-end", "id": ms_id})
         elif name == "tool_start":
-            yield _chunk(
-                {
-                    "type": "custom",
-                    "kind": "tool-start",
-                    "providerMetadata": {
-                        "id": data.get("id"),
-                        "name": data.get("name"),
-                        "args": data.get("args"),
-                    },
-                }
-            )
+            # Native AI SDK tool chunks -> typed `tool-<name>` UI parts.
+            tool_id = data.get("id")
+            tool_name = data.get("name")
+            args = data.get("args") or {}
+            if tool_id is not None and tool_name is not None:
+                yield _chunk(
+                    {"type": "tool-input-start", "toolCallId": tool_id, "toolName": tool_name}
+                )
+                yield _chunk(
+                    {
+                        "type": "tool-input-delta",
+                        "toolCallId": tool_id,
+                        "inputTextDelta": json.dumps(args, ensure_ascii=False, default=str),
+                    }
+                )
+                yield _chunk(
+                    {
+                        "type": "tool-input-available",
+                        "toolCallId": tool_id,
+                        "toolName": tool_name,
+                        "input": args,
+                    }
+                )
         elif name == "tool_end":
-            yield _chunk(
-                {
-                    "type": "custom",
-                    "kind": "tool-end",
-                    "providerMetadata": {
-                        "id": data.get("id"),
-                        "name": data.get("name"),
-                        "is_error": data.get("is_error"),
-                    },
-                }
-            )
+            tool_id = data.get("id")
+            if tool_id is not None:
+                if data.get("is_error"):
+                    yield _chunk(
+                        {
+                            "type": "tool-output-error",
+                            "toolCallId": tool_id,
+                            "errorText": str(
+                                data.get("error") or data.get("output") or "Tool failed"
+                            ),
+                        }
+                    )
+                else:
+                    yield _chunk(
+                        {
+                            "type": "tool-output-available",
+                            "toolCallId": tool_id,
+                            "output": data.get("output"),
+                        }
+                    )
         elif name == "subagent":
             yield _chunk(
                 {
                     "type": "custom",
-                    "kind": "subagent",
+                    "kind": "app.subagent",
                     "providerMetadata": {
                         "name": data.get("name"),
                         "status": data.get("status"),
+                        "error": data.get("error"),
                     },
                 }
             )

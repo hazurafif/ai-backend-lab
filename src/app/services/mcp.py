@@ -38,8 +38,8 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.store.base import BaseStore
 
-from .agent_resources import load_tool_server_configs
-from .config import settings
+from ..core.config import settings
+from .resources import load_tool_server_configs
 
 logger = logging.getLogger(__name__)
 

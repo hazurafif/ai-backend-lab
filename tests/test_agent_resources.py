@@ -27,9 +27,12 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
-from app import auth, config, db
-from app.agent import GLOBAL_SKILLS_NS, build_agent, build_backend
-from app.main import _agent_stream, create_app
+from app import auth, db
+from app.core import config
+from app.core.constants import GLOBAL_SKILLS_NS
+from app.main import create_app
+from app.services.agent import build_agent, build_backend
+from app.services.chat import agent_stream
 
 pytestmark = pytest.mark.filterwarnings(
     r"ignore:The v3 streaming protocol on Pregel is experimental."
@@ -163,8 +166,8 @@ async def test_skill_crud(persistence):
 
 async def test_skill_file_visible_to_backend(persistence):
     """Skills written via the API land in the shared backend (/skills/ route)."""
-    from app.agent_resources import create_skill
     from app.schemas import SkillIn
+    from app.services.resources import create_skill
 
     backend = build_backend(store=persistence.store)
     await create_skill(
@@ -184,7 +187,7 @@ async def test_skill_file_visible_to_backend(persistence):
         system_prompt="test",
     )
     events: list[tuple[str, dict]] = []
-    async for chunk in _agent_stream(agent, "tester", message="hi"):
+    async for chunk in agent_stream(agent, "tester", message="hi"):
         events.append(parse_sse_chunk(chunk))
     assert any(e == "done" for e, _ in events), events
 
@@ -242,7 +245,7 @@ async def test_tool_server_crud_and_store_first_config(persistence):
         assert r.status_code == 204
 
     # config loading: store wins over env/file; disabled entries skipped
-    from app.agent_resources import load_tool_server_configs
+    from app.services.resources import load_tool_server_configs
 
     cfg = await load_tool_server_configs(persistence.store)
     assert list(cfg) == ["cli-tool"], cfg

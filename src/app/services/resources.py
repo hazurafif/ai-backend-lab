@@ -21,9 +21,9 @@ from datetime import UTC, datetime
 
 from langgraph.store.base import BaseStore
 
-from .agent import SKILLS_SOURCE, TOOL_SERVERS_NS
-from .config import settings
-from .schemas import SkillIn, SkillOut, ToolServerIn, ToolServerOut
+from ..core.config import settings
+from ..core.constants import SKILLS_SOURCE, TOOL_SERVERS_NS
+from ..schemas import SkillIn, SkillOut, ToolServerIn, ToolServerOut
 
 SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 """Agent Skills spec: lowercase alphanumeric + hyphens, no edges/doubles."""

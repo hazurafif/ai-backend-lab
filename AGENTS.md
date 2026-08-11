@@ -27,10 +27,12 @@ uv run python scripts/live_test.py          # live E2E (needs running server + k
 
 - **src layout**: package in `src/app/` (installed editable via `uv sync`) —
   never import from the repo root.
-- `main.py` routes + SSE, `agent.py` agent factory, `db.py` persistence,
-  `mcp_client.py` MCP servers, `searxng.py` web search, `config.py` env settings,
-  `auth.py` JWT, `schemas.py` API models.
-- Routes stay in `main.py` until ~10 endpoints, then split into `src/app/api/`.
+- `main.py` thin app factory; routes in `api/` (`routes_auth`, `routes_chat`,
+  `routes_agent`, `routes_health`); business logic in `services/` (`agent`,
+  `chat`, `mcp`, `searxng`, `resources`); settings/constants in `core/`;
+  `db.py` persistence, `schemas.py` API models, `exceptions.py` HTTP errors.
+- New routes: add an `APIRouter` in `api/` (or a new `routes_*.py` module)
+  and include it in `api/__init__.py`.
 - Offline tests in `tests/`; live helpers in `scripts/`.
 
 ## Testing

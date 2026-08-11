@@ -1,4 +1,10 @@
-"""Application settings loaded from environment variables."""
+"""Application settings loaded from environment variables.
+
+Follows the production-template pattern: a module-level `settings` singleton
+consumed everywhere (no scattered `os.environ` reads). Values come from the
+`.env` file (or the process environment), prefixed per section in the
+variable names themselves.
+"""
 
 from __future__ import annotations
 
@@ -9,21 +15,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from .constants import DEFAULT_SYSTEM_PROMPT
+
 # Load .env (OPENAI_API_KEY, OPENAI_BASE_URL, DEEPAGENTS_MODEL, ...) if present.
 load_dotenv()
-
-DEFAULT_SYSTEM_PROMPT = """\
-You are a helpful AI assistant running inside a backend service.
-You can:
-- plan multi-step work and delegate subtasks to subagents (use the `task` tool)
-- read/write/edit files in your workspace
-- use MCP tools exposed by connected servers (they may return structured data
-  that the frontend renders as interactive UI elements)
-- remember things across conversations in your memory files
-
-Be concise and direct. When you call tools, explain what you are doing in one
-short line so the user can follow along in the live stream.
-"""
 
 
 def _load_json_env(name: str, default: Any) -> Any:
@@ -63,6 +58,7 @@ class Settings:
     # JSON string with server configs, or a path to a JSON file. Example:
     # {"weather": {"url": "http://localhost:8090/mcp", "transport": "streamable_http"},
     #  "cli-tool": {"command": "gofastmcp-tool", "args": ["serve"], "transport": "stdio"}}
+    # Used only when the store has no tool servers (see services/resources.py).
     mcp_servers_json: str | None = field(
         default_factory=lambda: os.environ.get("MCP_SERVERS_JSON") or None
     )
@@ -90,7 +86,7 @@ class Settings:
     # LocalShellBackend so the built-in `execute` tool runs host shell
     # commands (unrestricted — dev/trusted environments only).
     # Tool-level permissions for execute are not supported upstream; pair it
-    # with INTERRUPT_ON_JSON={"execute": true} for human approval.
+    # with INTERRUPT_ON_JSON={\"execute\": true} for human approval.
     execute_enabled: bool = field(
         default_factory=lambda: os.environ.get("EXECUTE_ENABLED", "false").lower() == "true"
     )

@@ -267,15 +267,26 @@ curl -X POST http://127.0.0.1:8000/agent/tools/reconnect -H "$AUTH"      # apply
 
 ```
 src/app/          package (src layout, installed editable by uv sync)
-  main.py         FastAPI app + SSE streaming (event normalization)
-  agent.py        create_deep_agent factory (persistence, MCP tools, memory backend)
+  main.py         thin FastAPI factory: lifespan (agent startup), CORS, routers
+  api/            routers + shared deps (production-template style)
+    routes_auth.py    /login, /users/me
+    routes_chat.py    /chat (SSE), /api/chat (AI SDK), /threads
+    routes_agent.py   /agent/skills + /agent/tools CRUD, reconnect
+    routes_health.py  /health
+    deps.py           get_current_user
+  core/           config.py (settings) + constants.py (namespaces, SSE headers)
+  services/       business logic (per best-practices guide)
+    agent.py      create_deep_agent factory + shared durable backend
+    chat.py       agent streaming -> normalized SSE events (normative contract)
+    searxng.py    web_search tool (toggleable client + tool factory)
+    mcp.py        MultiServerMCPClient (store-first, streamable_http / stdio)
+    resources.py  skills + MCP tool server CRUD on the durable store
   db.py           Postgres checkpointer + store (in-memory fallback)
-  mcp_client.py   MultiServerMCPClient from config (store-first, streamable_http / stdio)
-  searxng.py      SearXNG web_search tool (toggleable client + tool factory)
-  agent_resources.py  skills + MCP tool server CRUD on the durable store
-  config.py       settings from .env
   auth.py         bcrypt + JWT
+  exceptions.py   HTTP exception hierarchy (NotFound, Conflict, ...)
   schemas.py      API models
+  ai_sdk_chat.py  AI SDK data-stream protocol bridge
+  utils.py        shared helpers (now_iso)
 tests/            offline pytest suite (scripted model, no API key): uv run pytest -q
 scripts/
   live_test.py       live E2E against a running server + real model

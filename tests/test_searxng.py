@@ -25,10 +25,17 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
-from app import auth, config, db
-from app.agent import build_agent
-from app.main import _agent_stream, create_app
-from app.searxng import SearxngClient, build_search_tool, search_allowed, set_search_enabled
+from app import auth, db
+from app.core import config
+from app.main import create_app
+from app.services.agent import build_agent
+from app.services.chat import agent_stream
+from app.services.searxng import (
+    SearxngClient,
+    build_search_tool,
+    search_allowed,
+    set_search_enabled,
+)
 
 pytestmark = pytest.mark.filterwarnings(
     r"ignore:The v3 streaming protocol on Pregel is experimental."
@@ -149,7 +156,7 @@ def parse_sse_chunk(chunk: str) -> tuple[str, dict]:
 
 async def collect_stream(agent, username, **kwargs) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
-    async for chunk in _agent_stream(agent, username, **kwargs):
+    async for chunk in agent_stream(agent, username, **kwargs):
         events.append(parse_sse_chunk(chunk))
     return events
 

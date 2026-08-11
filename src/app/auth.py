@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import bcrypt
 from jose import JWTError, jwt
 
-from .config import settings
+from .core.config import settings
 from .schemas import TokenData
 
 ALGORITHM = "HS256"

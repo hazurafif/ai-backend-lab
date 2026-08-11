@@ -27,9 +27,10 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import Field
 
 from app import auth, db
-from app.agent import build_agent
-from app.config import settings
-from app.main import _agent_stream, create_app
+from app.core.config import settings
+from app.main import create_app
+from app.services.agent import build_agent
+from app.services.chat import agent_stream
 
 pytestmark = pytest.mark.filterwarnings(
     r"ignore:The v3 streaming protocol on Pregel is experimental."
@@ -127,7 +128,7 @@ def parse_sdk_data_lines(text: str) -> list[dict]:
 
 async def collect_stream(agent, username, **kwargs) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
-    async for chunk in _agent_stream(agent, username, **kwargs):
+    async for chunk in agent_stream(agent, username, **kwargs):
         events.append(parse_sse_chunk(chunk))
     return events
 
@@ -252,12 +253,15 @@ async def test_ai_sdk_chat_endpoint(memory_persistence):
             assert chunks[-1]["finishReason"] == "stop"
             assert "data: [DONE]" in r.text
 
-            # tool activity surfaces as custom chunks (echo tool in scripted agent)
-            custom = [c for c in chunks if c["type"] == "custom"]
-            kinds = [c["kind"] for c in custom]
-            assert "tool-start" in kinds and "tool-end" in kinds, kinds
-            tool_start = next(c for c in custom if c["kind"] == "tool-start")
-            assert tool_start["providerMetadata"]["name"] == "echo"
+            # tool activity surfaces as native AI SDK tool chunks (echo tool in scripted agent)
+            tool_input = [c for c in chunks if c["type"] == "tool-input-start"]
+            assert tool_input, [c["type"] for c in chunks]
+            assert tool_input[0]["toolName"] == "echo"
+            assert any(c["type"] == "tool-input-available" for c in chunks)
+            assert any(c["type"] == "tool-output-available" for c in chunks)
+
+            tool_available = next(c for c in chunks if c["type"] == "tool-input-available")
+            assert tool_available["input"] == {"x": "hello"}, tool_available
 
             # text of the answer is streamed verbatim
             text = "".join(c["delta"] for c in chunks if c["type"] == "text-delta")
