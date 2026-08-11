@@ -119,6 +119,10 @@ Rules:
 ```
 
   Types: `feat fix chore docs style refactor perf test build ci revert`.
+- **Auto-commit**: after implementing a requested change and seeing the suite
+  green, commit it yourself (conventional format above) instead of leaving
+  changes uncommitted for the user. Split into logical commits when the change
+  spans distinct concerns; never commit unrelated files.
 - Before every commit: `ruff check . && ruff format .` → `pytest -q` → `git add`
   only the files belonging to the change.
 - Push your own branch (`git push -u origin <branch>`), open a PR. Never
