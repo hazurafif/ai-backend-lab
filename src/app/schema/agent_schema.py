@@ -7,10 +7,33 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 SKILL_NAME_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
+# Relative skill file paths: segments start with alnum, then [A-Za-z0-9._-].
+# Rejects leading/trailing/double slashes, '..', backslashes and spaces.
+SKILL_FILE_PATH_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+
+
+class SkillFileIn(BaseModel):
+    """A bundled resource file (skill-creator layout: scripts/, references/, assets/...)."""
+
+    path: str = Field(
+        ...,
+        pattern=SKILL_FILE_PATH_PATTERN,
+        max_length=256,
+        description=(
+            "Relative path under the skill root, e.g. 'scripts/init_skill.py' or "
+            "'references/api.md'. Root SKILL.md is reserved (built from "
+            "name/description/content)."
+        ),
+    )
+    content: str = Field(..., description="Raw file content (utf-8)")
+
+
+class SkillFileOut(SkillFileIn):
+    pass
 
 
 class SkillIn(BaseModel):
-    """Create/update payload for an agent skill (stored as SKILL.md)."""
+    """Create/update payload for an agent skill (stored as SKILL.md + bundled files)."""
 
     name: str = Field(
         ...,
@@ -23,6 +46,12 @@ class SkillIn(BaseModel):
     )
     description: str = Field(..., min_length=1, max_length=1024)
     content: str = Field(..., min_length=1, description="Markdown instructions body")
+    files: list[SkillFileIn] = Field(
+        default_factory=list,
+        description=(
+            "Bundled resources: scripts/, references/, assets/, ... (skill-creator layout)"
+        ),
+    )
 
 
 class SkillOut(BaseModel):
@@ -30,6 +59,7 @@ class SkillOut(BaseModel):
     description: str = ""
     content: str
     path: str = ""
+    files: list[SkillFileOut] = Field(default_factory=list)
 
 
 class ToolServerIn(BaseModel):

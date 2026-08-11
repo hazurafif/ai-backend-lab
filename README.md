@@ -61,7 +61,8 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET /threads` | Bearer | Conversations of the current user (newest first) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
-| `GET /agent/skills` + CRUD | Bearer | Manage agent skills (stored as SKILL.md, applied on next run) |
+| `GET /agent/skills` + CRUD | Bearer | Manage agent skills (SKILL.md + bundled files, applied on next run) |
+| `DELETE /agent/skills/{name}/files/{path}` | Bearer | Delete one bundled skill file |
 | `GET /agent/tools` + CRUD | Bearer | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
 | `POST /agent/tools/reconnect` | Bearer | Reconnect MCP servers from the store + rebuild the agent |
 | `GET /users/me` | Bearer | Current user |
@@ -237,9 +238,10 @@ the app runs on in-memory checkpointer + store (data lost on restart).
   With `EXECUTE_ENABLED=true` the default backend becomes `LocalShellBackend`
   (host filesystem + shell) instead.
 - **Skills**: agent-wide skills live under the global `("agent", "skills")`
-  namespace as `/<name>/SKILL.md` files, shared by all users. The agent loads
-  them from the `/skills/` backend source on every run — edits via the API apply
-  without a restart.
+  namespace as `/<name>/SKILL.md` plus optional bundled files (scripts/,
+  references/, assets/...), shared by all users. The agent loads them from the
+  `/skills/` backend source on every run — edits via the API apply without a
+  restart.
 
 ## Agent resources API
 
@@ -247,17 +249,27 @@ Skills and MCP tool servers are managed via CRUD endpoints and persisted in the
 store (Postgres in production). Namespaces: `("agent", "skills")` for skills,
 `("agent", "mcp_servers")` for tool servers.
 
+Skills follow the deepagents **skill-creator layout**: a required `SKILL.md`
+plus optional bundled resources (`scripts/`, `references/`, `assets/`, ... —
+any relative path, so `eval/` works too). Bundled files land under
+`/<name>/<path>` in the store, so the agent's filesystem tools (`ls`, `read`,
+`write`, `execute`) see the whole skill folder. `PUT` replaces the listed
+files and keeps unlisted ones; `DELETE /agent/skills/{name}/files/{path}`
+removes a single file.
+
 ```bash
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/login -d "username=johndoe&password=secret" | jq -r .access_token)
 AUTH="Authorization: Bearer $TOKEN"
 
-# --- skills (SKILL.md format, Agent Skills spec: lowercase name + hyphens) ---
+# --- skills (skill-creator layout: SKILL.md + optional scripts/, references/, assets/) ---
 curl -X POST http://127.0.0.1:8000/agent/skills -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"name":"release-notes","description":"Write concise release notes","content":"## Steps\\n1. git log --oneline\\n2. group by type"}'
+  -d '{"name":"release-notes","description":"Write concise release notes","content":"## Steps\\n1. git log --oneline\\n2. group by type",
+       "files":[{"path":"scripts/release.py","content":"print(\"hi\")"},{"path":"references/style.md","content":"# Style guide"}]}'
 curl http://127.0.0.1:8000/agent/skills -H "$AUTH"                       # list
-curl http://127.0.0.1:8000/agent/skills/release-notes -H "$AUTH"          # get
+curl http://127.0.0.1:8000/agent/skills/release-notes -H "$AUTH"          # get (includes files)
 curl -X PUT  http://127.0.0.1:8000/agent/skills/release-notes -H "$AUTH" -H 'Content-Type: application/json' -d '{...}'
 curl -X DELETE http://127.0.0.1:8000/agent/skills/release-notes -H "$AUTH"
+curl -X DELETE http://127.0.0.1:8000/agent/skills/release-notes/files/scripts/release.py -H "$AUTH"
 
 # --- MCP tool servers (same shape as mcp_servers.json) ---
 curl -X POST http://127.0.0.1:8000/agent/tools -H "$AUTH" -H 'Content-Type: application/json' \

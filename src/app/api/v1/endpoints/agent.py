@@ -6,7 +6,7 @@ run); tool server changes apply on restart or POST /agent/tools/reconnect.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ....core.config import settings
 from ....core.database import persistence
@@ -58,6 +58,15 @@ async def update_skill(name: str, body: SkillIn, _: dict = Depends(get_current_u
 async def delete_skill(name: str, _: dict = Depends(get_current_user)):
     if not await resources.delete_skill(persistence.store, name):
         raise NotFound("Skill not found")
+
+
+@router.delete("/skills/{name}/files/{file_path:path}", status_code=204)
+async def delete_skill_file(name: str, file_path: str, _: dict = Depends(get_current_user)):
+    """Delete one bundled skill file (scripts/, references/, assets/, ...)."""
+    if not resources.SKILL_FILE_PATH_RE.fullmatch(file_path) or file_path.lower() == "skill.md":
+        raise HTTPException(status_code=422, detail="Invalid skill file path")
+    if not await resources.delete_skill_file(persistence.store, name, file_path):
+        raise NotFound("Skill file not found")
 
 
 # ---------------------------------------------------------------------------

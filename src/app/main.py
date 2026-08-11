@@ -12,7 +12,8 @@ Endpoints:
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run
   POST /login                     -> JWT
   GET  /users/me                  -> current user
-  GET  /agent/skills|tools        -> agent resource CRUD (store-backed)
+  GET  /agent/skills|tools        -> agent resource CRUD (store-backed; skills
+                                    include bundled files, e.g. scripts/)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):

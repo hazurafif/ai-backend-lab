@@ -48,7 +48,7 @@ src/app/          package (src layout, installed editable by uv sync)
     chat.py           agent streaming -> normalized SSE events (normative contract)
     ai_sdk_chat.py    AI SDK data-stream protocol bridge
     mcp.py            MultiServerMCPClient (store-first, streamable_http / stdio)
-    resources.py      skills + MCP tool server CRUD on the durable store
+    resources.py      skills (SKILL.md + bundled files) + MCP tool server CRUD on the durable store
     searxng.py        web_search tool (toggleable client + tool factory)
   util/
     date.py           time helpers (now_iso)

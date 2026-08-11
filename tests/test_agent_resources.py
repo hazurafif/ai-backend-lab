@@ -192,6 +192,122 @@ async def test_skill_file_visible_to_backend(persistence):
     assert any(e == "done" for e, _ in events), events
 
 
+async def test_skill_bundled_files_crud(persistence):
+    """Skills support the skill-creator layout: scripts/, references/, assets/..."""
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await client_for(app) as http:
+        # create with bundled files (sorted by path in the response)
+        r = await http.post(
+            "/agent/skills",
+            json={
+                "name": "pdf-tool",
+                "description": "PDF utilities",
+                "content": "## Steps",
+                "files": [
+                    {"path": "scripts/extract.py", "content": "print('extract')"},
+                    {"path": "references/spec.md", "content": "# Spec"},
+                    {"path": "assets/logo.svg", "content": "<svg/>"},
+                ],
+            },
+        )
+        assert r.status_code == 201, r.text
+        assert [f["path"] for f in r.json()["files"]] == [
+            "assets/logo.svg",
+            "references/spec.md",
+            "scripts/extract.py",
+        ]
+
+        # get returns contents; list shows the file tree
+        r = await http.get("/agent/skills/pdf-tool")
+        files = {f["path"]: f["content"] for f in r.json()["files"]}
+        assert files["scripts/extract.py"] == "print('extract')"
+        assert files["references/spec.md"] == "# Spec"
+        r = await http.get("/agent/skills")
+        assert [s["name"] for s in r.json()] == ["pdf-tool"]
+        assert r.json()[0]["files"][0]["path"] == "assets/logo.svg"
+
+        # update replaces listed files, keeps unlisted ones
+        r = await http.put(
+            "/agent/skills/pdf-tool",
+            json={
+                "name": "pdf-tool",
+                "description": "d2",
+                "content": "New body",
+                "files": [{"path": "scripts/extract.py", "content": "print('v2')"}],
+            },
+        )
+        assert r.status_code == 200, r.text
+        files = {f["path"]: f["content"] for f in r.json()["files"]}
+        assert files["scripts/extract.py"] == "print('v2')"
+        assert "references/spec.md" in files, "unlisted files must be kept"
+
+        # delete a single file
+        r = await http.delete("/agent/skills/pdf-tool/files/references/spec.md")
+        assert r.status_code == 204, r.text
+        r = await http.get("/agent/skills/pdf-tool")
+        assert "references/spec.md" not in [f["path"] for f in r.json()["files"]]
+        r = await http.delete("/agent/skills/pdf-tool/files/references/spec.md")
+        assert r.status_code == 404
+
+        # deleting SKILL.md via the file endpoint is rejected
+        r = await http.delete("/agent/skills/pdf-tool/files/SKILL.md")
+        assert r.status_code == 422, r.text
+
+        # path traversal / malformed paths rejected
+        for bad in ("../evil", "/etc/passwd", "scripts//x.py", "a b.py", ".."):
+            r = await http.post(
+                "/agent/skills",
+                json={
+                    "name": "bad-skill",
+                    "description": "d",
+                    "content": "c",
+                    "files": [{"path": bad, "content": "x"}],
+                },
+            )
+            assert r.status_code == 422, bad
+
+        # delete removes SKILL.md AND all bundled files
+        r = await http.delete("/agent/skills/pdf-tool")
+        assert r.status_code == 204
+    for key in ("/pdf-tool/SKILL.md", "/pdf-tool/scripts/extract.py", "/pdf-tool/assets/logo.svg"):
+        assert await persistence.store.aget(GLOBAL_SKILLS_NS, key) is None
+
+
+async def test_skill_files_visible_to_backend(persistence):
+    """Bundled files land in the shared /skills/ backend the agent reads."""
+    from app.schema.agent_schema import SkillFileIn, SkillIn
+    from app.services.resources import create_skill
+
+    backend = build_backend(store=persistence.store)
+    await create_skill(
+        persistence.store,
+        SkillIn(
+            name="multi-file",
+            description="d",
+            content="body",
+            files=[SkillFileIn(path="scripts/run.py", content="print('hi')")],
+        ),
+    )
+    # SKILL.md + bundled file are both readable through the backend
+    files = await backend.adownload_files(
+        ["/skills/multi-file/SKILL.md", "/skills/multi-file/scripts/run.py"]
+    )
+    assert len(files) == 2 and all(f is not None for f in files)
+    assert b"print('hi')" in files[1].content
+    # directory listing exposes the skill-creator structure
+    listing = await backend.als("/skills/multi-file")
+    paths = [e["path"] for e in listing.entries]
+    assert "/skills/multi-file/SKILL.md" in paths, paths
+    assert "/skills/multi-file/scripts/" in paths, paths
+
+
 # ---------------------------------------------------------------------------
 # MCP tool servers
 # ---------------------------------------------------------------------------
