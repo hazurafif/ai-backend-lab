@@ -134,14 +134,19 @@ async def sdk_stream(
                         }
                     )
         elif name == "subagent":
+            # providerMetadata must be keyed by provider name (the AI SDK's
+            # providerMetadataSchema is Record<provider, Record<key, value>>)
+            # — flat {name, status, error} fails stream validation client-side.
             yield _chunk(
                 {
                     "type": "custom",
                     "kind": "app.subagent",
                     "providerMetadata": {
-                        "name": data.get("name"),
-                        "status": data.get("status"),
-                        "error": data.get("error"),
+                        "app": {
+                            "name": data.get("name"),
+                            "status": data.get("status"),
+                            "error": data.get("error"),
+                        },
                     },
                 }
             )
