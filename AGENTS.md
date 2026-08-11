@@ -27,21 +27,21 @@ src/app/          package (src layout, installed editable by uv sync)
   api/v1/
     routes.py         aggregates all endpoint routers into api_router
     endpoints/        one router per domain
-      auth.py         /login, /users/me
+      auth.py         /login, /users/me, admin user management (/users)
       chat.py         /chat (SSE), /api/chat (AI SDK), /threads
-      agent.py        /agent/skills + /agent/tools CRUD, reconnect
+      agent.py        /agent/skills + /agent/tools CRUD, reconnect (admin only)
       health.py       /health
   core/           cross-cutting infrastructure
     config.py         settings (env-driven, sectioned)
     constants.py      store namespaces, SSE headers, default system prompt
     database.py       Postgres checkpointer + store + chat_messages history + users (in-memory fallback)
     migrations.py     SQL migration runner (applies migrations/*.sql at startup)
-    dependencies.py   get_current_user (loads the user from the users store)
+    dependencies.py   get_current_user (loads the user from the users store) + get_admin_user (role check)
     security.py       bcrypt + JWT
     exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)
-  migrations/      SQL migrations (0001_create_users.sql, 0002_create_chat_messages.sql)
+  migrations/      SQL migrations (0001_create_users.sql, 0002_create_chat_messages.sql, 0003_create_user_roles.sql)
   schema/         per-domain API models
-    auth_schema.py    Token, TokenData, User, UserInDB
+    auth_schema.py    Token, TokenData, User, UserInDB, UserRole, UserUpdate
     chat_schema.py    ChatRequest, ThreadOut, AiSdkChatRequest, ResumeRequest
     agent_schema.py   SkillIn/Out, ToolServerIn/Out
   services/       business logic

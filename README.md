@@ -61,11 +61,13 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET /threads` | Bearer | Conversations of the current user (newest first) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
-| `GET /agent/skills` + CRUD | Bearer | Manage agent skills (SKILL.md + bundled files, applied on next run) |
-| `DELETE /agent/skills/{name}/files/{path}` | Bearer | Delete one bundled skill file |
-| `GET /agent/tools` + CRUD | Bearer | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
-| `POST /agent/tools/reconnect` | Bearer | Reconnect MCP servers from the store + rebuild the agent |
+| `GET /agent/skills` + CRUD | Bearer (admin) | Manage agent skills (SKILL.md + bundled files, applied on next run) |
+| `DELETE /agent/skills/{name}/files/{path}` | Bearer (admin) | Delete one bundled skill file |
+| `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
+| `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
 | `GET /users/me` | Bearer | Current user |
+| `GET /users` | Bearer (admin) | List all users (no password hashes) |
+| `PATCH /users/{username}` | Bearer (admin) | Change a user's role and/or disabled state |
 | `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on, searxng, execute, agent_resources |
 
 ### Auth
@@ -74,6 +76,11 @@ On first start with an empty users store, a default admin account is seeded:
 `admin` / `admin` (override via `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD`).
 Users are stored in Postgres (`users` table, created by the SQL migrations in
 `migrations/`), or in-memory when `DATABASE_URI` is unset (dev mode).
+
+Roles: `user` (default — can chat, read own threads) and `admin` (manages
+users via `GET /users` / `PATCH /users/{username}` and all agent resources:
+skills, MCP tool servers). Registration always creates a `user`; promotion is
+admin-only. Disabled accounts are rejected on every authenticated request.
 
 ### Chat
 

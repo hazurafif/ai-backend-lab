@@ -85,6 +85,12 @@ async def persistence():
 
 
 async def client_for(app) -> httpx.AsyncClient:
+    # Agent resource routes are admin-only and validated against the users
+    # store, so seed the tester as an admin inside the lifespan context
+    # (persistence.start() re-initializes the store on entry).
+    await database.persistence.users.create_user(
+        username="tester", hashed_password="x", role="admin"
+    )
     token = create_access_token(data={"sub": "tester"})
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),

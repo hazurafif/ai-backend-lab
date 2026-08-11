@@ -92,11 +92,11 @@ class UserStore:
         self._memory = {}
 
     async def get_user(self, username: str) -> dict | None:
-        """Full user row (incl. hashed_password) or None when unknown."""
+        """Full user row (incl. hashed_password, role) or None when unknown."""
         if self._use_postgres:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT username, email, full_name, hashed_password, disabled "
+                    "SELECT username, email, full_name, hashed_password, disabled, role "
                     "FROM users WHERE username = %s",
                     (username,),
                 )
@@ -109,6 +109,7 @@ class UserStore:
                     "full_name": row[2],
                     "hashed_password": row[3],
                     "disabled": row[4],
+                    "role": row[5],
                 }
         return self._memory.get(username)
 
@@ -119,14 +120,15 @@ class UserStore:
         email: str | None = None,
         full_name: str | None = None,
         disabled: bool = False,
+        role: str = "user",
     ) -> dict | None:
         """Insert a user; returns the row, or None when the username is taken."""
         if self._use_postgres:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    "INSERT INTO users (username, email, full_name, hashed_password, disabled) "
-                    "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (username) DO NOTHING",
-                    (username, email, full_name, hashed_password, disabled),
+                    "INSERT INTO users (username, email, full_name, hashed_password, disabled, role) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (username) DO NOTHING",
+                    (username, email, full_name, hashed_password, disabled, role),
                 )
                 if cur.rowcount == 0:
                     return None
@@ -136,6 +138,7 @@ class UserStore:
                     "full_name": full_name,
                     "hashed_password": hashed_password,
                     "disabled": disabled,
+                    "role": role,
                 }
         if username in self._memory:
             return None
@@ -145,9 +148,72 @@ class UserStore:
             "full_name": full_name,
             "hashed_password": hashed_password,
             "disabled": disabled,
+            "role": role,
         }
         self._memory[username] = user
         return user
+
+    async def update_user(
+        self, username: str, *, role: str | None = None, disabled: bool | None = None
+    ) -> dict | None:
+        """Update role and/or disabled state; returns the updated row or None when unknown."""
+        sets: list[str] = []
+        params: list = []
+        if role is not None:
+            sets.append("role = %s")
+            params.append(role)
+        if disabled is not None:
+            sets.append("disabled = %s")
+            params.append(disabled)
+        if not sets:
+            return await self.get_user(username)
+        params.append(username)
+        if self._use_postgres:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    f"UPDATE users SET {', '.join(sets)} WHERE username = %s", tuple(params)
+                )
+                if cur.rowcount == 0:
+                    return None
+        else:
+            user = self._memory.get(username)
+            if user is None:
+                return None
+            if role is not None:
+                user["role"] = role
+            if disabled is not None:
+                user["disabled"] = disabled
+        return await self.get_user(username)
+
+    async def list_users(self) -> list[dict]:
+        """All users, newest first (no hashed_password)."""
+        if self._use_postgres:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT username, email, full_name, disabled, role FROM users ORDER BY id DESC"
+                )
+                return [
+                    {
+                        "username": row[0],
+                        "email": row[1],
+                        "full_name": row[2],
+                        "disabled": row[3],
+                        "role": row[4],
+                    }
+                    for row in await cur.fetchall()
+                ]
+        users = list(self._memory.values())
+        users.reverse()  # newest first (insertion order)
+        return [
+            {
+                "username": u["username"],
+                "email": u.get("email"),
+                "full_name": u.get("full_name"),
+                "disabled": u.get("disabled", False),
+                "role": u.get("role", "user"),
+            }
+            for u in users
+        ]
 
     async def count(self) -> int:
         """Number of registered users."""
@@ -333,19 +399,33 @@ class Persistence:
         await self.chat_history.stop()
 
     async def ensure_default_admin(self) -> None:
-        """Seed the default admin account when the users store is empty.
+        """Guarantee an admin account exists; seed the default on a fresh store.
 
-        Runs at startup (first server start with a fresh database). Username
-        and password come from `settings.default_admin_username` /
-        `default_admin_password` (env: DEFAULT_ADMIN_USERNAME/PASSWORD).
+        Runs at startup. On a fresh database (no users) the default admin is
+        seeded (username/password from `settings.default_admin_username` /
+        `default_admin_password`). On existing installs the default admin
+        username is promoted to the admin role when present (migration
+        0003 backfill), so old databases never end up admin-less.
         """
-        if await self.users.count() > 0:
-            return
         username = settings.default_admin_username
+        existing = await self.users.get_user(username)
+        if existing is not None:
+            if existing.get("role") != "admin":
+                await self.users.update_user(username, role="admin")
+                logger.info("Promoted %r to admin role (default admin account)", username)
+            return
+        if await self.users.count() > 0:
+            logger.warning(
+                "No admin user exists: %r not found. Set DEFAULT_ADMIN_USERNAME "
+                "or promote a user via PATCH /users/{username}.",
+                username,
+            )
+            return
         user = await self.users.create_user(
             username=username,
             hashed_password=get_password_hash(settings.default_admin_password),
             full_name="Admin",
+            role="admin",
         )
         if user is not None:
             logger.warning(

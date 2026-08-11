@@ -11,7 +11,7 @@ import pytest
 
 from app.core import config
 from app.core.database import persistence
-from app.core.security import create_access_token, verify_password
+from app.core.security import create_access_token, get_password_hash, verify_password
 from app.main import create_app
 
 pytestmark = pytest.mark.filterwarnings(
@@ -59,6 +59,21 @@ async def test_register_creates_user(client, fresh_user_store):
     login = await client.post("/login", data={"username": "alice", "password": "super-secret"})
     assert login.status_code == 200
     assert login.json()["token_type"] == "bearer"
+
+
+@pytest.mark.asyncio
+async def test_register_defaults_to_user_role(client, fresh_user_store):
+    # Registration always creates a regular `user`; a role field in the body
+    # is ignored (never self-elevation).
+    response = await client.post(
+        "/register",
+        json={"username": "alice", "password": "super-secret", "role": "admin"},
+    )
+    assert response.status_code == 201
+    assert response.json()["role"] == "user"
+
+    stored = await persistence.users.get_user("alice")
+    assert stored["role"] == "user"
 
 
 @pytest.mark.asyncio
@@ -127,6 +142,7 @@ async def test_default_admin_seeded_on_first_start():
         assert user is not None
         assert verify_password("admin", user["hashed_password"])
         assert user["full_name"] == "Admin"
+        assert user["role"] == "admin"
 
         # Restarting must not create a second admin.
         await persistence.stop()
@@ -152,5 +168,116 @@ async def test_default_admin_seeded_on_first_start():
             me = await client.get("/users/me/", headers={"Authorization": f"Bearer {token}"})
             assert me.status_code == 200
             assert me.json()["username"] == "admin"
+            assert me.json()["role"] == "admin"
+    finally:
+        await persistence.stop()
+
+
+@pytest.mark.asyncio
+async def test_existing_default_admin_promoted_on_start():
+    """Upgrade path: an existing default-admin username is promoted to admin."""
+    config.settings.database_uri = None
+    await persistence.start()
+    try:
+        # Simulate a pre-0003 install where the default admin is a plain user.
+        await persistence.users.update_user("admin", role="user")
+        await persistence.ensure_default_admin()
+        assert (await persistence.users.get_user("admin"))["role"] == "admin"
+    finally:
+        await persistence.stop()
+
+
+# ---------------------------------------------------------------------------
+# roles & permissions (admin user management)
+# ---------------------------------------------------------------------------
+
+
+async def _login(client, username: str, password: str) -> str:
+    login = await client.post("/login", data={"username": username, "password": password})
+    assert login.status_code == 200, login.text
+    return login.json()["access_token"]
+
+
+@pytest.mark.asyncio
+async def test_regular_user_cannot_list_users(client, fresh_user_store):
+    await client.post("/register", json={"username": "alice", "password": "super-secret"})
+    token = await _login(client, "alice", "super-secret")
+
+    response = await client.get("/users", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 403
+    assert "Admin role required" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_admin_lists_and_updates_users(client, fresh_user_store):
+    await client.post("/register", json={"username": "alice", "password": "super-secret"})
+    # Promote alice to admin first, then use her token for management.
+    await persistence.users.update_user("alice", role="admin")
+    token = await _login(client, "alice", "super-secret")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get("/users", headers=headers)
+    assert response.status_code == 200
+    users = {u["username"]: u for u in response.json()}
+    assert "alice" in users and users["alice"]["role"] == "admin"
+    assert "hashed_password" not in users["alice"]
+
+    # Promote bob, then disable him.
+    await client.post("/register", json={"username": "bob", "password": "super-secret"})
+    r = await client.patch("/users/bob", json={"role": "admin"}, headers=headers)
+    assert r.status_code == 200 and r.json()["role"] == "admin"
+
+    r = await client.patch("/users/bob", json={"disabled": True}, headers=headers)
+    assert r.status_code == 200 and r.json()["disabled"] is True
+
+    # Bob's existing token no longer works (account disabled).
+    bob_token = await _login(client, "bob", "super-secret")
+    r = await client.get("/users/me/", headers={"Authorization": f"Bearer {bob_token}"})
+    assert r.status_code == 403
+
+    # Unknown user -> 404; empty body -> 422.
+    r = await client.patch("/users/ghost", json={"disabled": True}, headers=headers)
+    assert r.status_code == 404
+    r = await client.patch("/users/bob", json={}, headers=headers)
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_demote_or_disable_self(client, fresh_user_store):
+    await persistence.users.create_user(
+        username="admin", hashed_password=get_password_hash("admin-pw"), role="admin"
+    )
+    token = await _login(client, "admin", "admin-pw")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    r = await client.patch("/users/admin", json={"role": "user"}, headers=headers)
+    assert r.status_code == 400
+    r = await client.patch("/users/admin", json={"disabled": True}, headers=headers)
+    assert r.status_code == 400
+
+    # A no-op self-update (role stays admin) is fine.
+    r = await client.patch("/users/admin", json={"role": "admin"}, headers=headers)
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_agent_routes_require_admin_role():
+    """Skills/tools CRUD is admin-only; a regular user gets 403."""
+    from app.main import create_app as _create_app
+
+    config.settings.database_uri = None
+    await persistence.start()
+    try:
+        await persistence.users.create_user(username="tester", hashed_password="x", role="user")
+        token = create_access_token(data={"sub": "tester"})
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=_create_app()), base_url="http://test"
+        ) as http:
+            headers = {"Authorization": f"Bearer {token}"}
+            r = await http.get("/agent/skills", headers=headers)
+            assert r.status_code == 403
+            # No token at all -> 401.
+            r = await http.get("/agent/skills")
+            assert r.status_code == 401
     finally:
         await persistence.stop()
