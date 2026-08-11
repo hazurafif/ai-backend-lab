@@ -76,6 +76,37 @@ def _sse(event: str, data: dict) -> str:
     )
 
 
+async def _record_thread_metadata(thread_id: str, username: str, message: str | None) -> None:
+    """Upsert thread metadata in the store: title on first message, `updated_at` on every run."""
+    now = now_iso()
+    try:
+        ns = ("threads", username)
+        existing = await persistence.store.aget(ns, thread_id)
+        value = dict(existing.value) if existing is not None else {}
+        if message is not None:
+            value.setdefault("title", message[:80])
+            value.setdefault("created_at", now)
+        value["updated_at"] = now
+        await persistence.store.aput(ns, thread_id, value)
+    except Exception:
+        logger.exception("failed to record thread metadata for %s", thread_id)
+
+
+async def _save_history(thread_id: str, username: str, messages: list[dict]) -> None:
+    """Persist finalized messages to the chat history table (best-effort).
+
+    Deduped by message id, so resume/retry runs never duplicate rows.
+    """
+    if not messages:
+        return
+    try:
+        added = await persistence.chat_history.add_messages(thread_id, username, messages)
+        if added:
+            logger.info("chat history: %d new messages for thread %s", added, thread_id)
+    except Exception:
+        logger.exception("failed to save chat history for thread %s", thread_id)
+
+
 def _collect_interrupts(snapshot: Any) -> list[Any]:
     """Extract interrupt payloads from a state snapshot's pending tasks."""
     out: list[Any] = []
@@ -109,18 +140,6 @@ async def agent_stream(
     """
     thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
     config = {"configurable": {"thread_id": thread_id}}
-
-    if message is not None:
-        # Record thread metadata in the store so GET /threads can list conversations.
-        now = now_iso()
-        try:
-            await persistence.store.aput(
-                ("threads", username),
-                thread_id,
-                {"title": message[:80], "created_at": now, "updated_at": now},
-            )
-        except Exception:
-            logger.exception("failed to record thread metadata")
 
     if resume is not None:
         run_input: Any = Command(resume=resume)
@@ -268,6 +287,10 @@ async def agent_stream(
 
     snapshot = await agent.aget_state(config)
     interrupts = _collect_interrupts(snapshot)
+    # Persist history + refresh thread metadata before the terminal events, so
+    # GET /threads and GET /threads/{id}/messages see the finished run.
+    await _save_history(thread_id, username, messages)
+    await _record_thread_metadata(thread_id, username, message)
     if interrupts:
         # Run paused for human input: surface the HITL requests.
         yield _sse("interrupt", {"thread_id": thread_id, "interrupts": interrupts})

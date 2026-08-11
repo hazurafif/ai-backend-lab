@@ -34,7 +34,7 @@ src/app/          package (src layout, installed editable by uv sync)
   core/           cross-cutting infrastructure
     config.py         settings (env-driven, sectioned)
     constants.py      store namespaces, SSE headers, default system prompt
-    database.py       Postgres checkpointer + store (in-memory fallback)
+    database.py       Postgres checkpointer + store + chat_messages history (in-memory fallback)
     dependencies.py   get_current_user
     security.py       bcrypt + JWT
     exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)

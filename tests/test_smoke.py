@@ -152,6 +152,10 @@ async def test_direct_streaming_pipeline(memory_persistence):
     assert done and done[-1].get("messages"), "missing done with messages"
     assert done[-1].get("interrupted") is None, "should not be interrupted"
 
+    # Chat history rows match the finalized messages of the done event.
+    rows = await memory_persistence.chat_history.list_messages(done[-1]["thread_id"])
+    assert [r["type"] for r in rows] == [m["type"] for m in done[-1]["messages"]]
+
     tool_end = next(d for e, d in events if e == "tool_end")
     assert tool_end["name"] == "echo"
     assert tool_end["output"]["content"] == "echo:hello", tool_end
@@ -198,6 +202,13 @@ async def test_interrupt_and_resume(memory_persistence):
 
     texts = [extract_text(m) for m in done2["messages"] if m.get("type") == "ai"]
     assert any("Final answer" in t for t in texts), texts
+
+    # Chat history: rows written at interrupt (human + tool-call AI) and the
+    # resumed run appended the rest — no duplicates across the two runs.
+    rows = await memory_persistence.chat_history.list_messages(thread_id)
+    assert [r["type"] for r in rows] == [m["type"] for m in done2["messages"]]
+    assert len(rows) == len(done2["messages"]) == 4, rows
+    assert len({r.get("id") for r in rows}) == len(rows), "duplicate message ids"
 
 
 async def test_ai_sdk_extract_user_message():
@@ -273,6 +284,34 @@ async def test_ai_sdk_chat_endpoint(memory_persistence):
             assert r.status_code == 422, r.text
 
 
+async def test_chat_history_persisted_without_duplicates(memory_persistence):
+    """Every turn appends exactly its messages to the chat history table."""
+    agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
+
+    done1 = [
+        d for e, d in await collect_stream(agent, "tester", message="turn one") if e == "done"
+    ][-1]
+    thread_id = done1["thread_id"]
+    rows = await memory_persistence.chat_history.list_messages(thread_id)
+    assert [r["type"] for r in rows] == [m["type"] for m in done1["messages"]]
+
+    # Second turn on the same thread: new messages appended, old ones kept.
+    done2 = [
+        d
+        for e, d in await collect_stream(agent, "tester", thread_id=thread_id, message="turn two")
+        if e == "done"
+    ][-1]
+    rows = await memory_persistence.chat_history.list_messages(thread_id)
+    assert [r["type"] for r in rows] == [m["type"] for m in done2["messages"]]
+    assert len(rows) == len(done2["messages"])
+    assert len({r.get("id") for r in rows}) == len(rows), "duplicate message ids"
+
+    # Thread metadata: title from the first message, updated_at refreshed.
+    item = await memory_persistence.store.aget(("threads", "tester"), thread_id)
+    assert item.value["title"] == "turn one"
+    assert item.value["updated_at"] >= item.value["created_at"]
+
+
 async def test_http_end_to_end(memory_persistence):
     # Placeholder agent so lifespan skips the real (OpenAI) model; the
     # scripted agent is built on the SAME persistence instances the API uses.
@@ -303,6 +342,13 @@ async def test_http_end_to_end(memory_persistence):
             assert len(threads) >= 1 and threads[0]["title"] == "hello via http", threads
 
             thread_id = threads[0]["thread_id"]
+            r = await client.get(f"/threads/{thread_id}/messages", headers=headers)
+            assert r.status_code == 200 and len(r.json()) >= 2, r.text
+
+            # Legacy threads (no rows in the chat_messages table) fall back to
+            # checkpoint rehydration — same response shape.
+            memory_persistence.chat_history._memory.clear()
+            memory_persistence.chat_history._memory_ids.clear()
             r = await client.get(f"/threads/{thread_id}/messages", headers=headers)
             assert r.status_code == 200 and len(r.json()) >= 2, r.text
 

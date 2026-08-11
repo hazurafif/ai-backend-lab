@@ -6,7 +6,8 @@ A FastAPI backend wrapping **LangChain Deep Agents** as the core agent:
   subagents (`task` tool), virtual filesystem, context management, skills & memory.
 - **Persistence**: Postgres via `langgraph-checkpoint-postgres` —
   `AsyncPostgresSaver` (conversations) + `AsyncPostgresStore` (long-term memory,
-  thread metadata). Falls back to in-memory when `DATABASE_URI` is unset.
+  thread metadata) + a `chat_messages` table (readable chat history). Falls back
+  to in-memory when `DATABASE_URI` is unset.
 - **MCP**: connects to MCP servers (e.g. built with **gofastmcp**) over
   `streamable_http` or `stdio` via `langchain-mcp-adapters`. MCP tool outputs are
   streamed to the frontend as structured events — ready to render as interactive
@@ -224,6 +225,12 @@ the app runs on in-memory checkpointer + store (data lost on restart).
 
 - **Threads** live in the checkpointer; thread metadata (title, timestamps) in the
   store under namespace `("threads", <username>)` → per-user listing.
+- **Chat history**: every run also writes readable rows to a dedicated
+  `chat_messages` table (thread_id, username, role, message content as JSONB,
+  created_at; deduped by message id so resume/retries never duplicate).
+  `GET /threads/{id}/messages` serves from this table, falling back to
+  checkpoint rehydration for older threads. Query it directly, e.g.
+  `SELECT thread_id, role, created_at FROM chat_messages ORDER BY id DESC LIMIT 20;`
 - **Durable workspace**: the agent's filesystem backend is a `StoreBackend` over
   the LangGraph store — every user's files (scratch space, memories) persist
   across threads and restarts, scoped per user (`("<username>")` namespace).

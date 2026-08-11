@@ -108,6 +108,13 @@ async def thread_messages(
     thread_id: str,
     current_user: dict = Depends(get_current_user),
 ):
+    # Prefer the readable chat_messages table; fall back to checkpoint
+    # rehydration for threads created before the table existed (or when the
+    # run ended in an error before history was written).
+    history = await persistence.chat_history.list_messages(thread_id)
+    if history:
+        return history
+
     # DeepAgentState stores messages via a DeltaChannel, so raw checkpoint
     # values don't contain the full list — rehydrate through the graph.
     agent: CompiledStateGraph = request.app.state.agent
