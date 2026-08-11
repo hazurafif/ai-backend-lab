@@ -82,7 +82,7 @@ class ToolServerIn(BaseModel):
 
     def config(self) -> dict:
         """Shape expected by MultiServerMCPClient (mcp_servers.json format)."""
-        cfg: dict = {"transport": self.transport}
+        cfg: dict = {"transport": self.transport, "enabled": self.enabled}
         if self.transport == "streamable_http":
             cfg["url"] = self.url
             if self.headers:
