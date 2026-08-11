@@ -336,21 +336,24 @@ async def test_http_chat_enable_search_field(monkeypatch):
 
 async def test_health_reports_searxng():
     from langgraph.checkpoint.memory import InMemorySaver
-    from langgraph.store.memory import InMemoryStore
 
-    app = create_app(
-        agent=build_agent(
-            checkpointer=InMemorySaver(),
-            store=InMemoryStore(),
-            model=search_scripted_model(),
-            system_prompt="test",
+    persistence = await start_memory_persistence()
+    try:
+        app = create_app(
+            agent=build_agent(
+                checkpointer=InMemorySaver(),
+                store=persistence.store,
+                model=search_scripted_model(),
+                system_prompt="test",
+            )
         )
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as http:
-        r = await http.get("/health")
-        assert r.status_code == 200
-        body = r.json()["searxng"]
-        assert body["installed"] is (config.settings.searxng_url is not None)
-        assert body["enabled"] is config.settings.searxng_enabled
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as http:
+            r = await http.get("/health")
+            assert r.status_code == 200
+            body = r.json()["searxng"]
+            assert body["installed"] is (config.settings.searxng_url is not None)
+            assert body["enabled"] is config.settings.searxng_enabled
+    finally:
+        await persistence.stop()

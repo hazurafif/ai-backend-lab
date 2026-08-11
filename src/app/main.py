@@ -53,8 +53,8 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
-from . import ai_sdk_chat, auth, schemas
-from .agent import build_agent
+from . import agent_resources, ai_sdk_chat, auth, schemas
+from .agent import build_agent, build_backend
 from .config import settings
 from .db import persistence
 from .dependencies import get_current_user
@@ -341,8 +341,12 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await persistence.start()
+        # Shared durable filesystem backend: agent and /agent/* CRUD API write
+        # to the same store (Postgres in production), so skills added via the
+        # API are visible to the agent on the next run.
+        app.state.backend = build_backend(store=persistence.store)
         try:
-            await mcp_servers.connect()
+            await mcp_servers.connect(store=persistence.store)
         except Exception:
             logger.exception("MCP connect failed; continuing without MCP tools")
         search_tool = build_search_tool()
@@ -351,6 +355,7 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             store=persistence.store,
             mcp_tools=mcp_servers.tools,
             extra_tools=[search_tool] if search_tool else None,
+            backend=app.state.backend,
             model=settings.model,
             system_prompt=settings.system_prompt,
             interrupt_on=settings.interrupt_on,
@@ -364,6 +369,7 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             "enabled" if settings.execute_enabled else "disabled",
         )
         yield
+        await mcp_servers.close()
         await persistence.stop()
 
     app = FastAPI(title="AI Backend", version="0.1.0", lifespan=lifespan)
@@ -390,6 +396,10 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             "execute": {
                 "enabled": settings.execute_enabled,
                 "max_timeout": settings.execute_max_timeout,
+            },
+            "agent_resources": {
+                "skills": len(await agent_resources.list_skills(persistence.store)),
+                "tool_servers": len(await agent_resources.list_tool_servers(persistence.store)),
             },
         }
 
@@ -511,6 +521,100 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Thread not found")
         messages = snapshot.values["messages"]
         return [_serialize_message(m) for m in messages]
+
+    # -------------------------------------------------------------------
+    # agent resources (skills, MCP tool servers) — persisted in the store
+    # -------------------------------------------------------------------
+
+    @app.get("/agent/skills", response_model=list[schemas.SkillOut])
+    async def list_skills(request: Request, _: dict = Depends(get_current_user)):
+        return await agent_resources.list_skills(persistence.store)
+
+    @app.post("/agent/skills", response_model=schemas.SkillOut, status_code=201)
+    async def create_skill(
+        request: Request,
+        body: schemas.SkillIn,
+        _: dict = Depends(get_current_user),
+    ):
+        if await agent_resources.get_skill(persistence.store, body.name):
+            raise HTTPException(status_code=409, detail=f"Skill '{body.name}' already exists")
+        return await agent_resources.create_skill(persistence.store, body)
+
+    @app.get("/agent/skills/{name}", response_model=schemas.SkillOut)
+    async def get_skill(name: str, _: dict = Depends(get_current_user)):
+        skill = await agent_resources.get_skill(persistence.store, name)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        return skill
+
+    @app.put("/agent/skills/{name}", response_model=schemas.SkillOut)
+    async def update_skill(
+        name: str,
+        body: schemas.SkillIn,
+        _: dict = Depends(get_current_user),
+    ):
+        try:
+            return await agent_resources.update_skill(persistence.store, name, body)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Skill not found") from None
+
+    @app.delete("/agent/skills/{name}", status_code=204)
+    async def delete_skill(name: str, _: dict = Depends(get_current_user)):
+        if not await agent_resources.delete_skill(persistence.store, name):
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    @app.get("/agent/tools", response_model=list[schemas.ToolServerOut])
+    async def list_tool_servers(_: dict = Depends(get_current_user)):
+        return await agent_resources.list_tool_servers(persistence.store)
+
+    @app.post("/agent/tools", response_model=schemas.ToolServerOut, status_code=201)
+    async def create_tool_server(
+        body: schemas.ToolServerIn,
+        _: dict = Depends(get_current_user),
+    ):
+        if await agent_resources.get_tool_server(persistence.store, body.name):
+            raise HTTPException(status_code=409, detail=f"Tool server '{body.name}' already exists")
+        return await agent_resources.create_tool_server(persistence.store, body)
+
+    @app.get("/agent/tools/{name}", response_model=schemas.ToolServerOut)
+    async def get_tool_server(name: str, _: dict = Depends(get_current_user)):
+        server = await agent_resources.get_tool_server(persistence.store, name)
+        if server is None:
+            raise HTTPException(status_code=404, detail="Tool server not found")
+        return server
+
+    @app.put("/agent/tools/{name}", response_model=schemas.ToolServerOut)
+    async def update_tool_server(
+        name: str,
+        body: schemas.ToolServerIn,
+        _: dict = Depends(get_current_user),
+    ):
+        try:
+            return await agent_resources.update_tool_server(persistence.store, name, body)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Tool server not found") from None
+
+    @app.delete("/agent/tools/{name}", status_code=204)
+    async def delete_tool_server(name: str, _: dict = Depends(get_current_user)):
+        if not await agent_resources.delete_tool_server(persistence.store, name):
+            raise HTTPException(status_code=404, detail="Tool server not found")
+
+    @app.post("/agent/tools/reconnect")
+    async def reconnect_tools(request: Request, _: dict = Depends(get_current_user)):
+        """Reconnect MCP servers from the store and rebuild the agent (live)."""
+        await mcp_servers.connect(store=persistence.store)
+        search_tool = build_search_tool()
+        request.app.state.agent = build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            mcp_tools=mcp_servers.tools,
+            extra_tools=[search_tool] if search_tool else None,
+            backend=request.app.state.backend,
+            model=settings.model,
+            system_prompt=settings.system_prompt,
+            interrupt_on=settings.interrupt_on,
+        )
+        return {"connected": mcp_servers.names, "tools": len(mcp_servers.tools)}
 
     return app
 

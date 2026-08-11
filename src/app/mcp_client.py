@@ -1,7 +1,12 @@
 """MCP client: connects the agent to MCP servers (e.g. built with gofastmcp).
 
-Server config is a dict of name -> connection, loaded from `MCP_SERVERS_JSON`
-or `mcp_servers.json`:
+Server config is a dict of name -> connection. Sources, in priority order:
+
+1. The durable store namespace ("agent", "mcp_servers") — managed via the
+   /agent/tools CRUD API (Postgres-backed in production).
+2. `MCP_SERVERS_JSON` env var or `mcp_servers.json` (see the example file).
+
+Config shape:
 
     {
       "weather": {
@@ -20,7 +25,8 @@ or `mcp_servers.json`:
 - streamable_http: for gofastmcp (Go) servers deployed as web services
 - stdio: for gofastmcp binaries run as subprocesses
 
-Tools are fetched once at startup and passed to `create_deep_agent(tools=...)`.
+Tools are fetched once at startup (or via POST /agent/tools/reconnect) and
+passed to `create_deep_agent(tools=...)`.
 """
 
 from __future__ import annotations
@@ -30,7 +36,9 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.store.base import BaseStore
 
+from .agent_resources import load_tool_server_configs
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -46,9 +54,17 @@ class MCPServers:
     def names(self) -> list[str]:
         return list(self._config)
 
-    async def connect(self) -> list[BaseTool]:
-        """Connect to all configured MCP servers and fetch their tools."""
-        self._config = settings.load_mcp_servers()
+    async def connect(self, store: BaseStore | None = None) -> list[BaseTool]:
+        """Connect to all configured MCP servers and fetch their tools.
+
+        Config comes from the durable store when it has entries (CRUD API),
+        otherwise from env/file (`MCP_SERVERS_JSON` / `mcp_servers.json`).
+        """
+        self._config = (
+            await load_tool_server_configs(store)
+            if store is not None
+            else settings.load_mcp_servers()
+        )
         if not self._config:
             logger.info("No MCP servers configured")
             return []

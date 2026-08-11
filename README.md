@@ -15,6 +15,8 @@ A FastAPI backend wrapping **LangChain Deep Agents** as the core agent:
   metasearch instance, toggleable from config and per-request (frontend).
 - **Shell execution**: the built-in `execute` tool (opt-in, **off by default**)
   runs host shell commands for dev/trusted environments.
+- **Agent resources API**: CRUD for skills and MCP tool servers, persisted in
+  the LangGraph store (Postgres) and live-wired into the agent.
 - **Streaming**: `POST /chat` returns a Server-Sent Events (SSE) stream with typed
   events (message deltas, tool calls, subagents, final state).
 - **Auth**: JWT login (`/login`), protected chat/thread endpoints.
@@ -58,8 +60,11 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET /threads` | Bearer | Conversations of the current user (newest first) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
+| `GET /agent/skills` + CRUD | Bearer | Manage agent skills (stored as SKILL.md, applied on next run) |
+| `GET /agent/tools` + CRUD | Bearer | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
+| `POST /agent/tools/reconnect` | Bearer | Reconnect MCP servers from the store + rebuild the agent |
 | `GET /users/me` | Bearer | Current user |
-| `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on, searxng |
+| `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on, searxng, execute, agent_resources |
 
 ### Chat
 
@@ -219,8 +224,44 @@ the app runs on in-memory checkpointer + store (data lost on restart).
 
 - **Threads** live in the checkpointer; thread metadata (title, timestamps) in the
   store under namespace `("threads", <username>)` → per-user listing.
-- **Memory**: the agent's `/memories/` filesystem path is routed to the store
-  (`StoreBackend`), scoped per user, so agent memory survives across threads.
+- **Durable workspace**: the agent's filesystem backend is a `StoreBackend` over
+  the LangGraph store — every user's files (scratch space, memories) persist
+  across threads and restarts, scoped per user (`("<username>")` namespace).
+  With `EXECUTE_ENABLED=true` the default backend becomes `LocalShellBackend`
+  (host filesystem + shell) instead.
+- **Skills**: agent-wide skills live under the global `("agent", "skills")`
+  namespace as `/<name>/SKILL.md` files, shared by all users. The agent loads
+  them from the `/skills/` backend source on every run — edits via the API apply
+  without a restart.
+
+## Agent resources API
+
+Skills and MCP tool servers are managed via CRUD endpoints and persisted in the
+store (Postgres in production). Namespaces: `("agent", "skills")` for skills,
+`("agent", "mcp_servers")` for tool servers.
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/login -d "username=johndoe&password=secret" | jq -r .access_token)
+AUTH="Authorization: Bearer $TOKEN"
+
+# --- skills (SKILL.md format, Agent Skills spec: lowercase name + hyphens) ---
+curl -X POST http://127.0.0.1:8000/agent/skills -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"release-notes","description":"Write concise release notes","content":"## Steps\\n1. git log --oneline\\n2. group by type"}'
+curl http://127.0.0.1:8000/agent/skills -H "$AUTH"                       # list
+curl http://127.0.0.1:8000/agent/skills/release-notes -H "$AUTH"          # get
+curl -X PUT  http://127.0.0.1:8000/agent/skills/release-notes -H "$AUTH" -H 'Content-Type: application/json' -d '{...}'
+curl -X DELETE http://127.0.0.1:8000/agent/skills/release-notes -H "$AUTH"
+
+# --- MCP tool servers (same shape as mcp_servers.json) ---
+curl -X POST http://127.0.0.1:8000/agent/tools -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"weather","transport":"streamable_http","url":"http://localhost:8090/mcp"}'
+curl -X POST http://127.0.0.1:8000/agent/tools/reconnect -H "$AUTH"      # apply tool changes live
+```
+
+- Skill changes are picked up by the agent on the **next run** (no rebuild).
+- Tool server changes apply on **restart** or `POST /agent/tools/reconnect`.
+- When the store has tool servers, they **replace** the `MCP_SERVERS_JSON` /
+  `mcp_servers.json` env config; delete all entries to fall back.
 
 ## Code layout
 
@@ -229,8 +270,9 @@ src/app/          package (src layout, installed editable by uv sync)
   main.py         FastAPI app + SSE streaming (event normalization)
   agent.py        create_deep_agent factory (persistence, MCP tools, memory backend)
   db.py           Postgres checkpointer + store (in-memory fallback)
-  mcp_client.py   MultiServerMCPClient from config (streamable_http / stdio)
+  mcp_client.py   MultiServerMCPClient from config (store-first, streamable_http / stdio)
   searxng.py      SearXNG web_search tool (toggleable client + tool factory)
+  agent_resources.py  skills + MCP tool server CRUD on the durable store
   config.py       settings from .env
   auth.py         bcrypt + JWT
   schemas.py      API models

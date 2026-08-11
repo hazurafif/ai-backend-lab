@@ -1,7 +1,7 @@
 """Deep Agent factory: create_deep_agent wired with persistence + MCP tools.
 
 The agent gets the Deep Agents built-in harness:
-  - filesystem tools (ls, read_file, write_file, edit_file, grep, glob, ...)
+  - filesystem tools (ls, read_file, write_file, edit_file, grep, glob, execute, ...)
   - `task` tool to delegate to subagents (isolated context windows)
   - context management (summarization, offloading)
   - skills / memory via AGENTS.md-style files
@@ -9,7 +9,13 @@ The agent gets the Deep Agents built-in harness:
 Plus:
   - MCP tools from gofastmcp servers (passed via `tools=`)
   - Postgres checkpointer (conversations) + Postgres store (cross-thread memory)
-  - store-backed `/memories/` filesystem backend scoped per user
+  - durable filesystem backend: by default a StoreBackend over the LangGraph
+    store (Postgres in production, in-memory in dev), so every user's workspace
+    persists across threads. `/memories/` (per user) and `/skills/` (global,
+    shared by all users) are routed to the store as well.
+  - skills loaded from the store-backed `/skills/` source, managed via the
+    /agent/skills CRUD API (no agent rebuild needed — SkillsMiddleware reads
+    the backend on every run).
 """
 
 from __future__ import annotations
@@ -18,7 +24,6 @@ import logging
 from typing import Any
 
 from deepagents import create_deep_agent
-from deepagents.backends import StateBackend
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.backends.store import StoreBackend
@@ -32,9 +37,16 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
+# Backend source where store-backed skills live (SkillsMiddleware source path).
+SKILLS_SOURCE = "/skills/"
+
+# Store namespace for agent-level (global, shared by all users) resources.
+GLOBAL_SKILLS_NS = ("agent", "skills")
+TOOL_SERVERS_NS = ("agent", "mcp_servers")
+
 
 def _user_namespace_factory(rt: Any) -> tuple[str, ...]:
-    """Scope store-backed memory files per user.
+    """Scope store-backed workspace/memory files per user.
 
     `rt` is the runtime context object; it carries per-run `context` data
     (e.g. user_id) passed at invocation time.
@@ -47,12 +59,42 @@ def _user_namespace_factory(rt: Any) -> tuple[str, ...]:
     return (str(user),)
 
 
+def _global_namespace_factory(_rt: Any) -> tuple[str, ...]:
+    """Global namespace shared by all users (agent-level resources)."""
+    return GLOBAL_SKILLS_NS
+
+
+def build_backend(*, store: BaseStore) -> CompositeBackend:
+    """Build the shared filesystem backend for the agent and the resources API.
+
+    The default backend is a durable StoreBackend over the LangGraph store
+    (Postgres in production), so every user's workspace persists across
+    threads. With `EXECUTE_ENABLED=true` the default is LocalShellBackend
+    (host shell) instead. `/memories/` (per user) and `/skills/` (global) are
+    always routed to the durable store.
+    """
+    user_store = StoreBackend(store=store, namespace=_user_namespace_factory)
+    default = (
+        LocalShellBackend(inherit_env=settings.execute_inherit_env)
+        if settings.execute_enabled
+        else user_store
+    )
+    return CompositeBackend(
+        default=default,
+        routes={
+            "/memories/": user_store,
+            "/skills/": StoreBackend(store=store, namespace=_global_namespace_factory),
+        },
+    )
+
+
 def build_agent(
     *,
     checkpointer: Checkpointer,
     store: BaseStore,
     mcp_tools: list[BaseTool] | None = None,
     extra_tools: list[BaseTool] | None = None,
+    backend: CompositeBackend | None = None,
     model: str | None = None,
     system_prompt: str | None = None,
     interrupt_on: dict[str, Any] | None = None,
@@ -64,27 +106,14 @@ def build_agent(
         store: long-term memory store (Postgres or in-memory).
         mcp_tools: tools loaded from MCP servers (gofastmcp).
         extra_tools: additional tools, e.g. the SearXNG web_search tool.
+        backend: shared filesystem backend; created from the store when omitted.
+            Pass the lifespan-built instance so the /agent/skills CRUD API and
+            the agent see the same files.
         model: provider:model string, e.g. "openai:gpt-4o-mini".
         system_prompt: agent instructions.
         interrupt_on: {"tool_name": True} to pause for human approval.
     """
-    # Filesystem backend: thread-scoped scratch space by default, but
-    # `/memories/` is routed to the persistent store so memory survives
-    # across conversations, scoped per user.
-    # With EXECUTE_ENABLED=true the default backend is LocalShellBackend, which
-    # makes the built-in `execute` tool run host shell commands (unrestricted —
-    # dev/trusted environments only; gate with interrupt_on={"execute": True}).
-    default_backend = (
-        LocalShellBackend(inherit_env=settings.execute_inherit_env)
-        if (settings.execute_enabled)
-        else StateBackend()
-    )
-    backend = CompositeBackend(
-        default=default_backend,
-        routes={
-            "/memories/": StoreBackend(store=store, namespace=_user_namespace_factory),
-        },
-    )
+    backend = backend or build_backend(store=store)
 
     # Replace the default FilesystemMiddleware only when execution is enabled,
     # so EXECUTE_MAX_TIMEOUT applies to the execute tool's per-command cap.
@@ -104,6 +133,7 @@ def build_agent(
         store=store,
         backend=backend,
         middleware=middleware or (),
+        skills=[SKILLS_SOURCE],
         interrupt_on=interrupt_on or None,
     )
     logger.info(

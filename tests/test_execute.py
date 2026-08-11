@@ -155,12 +155,20 @@ async def test_execute_timeout_cap_enforced(monkeypatch):
 
 
 async def test_health_reports_execute():
-    app = create_app(agent=build_execute_agent())
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as http:
-        r = await http.get("/health")
-        assert r.status_code == 200
-        body = r.json()["execute"]
-        assert body["enabled"] is config.settings.execute_enabled
-        assert body["max_timeout"] == config.settings.execute_max_timeout
+    from app import config as app_config
+    from app import db
+
+    app_config.settings.database_uri = None
+    await db.persistence.start()
+    try:
+        app = create_app(agent=build_execute_agent())
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as http:
+            r = await http.get("/health")
+            assert r.status_code == 200
+            body = r.json()["execute"]
+            assert body["enabled"] is config.settings.execute_enabled
+            assert body["max_timeout"] == config.settings.execute_max_timeout
+    finally:
+        await db.persistence.stop()
