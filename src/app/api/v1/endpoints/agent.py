@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ....core.config import settings
 from ....core.database import persistence
-from ....core.dependencies import get_current_user
+from ....core.dependencies import get_optional_current_user
 from ....core.exceptions import Conflict, NotFound
 from ....schema.agent_schema import SkillIn, SkillOut, ToolServerIn, ToolServerOut
 from ....services import resources
@@ -27,19 +27,19 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 
 @router.get("/skills", response_model=list[SkillOut])
-async def list_skills(_: dict = Depends(get_current_user)):
+async def list_skills(_: dict = Depends(get_optional_current_user)):
     return await resources.list_skills(persistence.store)
 
 
 @router.post("/skills", response_model=SkillOut, status_code=201)
-async def create_skill(body: SkillIn, _: dict = Depends(get_current_user)):
+async def create_skill(body: SkillIn, _: dict = Depends(get_optional_current_user)):
     if await resources.get_skill(persistence.store, body.name):
         raise Conflict(f"Skill '{body.name}' already exists")
     return await resources.create_skill(persistence.store, body)
 
 
 @router.get("/skills/{name}", response_model=SkillOut)
-async def get_skill(name: str, _: dict = Depends(get_current_user)):
+async def get_skill(name: str, _: dict = Depends(get_optional_current_user)):
     skill = await resources.get_skill(persistence.store, name)
     if skill is None:
         raise NotFound("Skill not found")
@@ -47,7 +47,7 @@ async def get_skill(name: str, _: dict = Depends(get_current_user)):
 
 
 @router.put("/skills/{name}", response_model=SkillOut)
-async def update_skill(name: str, body: SkillIn, _: dict = Depends(get_current_user)):
+async def update_skill(name: str, body: SkillIn, _: dict = Depends(get_optional_current_user)):
     try:
         return await resources.update_skill(persistence.store, name, body)
     except KeyError:
@@ -55,13 +55,15 @@ async def update_skill(name: str, body: SkillIn, _: dict = Depends(get_current_u
 
 
 @router.delete("/skills/{name}", status_code=204)
-async def delete_skill(name: str, _: dict = Depends(get_current_user)):
+async def delete_skill(name: str, _: dict = Depends(get_optional_current_user)):
     if not await resources.delete_skill(persistence.store, name):
         raise NotFound("Skill not found")
 
 
 @router.delete("/skills/{name}/files/{file_path:path}", status_code=204)
-async def delete_skill_file(name: str, file_path: str, _: dict = Depends(get_current_user)):
+async def delete_skill_file(
+    name: str, file_path: str, _: dict = Depends(get_optional_current_user)
+):
     """Delete one bundled skill file (scripts/, references/, assets/, ...)."""
     if not resources.SKILL_FILE_PATH_RE.fullmatch(file_path) or file_path.lower() == "skill.md":
         raise HTTPException(status_code=422, detail="Invalid skill file path")
@@ -75,19 +77,19 @@ async def delete_skill_file(name: str, file_path: str, _: dict = Depends(get_cur
 
 
 @router.get("/tools", response_model=list[ToolServerOut])
-async def list_tool_servers(_: dict = Depends(get_current_user)):
+async def list_tool_servers(_: dict = Depends(get_optional_current_user)):
     return await resources.list_tool_servers(persistence.store)
 
 
 @router.post("/tools", response_model=ToolServerOut, status_code=201)
-async def create_tool_server(body: ToolServerIn, _: dict = Depends(get_current_user)):
+async def create_tool_server(body: ToolServerIn, _: dict = Depends(get_optional_current_user)):
     if await resources.get_tool_server(persistence.store, body.name):
         raise Conflict(f"Tool server '{body.name}' already exists")
     return await resources.create_tool_server(persistence.store, body)
 
 
 @router.get("/tools/{name}", response_model=ToolServerOut)
-async def get_tool_server(name: str, _: dict = Depends(get_current_user)):
+async def get_tool_server(name: str, _: dict = Depends(get_optional_current_user)):
     server = await resources.get_tool_server(persistence.store, name)
     if server is None:
         raise NotFound("Tool server not found")
@@ -95,7 +97,9 @@ async def get_tool_server(name: str, _: dict = Depends(get_current_user)):
 
 
 @router.put("/tools/{name}", response_model=ToolServerOut)
-async def update_tool_server(name: str, body: ToolServerIn, _: dict = Depends(get_current_user)):
+async def update_tool_server(
+    name: str, body: ToolServerIn, _: dict = Depends(get_optional_current_user)
+):
     try:
         return await resources.update_tool_server(persistence.store, name, body)
     except KeyError:
@@ -103,13 +107,13 @@ async def update_tool_server(name: str, body: ToolServerIn, _: dict = Depends(ge
 
 
 @router.delete("/tools/{name}", status_code=204)
-async def delete_tool_server(name: str, _: dict = Depends(get_current_user)):
+async def delete_tool_server(name: str, _: dict = Depends(get_optional_current_user)):
     if not await resources.delete_tool_server(persistence.store, name):
         raise NotFound("Tool server not found")
 
 
 @router.post("/tools/reconnect")
-async def reconnect_tools(request: Request, _: dict = Depends(get_current_user)):
+async def reconnect_tools(request: Request, _: dict = Depends(get_optional_current_user)):
     """Reconnect MCP servers from the store and rebuild the agent (live)."""
     await mcp_servers.connect(store=persistence.store)
     search_tool = build_search_tool()
