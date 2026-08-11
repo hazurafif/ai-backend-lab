@@ -59,6 +59,7 @@ from .config import settings
 from .db import persistence
 from .dependencies import get_current_user
 from .mcp_client import mcp_servers
+from .searxng import build_search_tool, set_search_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -344,19 +345,22 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             await mcp_servers.connect()
         except Exception:
             logger.exception("MCP connect failed; continuing without MCP tools")
+        search_tool = build_search_tool()
         app.state.agent = agent or build_agent(
             checkpointer=persistence.checkpointer,
             store=persistence.store,
             mcp_tools=mcp_servers.tools,
+            extra_tools=[search_tool] if search_tool else None,
             model=settings.model,
             system_prompt=settings.system_prompt,
             interrupt_on=settings.interrupt_on,
         )
         logger.info(
-            "Agent ready: model=%s persistence=%s mcp=%s",
+            "Agent ready: model=%s persistence=%s mcp=%s searxng=%s",
             settings.model,
             persistence.backend_name,
             mcp_servers.names or "none",
+            "enabled" if search_tool else "not configured",
         )
         yield
         await persistence.stop()
@@ -378,6 +382,10 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             "mcp_servers": mcp_servers.names,
             "model": settings.model,
             "interrupt_on": settings.interrupt_on,
+            "searxng": {
+                "installed": settings.searxng_url is not None,
+                "enabled": settings.searxng_enabled,
+            },
         }
 
     @app.post("/login", response_model=schemas.Token)
@@ -409,6 +417,7 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
         current_user: dict = Depends(get_current_user),
     ):
         agent: CompiledStateGraph = request.app.state.agent
+        set_search_enabled(body.enable_search)
         return _sse_response(
             _agent_stream(
                 agent, current_user["username"], message=body.message, thread_id=body.thread_id
@@ -430,6 +439,7 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
         (starter mode, matching the frontend which has no login yet).
         """
         agent: CompiledStateGraph = request.app.state.agent
+        set_search_enabled(body.enable_search)
         text = ai_sdk_chat.extract_user_message(body.messages)
         if not text:
             raise HTTPException(status_code=422, detail="No user message found in request")

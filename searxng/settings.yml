@@ -1,0 +1,17 @@
+# SearXNG settings override for local dev, mounted into the `searxng`
+# docker-compose service (/etc/searxng/settings.yml).
+#
+# `use_default_settings: true` merges this file on top of the packaged
+# defaults. The one change the backend needs: JSON output enabled, otherwise
+# the web_search tool's /search?format=json calls get a 403.
+use_default_settings: true
+
+server:
+  secret_key: "dev-searxng-secret-change-me"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 1

@@ -32,6 +32,13 @@ class ChatRequest(BaseModel):
         default=None,
         description="Conversation id. Omit to start a new conversation.",
     )
+    enable_search: bool | None = Field(
+        default=None,
+        description=(
+            "Override the SearXNG web search toggle for this request "
+            "(None = use SEARXNG_ENABLED config)"
+        ),
+    )
 
 
 class ThreadOut(BaseModel):
@@ -58,6 +65,14 @@ class AiSdkChatRequest(BaseModel):
         default=None,
         alias="selectedChatModel",
         description="Model id chosen in the UI (informational for now)",
+    )
+    enable_search: bool | None = Field(
+        default=None,
+        alias="enableSearch",
+        description=(
+            "Override the SearXNG web search toggle for this chat "
+            "(None = use SEARXNG_ENABLED config)"
+        ),
     )
 
 

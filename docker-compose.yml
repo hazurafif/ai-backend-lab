@@ -15,5 +15,15 @@ services:
       timeout: 3s
       retries: 10
 
+  # Self-hosted metasearch engine backing the agent's web_search tool.
+  # JSON API is enabled via ./searxng/settings.yml (required by the backend).
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
+
 volumes:
   pgdata:

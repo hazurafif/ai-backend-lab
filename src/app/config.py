@@ -69,6 +69,21 @@ class Settings:
         default_factory=lambda: os.environ.get("MCP_SERVERS_FILE", "mcp_servers.json")
     )
 
+    # --- Web search (SearXNG, self-hosted) ---
+    # SEARXNG_URL unset -> the web_search tool is not registered at all.
+    # SEARXNG_ENABLED=false -> tool exists but returns a "disabled" message.
+    # Per-request override: {"enable_search": false} in /chat and /api/chat bodies.
+    searxng_url: str | None = field(default_factory=lambda: os.environ.get("SEARXNG_URL") or None)
+    searxng_enabled: bool = field(
+        default_factory=lambda: os.environ.get("SEARXNG_ENABLED", "true").lower() == "true"
+    )
+    searxng_max_results: int = field(
+        default_factory=lambda: int(os.environ.get("SEARXNG_MAX_RESULTS", "5"))
+    )
+    searxng_timeout: float = field(
+        default_factory=lambda: float(os.environ.get("SEARXNG_TIMEOUT", "10"))
+    )
+
     # --- API ---
     cors_origins: list[str] = field(
         default_factory=lambda: [

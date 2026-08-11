@@ -48,6 +48,7 @@ def build_agent(
     checkpointer: Checkpointer,
     store: BaseStore,
     mcp_tools: list[BaseTool] | None = None,
+    extra_tools: list[BaseTool] | None = None,
     model: str | None = None,
     system_prompt: str | None = None,
     interrupt_on: dict[str, Any] | None = None,
@@ -58,6 +59,7 @@ def build_agent(
         checkpointer: persists conversation state per thread_id (Postgres or in-memory).
         store: long-term memory store (Postgres or in-memory).
         mcp_tools: tools loaded from MCP servers (gofastmcp).
+        extra_tools: additional tools, e.g. the SearXNG web_search tool.
         model: provider:model string, e.g. "openai:gpt-4o-mini".
         system_prompt: agent instructions.
         interrupt_on: {"tool_name": True} to pause for human approval.
@@ -72,14 +74,16 @@ def build_agent(
         },
     )
 
+    tools = list(mcp_tools or []) + list(extra_tools or [])
+
     agent = create_deep_agent(
         model=model,
-        tools=list(mcp_tools or []),
+        tools=tools,
         system_prompt=system_prompt,
         checkpointer=checkpointer,
         store=store,
         backend=backend,
         interrupt_on=interrupt_on or None,
     )
-    logger.info("Deep agent built (model=%s, %d MCP tools)", model, len(mcp_tools or []))
+    logger.info("Deep agent built (model=%s, %d tools)", model, len(tools))
     return agent

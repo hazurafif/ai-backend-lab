@@ -11,6 +11,8 @@ A FastAPI backend wrapping **LangChain Deep Agents** as the core agent:
   `streamable_http` or `stdio` via `langchain-mcp-adapters`. MCP tool outputs are
   streamed to the frontend as structured events — ready to render as interactive
   UI elements (cards, charts, forms) later.
+- **Web search**: a `web_search` tool backed by a self-hosted **SearXNG**
+  metasearch instance, toggleable from config and per-request (frontend).
 - **Streaming**: `POST /chat` returns a Server-Sent Events (SSE) stream with typed
   events (message deltas, tool calls, subagents, final state).
 - **Auth**: JWT login (`/login`), protected chat/thread endpoints.
@@ -55,7 +57,7 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
 | `GET /users/me` | Bearer | Current user |
-| `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on |
+| `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on, searxng |
 
 ### Chat
 
@@ -71,6 +73,8 @@ curl -N -X POST http://127.0.0.1:8000/chat \
 - Omit `thread_id` (or pass `null`) to start a new conversation; the new id is
   returned in the final `done` event.
 - Pass an existing `thread_id` to continue a conversation (Postgres checkpointing).
+- Optional `enable_search` field overrides the SearXNG toggle per request
+  (`null`/absent = use `SEARXNG_ENABLED` config).
 
 ### SSE events
 
@@ -109,6 +113,8 @@ instead of the raw SSE contract above. Request body:
 
 - The last user message runs through the agent; `id` is reused as the
   `thread_id` so conversations continue.
+- Optional `enableSearch` field overrides the SearXNG web search toggle per
+  chat (frontend search switch).
 - Response is the AI SDK data-stream protocol (SSE `data:` chunks:
   `start`, `text-*`, `custom` for tool/subagent activity, `finish`, `[DONE]`).
 - Auth is optional for now: a Bearer JWT scopes thread metadata to that user;
@@ -153,6 +159,30 @@ MCP_SERVERS_JSON='{"weather-demo":{"url":"http://127.0.0.1:8090/mcp","transport"
 # GET /health -> mcp_servers: ["weather-demo"]; ask the agent about the weather in Jakarta
 ```
 
+## Web search (SearXNG)
+
+The agent gets a `web_search` tool backed by a self-hosted
+[SearXNG](https://docs.searxng.org/) metasearch instance (no API key, no
+per-query cost — SearXNG aggregates Google/Bing/DDG/... for you). JSON output
+is enabled via the mounted `searxng/settings.yml` (`search.formats: [html, json]`).
+
+```bash
+docker compose up -d searxng        # http://localhost:8080
+# .env:
+SEARXNG_URL=http://localhost:8080
+SEARXNG_ENABLED=true
+```
+
+Toggle levels:
+
+| Level | Switch | Effect |
+|---|---|---|
+| Install | `SEARXNG_URL` set | `web_search` tool is registered on the agent (unset = invisible, zero overhead) |
+| Global | `SEARXNG_ENABLED=true/false` | Tool exists but returns "Web search is disabled for this request." |
+| Per request | `"enable_search": false` in `POST /chat` / `"enableSearch": false` in `POST /api/chat` | Frontend toggle per message; overrides the config |
+
+`GET /health` reports `"searxng": {"installed": bool, "enabled": bool}`.
+
 ## Postgres
 
 Start Postgres, then set `DATABASE_URI`:
@@ -178,6 +208,7 @@ src/app/          package (src layout, installed editable by uv sync)
   agent.py        create_deep_agent factory (persistence, MCP tools, memory backend)
   db.py           Postgres checkpointer + store (in-memory fallback)
   mcp_client.py   MultiServerMCPClient from config (streamable_http / stdio)
+  searxng.py      SearXNG web_search tool (toggleable client + tool factory)
   config.py       settings from .env
   auth.py         bcrypt + JWT
   schemas.py      API models
