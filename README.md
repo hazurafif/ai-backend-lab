@@ -211,7 +211,7 @@ Start Postgres, then set `DATABASE_URI`:
 
 ```bash
 docker compose up -d postgres        # or: brew install postgresql@16 && brew services start postgresql@16
-# export DATABASE_URI=postgresql+psycopg://aibackend:aibackend@localhost:5432/aibackend
+# export DATABASE_URI=postgresql://aibackend:aibackend@localhost:5432/aibackend
 ```
 
 Tables are created automatically at startup (`setup()`). Without `DATABASE_URI`
