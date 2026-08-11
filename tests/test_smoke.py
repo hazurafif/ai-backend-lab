@@ -114,6 +114,17 @@ def parse_sse_chunk(chunk: str) -> tuple[str, dict]:
     return ev.removeprefix("event: "), json.loads(rest.removeprefix("data: ").strip())
 
 
+def parse_sdk_data_lines(text: str) -> list[dict]:
+    """Parse the `data:` lines of an AI SDK data-stream response."""
+    chunks: list[dict] = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            payload = line.removeprefix("data: ")
+            if payload != "[DONE]":
+                chunks.append(json.loads(payload))
+    return chunks
+
+
 async def collect_stream(agent, username, **kwargs) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
     async for chunk in _agent_stream(agent, username, **kwargs):
@@ -185,6 +196,76 @@ async def test_interrupt_and_resume(memory_persistence):
 
     texts = [extract_text(m) for m in done2["messages"] if m.get("type") == "ai"]
     assert any("Final answer" in t for t in texts), texts
+
+
+async def test_ai_sdk_extract_user_message():
+    from app.ai_sdk_chat import extract_user_message
+
+    # parts format (what useChat sends)
+    parts = [
+        {"id": "u1", "role": "user", "parts": [{"type": "text", "text": "hello via sdk"}]},
+        {"id": "a1", "role": "assistant", "parts": [{"type": "text", "text": "hi"}]},
+        {"id": "u2", "role": "user", "parts": [{"type": "text", "text": "second msg"}]},
+    ]
+    assert extract_user_message(parts) == "second msg"
+    # legacy string content
+    assert extract_user_message([{"role": "user", "content": "plain"}]) == "plain"
+    # empty / no user message
+    assert extract_user_message([]) == ""
+    assert extract_user_message([{"role": "assistant", "content": "x"}]) == ""
+
+
+async def test_ai_sdk_chat_endpoint(memory_persistence):
+    """POST /api/chat speaks the AI SDK data-stream protocol (useChat)."""
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+
+    async with app.router.lifespan_context(app):
+        app.state.agent = build_scripted_agent(
+            memory_persistence.checkpointer, memory_persistence.store
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            r = await client.post(
+                "/api/chat",
+                json={
+                    "id": "chat-abc",
+                    "selectedChatModel": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "id": "m1",
+                            "role": "user",
+                            "parts": [{"type": "text", "text": "hello via sdk"}],
+                        }
+                    ],
+                },
+            )
+            assert r.status_code == 200, r.text
+
+            chunks = parse_sdk_data_lines(r.text)
+            types = [c["type"] for c in chunks]
+            assert types[0] == "start", types
+            assert "text-start" in types, "missing text-start"
+            assert "text-delta" in types, "missing text-delta"
+            assert "text-end" in types, "missing text-end"
+            assert types[-1] == "finish", types
+            assert chunks[-1]["finishReason"] == "stop"
+            assert "data: [DONE]" in r.text
+
+            # tool activity surfaces as custom chunks (echo tool in scripted agent)
+            custom = [c for c in chunks if c["type"] == "custom"]
+            kinds = [c["kind"] for c in custom]
+            assert "tool-start" in kinds and "tool-end" in kinds, kinds
+            tool_start = next(c for c in custom if c["kind"] == "tool-start")
+            assert tool_start["providerMetadata"]["name"] == "echo"
+
+            # text of the answer is streamed verbatim
+            text = "".join(c["delta"] for c in chunks if c["type"] == "text-delta")
+            assert "Final answer from the agent." in text, text
+
+            # no user message -> 422
+            r = await client.post("/api/chat", json={"id": "x", "messages": []})
+            assert r.status_code == 422, r.text
 
 
 async def test_http_end_to_end(memory_persistence):

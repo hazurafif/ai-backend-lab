@@ -50,6 +50,7 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 |---|---|---|
 | `POST /login` | – | OAuth2 form `username`/`password` → JWT |
 | `POST /chat` | Bearer | Run the agent; **SSE stream** of events |
+| `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`) |
 | `GET /threads` | Bearer | Conversations of the current user (newest first) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
@@ -92,6 +93,28 @@ content (`tool_end.output.content` may contain multiple blocks); `subagent_*`
 events render delegation cards; `done.messages` is the source of truth to
 persist client-side (note: checkpointed message `content` is a plain string,
 while streamed `message` events use content blocks).
+
+### AI SDK endpoint (`POST /api/chat`)
+
+The Vercel AI SDK chat frontend (`ai-frontend-lab`) talks to this endpoint
+instead of the raw SSE contract above. Request body:
+
+```json
+{
+  "id": "chat-uuid",
+  "messages": [{"id": "m1", "role": "user", "parts": [{"type": "text", "text": "hi"}]}],
+  "selectedChatModel": "openai:deepseek-v4-flash"
+}
+```
+
+- The last user message runs through the agent; `id` is reused as the
+  `thread_id` so conversations continue.
+- Response is the AI SDK data-stream protocol (SSE `data:` chunks:
+  `start`, `text-*`, `custom` for tool/subagent activity, `finish`, `[DONE]`).
+- Auth is optional for now: a Bearer JWT scopes thread metadata to that user;
+  without one, a `guest` namespace is used (the frontend has no login yet).
+- Human-in-the-loop pauses surface as an `error` chunk (resume is not wired
+  to this protocol yet).
 
 ## MCP servers (gofastmcp)
 

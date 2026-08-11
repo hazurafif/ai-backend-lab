@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Token(BaseModel):
@@ -37,6 +39,26 @@ class ThreadOut(BaseModel):
     title: str
     created_at: str
     updated_at: str | None = None
+
+
+class AiSdkChatRequest(BaseModel):
+    """Request body of the AI SDK data-stream endpoint (frontend useChat)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str | None = Field(
+        default=None,
+        description="Chat id from the frontend; reused as the agent thread_id",
+    )
+    messages: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="AI SDK UIMessages; the last user message becomes the prompt",
+    )
+    selected_chat_model: str | None = Field(
+        default=None,
+        alias="selectedChatModel",
+        description="Model id chosen in the UI (informational for now)",
+    )
 
 
 class ResumeRequest(BaseModel):
