@@ -37,3 +37,15 @@ class ThreadOut(BaseModel):
     title: str
     created_at: str
     updated_at: str | None = None
+
+
+class ResumeRequest(BaseModel):
+    """Decision(s) for a human-in-the-loop interrupt.
+
+    Either a single `decision` (one action request) or a full `decisions`
+    list (must match the number of `action_requests` in the interrupt
+    payload). Decision types: approve | edit | reject | respond.
+    """
+
+    decision: dict | None = Field(default=None)
+    decisions: list[dict] | None = Field(default=None)

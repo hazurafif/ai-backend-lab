@@ -4,6 +4,7 @@ Uses a scripted fake chat model (same trick as deepagents' own tests) that
 returns a fixed sequence of responses. Exercises the full pipeline:
 
     HTTP POST /chat  ->  agent astream_events(v3)  ->  SSE events
+    interrupt + resume (human-in-the-loop)
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from app import auth, db
 from app.agent import build_agent
 from app.config import settings
 from app.main import _agent_stream, create_app
-from app.schemas import ChatRequest
 
 pytestmark = pytest.mark.filterwarnings(
     r"ignore:The v3 streaming protocol on Pregel is experimental."
@@ -89,7 +89,7 @@ class Scripted(BaseChatModel):
         return self
 
 
-def build_scripted_agent(checkpointer, store):
+def build_scripted_agent(checkpointer, store, *, interrupt_on: dict | None = None):
     model = Scripted(
         responses=[
             AIMessage(
@@ -105,6 +105,7 @@ def build_scripted_agent(checkpointer, store):
         mcp_tools=[echo],
         model=model,
         system_prompt="test",
+        interrupt_on=interrupt_on,
     )
 
 
@@ -113,9 +114,9 @@ def parse_sse_chunk(chunk: str) -> tuple[str, dict]:
     return ev.removeprefix("event: "), json.loads(rest.removeprefix("data: ").strip())
 
 
-async def collect_stream(request: ChatRequest, username: str, agent) -> list[tuple[str, dict]]:
+async def collect_stream(agent, username, **kwargs) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
-    async for chunk in _agent_stream(request, username, agent):
+    async for chunk in _agent_stream(agent, username, **kwargs):
         events.append(parse_sse_chunk(chunk))
     return events
 
@@ -127,7 +128,7 @@ async def collect_stream(request: ChatRequest, username: str, agent) -> list[tup
 
 async def test_direct_streaming_pipeline(memory_persistence):
     agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
-    events = await collect_stream(ChatRequest(message="hi there"), "tester", agent)
+    events = await collect_stream(agent, "tester", message="hi there")
 
     names = [e for e, _ in events]
     assert "message_delta" in names, "missing message_delta"
@@ -136,10 +137,54 @@ async def test_direct_streaming_pipeline(memory_persistence):
     assert "tool_end" in names, "missing tool_end"
     done = [d for e, d in events if e == "done"]
     assert done and done[-1].get("messages"), "missing done with messages"
+    assert done[-1].get("interrupted") is None, "should not be interrupted"
 
     tool_end = next(d for e, d in events if e == "tool_end")
     assert tool_end["name"] == "echo"
     assert tool_end["output"]["content"] == "echo:hello", tool_end
+
+
+async def test_interrupt_and_resume(memory_persistence):
+    agent = build_scripted_agent(
+        memory_persistence.checkpointer,
+        memory_persistence.store,
+        interrupt_on={"echo": True},
+    )
+
+    # Run 1: the tool call is paused for human approval.
+    events = await collect_stream(agent, "tester", message="approve this tool call")
+    names = [e for e, _ in events]
+    assert "interrupt" in names, "missing interrupt event"
+
+    interrupt = next(d for e, d in events if e == "interrupt")
+    action_requests = interrupt["interrupts"][0]["action_requests"]
+    assert action_requests[0]["name"] == "echo", action_requests
+    assert action_requests[0]["args"] == {"x": "hello"}
+
+    done = [d for e, d in events if e == "done"][-1]
+    assert done["interrupted"] is True
+    assert not any(e == "tool_start" for e in names), "tool must NOT run before approval"
+    thread_id = done["thread_id"]
+
+    # Resume with approval -> tool executes, final answer streams.
+    events2 = await collect_stream(
+        agent, "tester", thread_id=thread_id, resume={"decisions": [{"type": "approve"}]}
+    )
+    names2 = [e for e, _ in events2]
+    assert "tool_start" in names2 and "tool_end" in names2, "tool should run after approval"
+    done2 = [d for e, d in events2 if e == "done"][-1]
+    assert not done2.get("interrupted"), "run should complete after resume"
+
+    def extract_text(m: dict) -> str:
+        c = m.get("content")
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            return " ".join(b.get("text", "") for b in c if b.get("type") == "text")
+        return ""
+
+    texts = [extract_text(m) for m in done2["messages"] if m.get("type") == "ai"]
+    assert any("Final answer" in t for t in texts), texts
 
 
 async def test_http_end_to_end(memory_persistence):
@@ -174,3 +219,11 @@ async def test_http_end_to_end(memory_persistence):
             thread_id = threads[0]["thread_id"]
             r = await client.get(f"/threads/{thread_id}/messages", headers=headers)
             assert r.status_code == 200 and len(r.json()) >= 2, r.text
+
+            # resume on a non-interrupted thread -> 409
+            r = await client.post(
+                f"/threads/{thread_id}/resume",
+                json={"decision": {"type": "approve"}},
+                headers=headers,
+            )
+            assert r.status_code == 409, r.text

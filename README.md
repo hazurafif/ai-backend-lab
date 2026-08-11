@@ -52,8 +52,9 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `POST /chat` | Bearer | Run the agent; **SSE stream** of events |
 | `GET /threads` | Bearer | Conversations of the current user (newest first) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
+| `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
 | `GET /users/me` | Bearer | Current user |
-| `GET /health` | – | Status: persistence backend, MCP servers, model |
+| `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on |
 
 ### Chat
 
@@ -80,15 +81,17 @@ event: tool_delta      {"id","name","delta"}                 tool output chunk
 event: tool_end        {"id","name","output","is_error"}     tool finished (output = ToolMessage)
 event: subagent        {"name","status","output"?,"error"?}  delegated task lifecycle
 event: subagent_delta  {"subagent","delta"}                  subagent token chunk
+event: interrupt       {"thread_id","interrupts"[]}          run paused for human approval
 event: error           {"source","message"}                  recoverable error
-event: done            {"thread_id","messages"[]}            final state
+event: done            {"thread_id","messages"[],"interrupted"?}  final state
 ```
 
 Frontend plan: `message_delta` renders the streaming bubble; `tool_*` events can
 render tool-call chips and, later, interactive components from MCP structured
 content (`tool_end.output.content` may contain multiple blocks); `subagent_*`
 events render delegation cards; `done.messages` is the source of truth to
-persist client-side.
+persist client-side (note: checkpointed message `content` is a plain string,
+while streamed `message` events use content blocks).
 
 ## MCP servers (gofastmcp)
 
@@ -162,3 +165,41 @@ scripts/
 ```
 
 Conventions live in `AGENTS.md` (ruff, git workflow, structure).
+
+## Human-in-the-loop
+
+Set `INTERRUPT_ON_JSON` to pause runs before sensitive tool calls:
+
+```bash
+INTERRUPT_ON_JSON='{"write_file": true, "edit_file": true}' uv run uvicorn app.main:app --port 8000
+```
+
+When a paused tool is requested, the stream emits:
+
+```
+event: interrupt
+data: {"thread_id": "...", "interrupts": [{"action_requests": [{"name": "write_file", "args": {...}, "description": "..."}], "review_configs": [...]}]}
+
+event: done
+data: {"thread_id": "...", "messages": [...], "interrupted": true}
+```
+
+The frontend shows an approval UI, then calls `POST /threads/{id}/resume`:
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/threads/<id>/resume \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"decision": {"type": "approve"}}'
+```
+
+Decision types (one per `action_request`; use `decisions: [...]` for several):
+
+| type | body |
+|---|---|
+| `approve` | run the tool as requested |
+| `edit` | `{"type": "edit", "edited_action": {"name": ..., "args": {...}}}` |
+| `reject` | `{"type": "reject", "message": "..."}` — tool skipped, model informed |
+| `respond` | `{"type": "respond", "message": "..."}` — answer on behalf of the tool |
+
+Resuming a thread that is not waiting returns `409`. The resumed run streams
+normal events (`tool_start`/`tool_end`, `message_delta`, ...) until `done`.

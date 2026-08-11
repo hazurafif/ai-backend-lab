@@ -4,6 +4,7 @@ Endpoints:
   POST /chat                      -> SSE stream of agent events
   GET  /threads                   -> conversations for the current user
   GET  /threads/{id}/messages     -> full message history of a thread
+  POST /threads/{id}/resume       -> resume an interrupted (HITL) run
   POST /login                     -> JWT
   GET  /users/me                  -> current user
   GET  /health                    -> status
@@ -16,8 +17,19 @@ SSE events (event: <name>, data: <json>):
   tool_end        {"id", "name", "output", "is_error"}      tool call finished
   subagent        {"name", "status", "output"?, "error"?}   delegated task lifecycle
   subagent_delta  {"subagent", "delta"}                     subagent token chunk
+  interrupt       {"thread_id", "interrupts"[{value, when}]} run paused for human input
   error           {"source", "message"}                     recoverable stream error
-  done            {"thread_id", "messages"[]}               final state (messages serialized)
+  done            {"thread_id", "messages"[], "interrupted"?} final state
+
+Human-in-the-loop: when a run interrupts (e.g. `interrupt_on={"write_file": true}`),
+the stream emits `interrupt` with the HITLRequest payloads, then `done` with
+`interrupted: true`. The frontend shows an approval UI and calls
+POST /threads/{id}/resume with a decision:
+  {"decision": {"type": "approve"}}
+  {"decision": {"type": "edit", "edited_action": {"name": ..., "args": {...}}}}
+  {"decision": {"type": "reject", "message": "..."}}
+  {"decision": {"type": "respond", "message": "..."}}
+or a full list: {"decisions": [...]} (must match the number of action_requests).
 """
 
 from __future__ import annotations
@@ -36,7 +48,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphInterrupt
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 
 from . import auth, schemas
 from .agent import build_agent
@@ -111,6 +125,20 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _collect_interrupts(snapshot: Any) -> list[Any]:
+    """Extract interrupt payloads from a state snapshot's pending tasks."""
+    out: list[Any] = []
+    for task in getattr(snapshot, "tasks", None) or []:
+        for it in getattr(task, "interrupts", None) or []:
+            if hasattr(it, "value"):  # langgraph Interrupt dataclass
+                out.append(it.value)
+            elif isinstance(it, dict):
+                out.append(it.get("value"))
+            else:
+                out.append(it)
+    return out
+
+
 def _sse_response(gen: AsyncIterator[str]) -> StreamingResponse:
     return StreamingResponse(gen, media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -121,22 +149,37 @@ def _sse_response(gen: AsyncIterator[str]) -> StreamingResponse:
 
 
 async def _agent_stream(
-    request: schemas.ChatRequest, username: str, agent: CompiledStateGraph
+    agent: CompiledStateGraph,
+    username: str,
+    *,
+    message: str | None = None,
+    thread_id: str | None = None,
+    resume: Any = None,
 ) -> AsyncIterator[str]:
-    """Run the agent and forward v3 stream projections as normalized SSE events."""
-    thread_id = request.thread_id or f"thread-{uuid.uuid4().hex[:12]}"
+    """Run the agent and forward v3 stream projections as normalized SSE events.
+
+    - `message`: new user message for /chat
+    - `resume`: value for `Command(resume=...)` (HITL continuation, /resume)
+    """
+    thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Record thread metadata in the store so GET /threads can list conversations.
-    now = _now_iso()
-    try:
-        await persistence.store.aput(
-            ("threads", username),
-            thread_id,
-            {"title": request.message[:80], "created_at": now, "updated_at": now},
-        )
-    except Exception:
-        logger.exception("failed to record thread metadata")
+    if message is not None:
+        # Record thread metadata in the store so GET /threads can list conversations.
+        now = _now_iso()
+        try:
+            await persistence.store.aput(
+                ("threads", username),
+                thread_id,
+                {"title": message[:80], "created_at": now, "updated_at": now},
+            )
+        except Exception:
+            logger.exception("failed to record thread metadata")
+
+    if resume is not None:
+        run_input: Any = Command(resume=resume)
+    else:
+        run_input = {"messages": [HumanMessage(content=message)]}
 
     queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=256)
 
@@ -227,13 +270,11 @@ async def _agent_stream(
             async for _ in run.values:
                 pass
 
+    interrupted = {"flag": False}
+
     # Start the run.
     try:
-        run = await agent.astream_events(
-            {"messages": [HumanMessage(content=request.message)]},
-            config=config,
-            version="v3",
-        )
+        run = await agent.astream_events(run_input, config=config, version="v3")
     except Exception as exc:
         yield _sse("error", {"source": "run", "message": str(exc)})
         yield _sse("done", {"thread_id": thread_id, "messages": []})
@@ -248,7 +289,9 @@ async def _agent_stream(
             return_exceptions=True,
         )
         for r in results:
-            if isinstance(r, Exception):
+            if isinstance(r, GraphInterrupt):
+                interrupted["flag"] = True
+            elif isinstance(r, Exception):
                 logger.error("stream consumer failed: %r", r)
         await queue.put(None)
 
@@ -262,15 +305,29 @@ async def _agent_stream(
     finally:
         producer.cancel()
 
-    # Final state.
+    # Final state. With v3 streaming a HITL interrupt does not raise — the
+    # run ends normally, so we detect it from the persisted state's pending
+    # tasks instead.
     messages: list[dict] = []
     try:
         final = await run.output()
         if final:
             messages = [_serialize_message(m) for m in final.get("messages", [])]
+    except GraphInterrupt:
+        pass  # older runtimes raise; handled via snapshot below
     except Exception as exc:
         yield _sse("error", {"source": "final", "message": str(exc)})
-    yield _sse("done", {"thread_id": thread_id, "messages": messages})
+        yield _sse("done", {"thread_id": thread_id, "messages": messages})
+        return
+
+    snapshot = await agent.aget_state(config)
+    interrupts = _collect_interrupts(snapshot)
+    if interrupts:
+        # Run paused for human input: surface the HITL requests.
+        yield _sse("interrupt", {"thread_id": thread_id, "interrupts": interrupts})
+        yield _sse("done", {"thread_id": thread_id, "messages": messages, "interrupted": True})
+    else:
+        yield _sse("done", {"thread_id": thread_id, "messages": messages})
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +376,7 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             "persistence": persistence.backend_name,
             "mcp_servers": mcp_servers.names,
             "model": settings.model,
+            "interrupt_on": settings.interrupt_on,
         }
 
     @app.post("/login", response_model=schemas.Token)
@@ -350,7 +408,42 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
         current_user: dict = Depends(get_current_user),
     ):
         agent: CompiledStateGraph = request.app.state.agent
-        return _sse_response(_agent_stream(body, current_user["username"], agent))
+        return _sse_response(
+            _agent_stream(
+                agent, current_user["username"], message=body.message, thread_id=body.thread_id
+            )
+        )
+
+    @app.post("/threads/{thread_id}/resume")
+    async def resume_thread(
+        request: Request,
+        thread_id: str,
+        body: schemas.ResumeRequest,
+        current_user: dict = Depends(get_current_user),
+    ):
+        """Resume a run paused on a human-in-the-loop interrupt."""
+        agent: CompiledStateGraph = request.app.state.agent
+        config = {"configurable": {"thread_id": thread_id}}
+
+        snapshot = await agent.aget_state(config)
+        if snapshot is None or not snapshot.values.get("messages"):
+            raise HTTPException(status_code=404, detail="Thread not found")
+        waiting = any(getattr(t, "interrupts", None) for t in (snapshot.tasks or []))
+        if not waiting:
+            raise HTTPException(status_code=409, detail="Thread is not waiting for input")
+
+        if body.decisions is not None:
+            decisions = body.decisions
+        elif body.decision is not None:
+            decisions = [body.decision]
+        else:
+            raise HTTPException(status_code=422, detail="Provide 'decision' or 'decisions'")
+
+        # HITL middleware expects the resume value as {"decisions": [...]}.
+        resume_value = {"decisions": decisions}
+        return _sse_response(
+            _agent_stream(agent, current_user["username"], thread_id=thread_id, resume=resume_value)
+        )
 
     @app.get("/threads", response_model=list[schemas.ThreadOut])
     async def list_threads(current_user: dict = Depends(get_current_user)):
