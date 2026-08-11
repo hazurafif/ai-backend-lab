@@ -356,11 +356,12 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             interrupt_on=settings.interrupt_on,
         )
         logger.info(
-            "Agent ready: model=%s persistence=%s mcp=%s searxng=%s",
+            "Agent ready: model=%s persistence=%s mcp=%s searxng=%s execute=%s",
             settings.model,
             persistence.backend_name,
             mcp_servers.names or "none",
             "enabled" if search_tool else "not configured",
+            "enabled" if settings.execute_enabled else "disabled",
         )
         yield
         await persistence.stop()
@@ -385,6 +386,10 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             "searxng": {
                 "installed": settings.searxng_url is not None,
                 "enabled": settings.searxng_enabled,
+            },
+            "execute": {
+                "enabled": settings.execute_enabled,
+                "max_timeout": settings.execute_max_timeout,
             },
         }
 

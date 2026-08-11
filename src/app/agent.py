@@ -20,11 +20,15 @@ from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends import StateBackend
 from deepagents.backends.composite import CompositeBackend
+from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.backends.store import StoreBackend
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
+
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +71,27 @@ def build_agent(
     # Filesystem backend: thread-scoped scratch space by default, but
     # `/memories/` is routed to the persistent store so memory survives
     # across conversations, scoped per user.
+    # With EXECUTE_ENABLED=true the default backend is LocalShellBackend, which
+    # makes the built-in `execute` tool run host shell commands (unrestricted —
+    # dev/trusted environments only; gate with interrupt_on={"execute": True}).
+    default_backend = (
+        LocalShellBackend(inherit_env=settings.execute_inherit_env)
+        if (settings.execute_enabled)
+        else StateBackend()
+    )
     backend = CompositeBackend(
-        default=StateBackend(),
+        default=default_backend,
         routes={
             "/memories/": StoreBackend(store=store, namespace=_user_namespace_factory),
         },
+    )
+
+    # Replace the default FilesystemMiddleware only when execution is enabled,
+    # so EXECUTE_MAX_TIMEOUT applies to the execute tool's per-command cap.
+    middleware = (
+        [FilesystemMiddleware(backend=backend, max_execute_timeout=settings.execute_max_timeout)]
+        if settings.execute_enabled
+        else None
     )
 
     tools = list(mcp_tools or []) + list(extra_tools or [])
@@ -83,7 +103,13 @@ def build_agent(
         checkpointer=checkpointer,
         store=store,
         backend=backend,
+        middleware=middleware or (),
         interrupt_on=interrupt_on or None,
     )
-    logger.info("Deep agent built (model=%s, %d tools)", model, len(tools))
+    logger.info(
+        "Deep agent built (model=%s, %d tools, execute=%s)",
+        model,
+        len(tools),
+        "enabled" if settings.execute_enabled else "disabled",
+    )
     return agent

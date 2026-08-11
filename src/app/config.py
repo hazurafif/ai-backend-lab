@@ -84,6 +84,22 @@ class Settings:
         default_factory=lambda: float(os.environ.get("SEARXNG_TIMEOUT", "10"))
     )
 
+    # --- Shell execution (execute tool) ---
+    # Opt-in: EXECUTE_ENABLED=true swaps the default StateBackend for a
+    # LocalShellBackend so the built-in `execute` tool runs host shell
+    # commands (unrestricted — dev/trusted environments only).
+    # Tool-level permissions for execute are not supported upstream; pair it
+    # with INTERRUPT_ON_JSON={"execute": true} for human approval.
+    execute_enabled: bool = field(
+        default_factory=lambda: os.environ.get("EXECUTE_ENABLED", "false").lower() == "true"
+    )
+    execute_max_timeout: int = field(
+        default_factory=lambda: int(os.environ.get("EXECUTE_MAX_TIMEOUT", "3600"))
+    )
+    execute_inherit_env: bool = field(
+        default_factory=lambda: os.environ.get("EXECUTE_INHERIT_ENV", "false").lower() == "true"
+    )
+
     # --- API ---
     cors_origins: list[str] = field(
         default_factory=lambda: [

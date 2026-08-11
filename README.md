@@ -13,6 +13,8 @@ A FastAPI backend wrapping **LangChain Deep Agents** as the core agent:
   UI elements (cards, charts, forms) later.
 - **Web search**: a `web_search` tool backed by a self-hosted **SearXNG**
   metasearch instance, toggleable from config and per-request (frontend).
+- **Shell execution**: the built-in `execute` tool (opt-in, **off by default**)
+  runs host shell commands for dev/trusted environments.
 - **Streaming**: `POST /chat` returns a Server-Sent Events (SSE) stream with typed
   events (message deltas, tool calls, subagents, final state).
 - **Auth**: JWT login (`/login`), protected chat/thread endpoints.
@@ -182,6 +184,26 @@ Toggle levels:
 | Per request | `"enable_search": false` in `POST /chat` / `"enableSearch": false` in `POST /api/chat` | Frontend toggle per message; overrides the config |
 
 `GET /health` reports `"searxng": {"installed": bool, "enabled": bool}`.
+
+## Shell execution (execute tool)
+
+The agent's built-in `execute` tool runs shell commands, but only when the
+backend supports execution — so it's **opt-in and off by default**:
+
+```bash
+# .env — dev/trusted environments ONLY (unrestricted, irreversible commands)
+EXECUTE_ENABLED=true
+EXECUTE_MAX_TIMEOUT=3600        # cap on per-command timeout (seconds)
+EXECUTE_INHERIT_ENV=false       # true = shell sees server env (incl. secrets)
+```
+
+When enabled, the default `StateBackend` is swapped for deepagents'
+`LocalShellBackend` (commands run directly on the host with your user's
+permissions). Safety guidance from upstream: pair it with human approval
+(`INTERRUPT_ON_JSON='{"execute": true}'`), run only in dedicated dev
+environments, and never on a shared/production server — tool-level command
+permissions are not implemented upstream. `GET /health` reports
+`"execute": {"enabled": bool, "max_timeout": int}`.
 
 ## Postgres
 
