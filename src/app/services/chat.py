@@ -254,9 +254,11 @@ async def agent_stream(
 
     interrupted = {"flag": False}
 
-    # Start the run.
+    # Run with the user's identity in the runtime context: the store-backed
+    # filesystem backend and the knowledge base search tool scope per user.
+    context = {"user_id": username}
     try:
-        run = await agent.astream_events(run_input, config=config, version="v3")
+        run = await agent.astream_events(run_input, config=config, version="v3", context=context)
     except Exception as exc:
         yield _sse("error", {"source": "run", "message": str(exc)})
         yield _sse("done", {"thread_id": thread_id, "messages": []})

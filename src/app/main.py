@@ -28,6 +28,16 @@ Endpoints:
   DELETE /users/{username}        -> admin: delete a user
   GET  /agent/skills|tools        -> agent resource CRUD (store-backed; skills
                                     include bundled files, e.g. scripts/)
+  POST /kb                         -> create a knowledge base (per-user)
+  GET  /kb                         -> list the user's knowledge bases
+  GET|PATCH|DELETE /kb/{id}        -> detail / rename / delete a KB (vectors too)
+  POST /kb/{id}/files              -> multipart upload (file + relative path per
+                                    file; folder upload = many pairs). Each file
+                                    is ingested: parse -> chunk -> embed -> Weaviate
+  GET  /kb/{id}/files              -> documents with ingest status
+  GET|DELETE /kb/{id}/files/{doc}  -> document detail / delete (vectors too)
+  POST /kb/{id}/reindex            -> re-parse + re-embed all documents
+  GET  /kb/{id}/search             -> hybrid (vector + keyword) search over a KB
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):
@@ -57,9 +67,8 @@ from langgraph.graph.state import CompiledStateGraph
 from .api.v1.routes import api_router
 from .core.config import settings
 from .core.database import persistence
-from .services.agent import build_agent, build_backend
+from .services.agent import build_agent, build_backend, build_extra_tools
 from .services.mcp import mcp_servers
-from .services.searxng import build_search_tool
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +85,12 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
             await mcp_servers.connect(store=persistence.store)
         except Exception:
             logger.exception("MCP connect failed; continuing without MCP tools")
-        search_tool = build_search_tool()
+        search_tool = build_extra_tools()
         app.state.agent = agent or build_agent(
             checkpointer=persistence.checkpointer,
             store=persistence.store,
             mcp_tools=mcp_servers.tools,
-            extra_tools=[search_tool] if search_tool else None,
+            extra_tools=search_tool or None,
             backend=app.state.backend,
             model=settings.model,
             system_prompt=settings.system_prompt,

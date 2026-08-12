@@ -14,9 +14,8 @@ from ....core.dependencies import get_admin_user
 from ....core.exceptions import Conflict, NotFound
 from ....schema.agent_schema import SkillIn, SkillOut, ToolServerIn, ToolServerOut
 from ....services import resources
-from ....services.agent import build_agent
+from ....services.agent import build_agent, build_extra_tools
 from ....services.mcp import mcp_servers
-from ....services.searxng import build_search_tool
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -112,12 +111,12 @@ async def delete_tool_server(name: str, _: dict = Depends(get_admin_user)):
 async def reconnect_tools(request: Request, _: dict = Depends(get_admin_user)):
     """Reconnect MCP servers from the store and rebuild the agent (live)."""
     await mcp_servers.connect(store=persistence.store)
-    search_tool = build_search_tool()
+    extra_tools = build_extra_tools()
     request.app.state.agent = build_agent(
         checkpointer=persistence.checkpointer,
         store=persistence.store,
         mcp_tools=mcp_servers.tools,
-        extra_tools=[search_tool] if search_tool else None,
+        extra_tools=extra_tools or None,
         backend=request.app.state.backend,
         model=settings.model,
         system_prompt=settings.system_prompt,
