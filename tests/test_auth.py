@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from conftest import TEST_PASSWORD
 
 from app.core import config
 from app.core.database import persistence
@@ -42,7 +43,7 @@ async def test_register_creates_user(client, fresh_user_store):
         "/register",
         json={
             "username": "alice",
-            "password": "super-secret",
+            "password": TEST_PASSWORD,
             "email": "alice@example.com",
             "full_name": "Alice Example",
         },
@@ -56,7 +57,7 @@ async def test_register_creates_user(client, fresh_user_store):
     assert "hashed_password" not in body
 
     # New user can log in with the chosen password.
-    login = await client.post("/login", data={"username": "alice", "password": "super-secret"})
+    login = await client.post("/login", data={"username": "alice", "password": TEST_PASSWORD})
     assert login.status_code == 200
     assert login.json()["token_type"] == "bearer"
 
@@ -67,7 +68,7 @@ async def test_register_defaults_to_user_role(client, fresh_user_store):
     # is ignored (never self-elevation).
     response = await client.post(
         "/register",
-        json={"username": "alice", "password": "super-secret", "role": "admin"},
+        json={"username": "alice", "password": TEST_PASSWORD, "role": "admin"},
     )
     assert response.status_code == 201
     assert response.json()["role"] == "user"
@@ -78,7 +79,7 @@ async def test_register_defaults_to_user_role(client, fresh_user_store):
 
 @pytest.mark.asyncio
 async def test_register_duplicate_username_conflicts(client, fresh_user_store):
-    first = await client.post("/register", json={"username": "bob", "password": "super-secret"})
+    first = await client.post("/register", json={"username": "bob", "password": TEST_PASSWORD})
     assert first.status_code == 201
 
     second = await client.post("/register", json={"username": "bob", "password": "another-secret"})
@@ -95,7 +96,7 @@ async def test_register_rejects_short_password(client, fresh_user_store):
 @pytest.mark.asyncio
 async def test_register_rejects_invalid_username(client, fresh_user_store):
     response = await client.post(
-        "/register", json={"username": "bad name!", "password": "super-secret"}
+        "/register", json={"username": "bad name!", "password": TEST_PASSWORD}
     )
     assert response.status_code == 422
 
@@ -106,12 +107,12 @@ async def test_me_returns_profile(client, fresh_user_store):
         "/register",
         json={
             "username": "alice",
-            "password": "super-secret",
+            "password": TEST_PASSWORD,
             "email": "alice@example.com",
             "full_name": "Alice Example",
         },
     )
-    login = await client.post("/login", data={"username": "alice", "password": "super-secret"})
+    login = await client.post("/login", data={"username": "alice", "password": TEST_PASSWORD})
     token = login.json()["access_token"]
 
     response = await client.get("/users/me/", headers={"Authorization": f"Bearer {token}"})
@@ -154,7 +155,7 @@ async def test_default_admin_seeded_on_first_start():
             transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
         ) as client:
             response = await client.post(
-                "/register", json={"username": "admin", "password": "super-secret"}
+                "/register", json={"username": "admin", "password": TEST_PASSWORD}
             )
             assert response.status_code == 409
 
@@ -200,8 +201,8 @@ async def _login(client, username: str, password: str) -> str:
 
 @pytest.mark.asyncio
 async def test_regular_user_cannot_list_users(client, fresh_user_store):
-    await client.post("/register", json={"username": "alice", "password": "super-secret"})
-    token = await _login(client, "alice", "super-secret")
+    await client.post("/register", json={"username": "alice", "password": TEST_PASSWORD})
+    token = await _login(client, "alice", TEST_PASSWORD)
 
     response = await client.get("/users", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
@@ -210,10 +211,10 @@ async def test_regular_user_cannot_list_users(client, fresh_user_store):
 
 @pytest.mark.asyncio
 async def test_admin_lists_and_updates_users(client, fresh_user_store):
-    await client.post("/register", json={"username": "alice", "password": "super-secret"})
+    await client.post("/register", json={"username": "alice", "password": TEST_PASSWORD})
     # Promote alice to admin first, then use her token for management.
     await persistence.users.update_user("alice", role="admin")
-    token = await _login(client, "alice", "super-secret")
+    token = await _login(client, "alice", TEST_PASSWORD)
     headers = {"Authorization": f"Bearer {token}"}
 
     response = await client.get("/users", headers=headers)
@@ -223,7 +224,7 @@ async def test_admin_lists_and_updates_users(client, fresh_user_store):
     assert "hashed_password" not in users["alice"]
 
     # Promote bob, then disable him.
-    await client.post("/register", json={"username": "bob", "password": "super-secret"})
+    await client.post("/register", json={"username": "bob", "password": TEST_PASSWORD})
     r = await client.patch("/users/bob", json={"role": "admin"}, headers=headers)
     assert r.status_code == 200 and r.json()["role"] == "admin"
 
@@ -231,7 +232,7 @@ async def test_admin_lists_and_updates_users(client, fresh_user_store):
     assert r.status_code == 200 and r.json()["disabled"] is True
 
     # Bob's existing token no longer works (account disabled).
-    bob_token = await _login(client, "bob", "super-secret")
+    bob_token = await _login(client, "bob", TEST_PASSWORD)
     r = await client.get("/users/me/", headers={"Authorization": f"Bearer {bob_token}"})
     assert r.status_code == 403
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from conftest import TEST_NEW_PASSWORD, TEST_PASSWORD
 
 from app.core.database import persistence
 from app.core.rate_limit import login_limiter
@@ -50,8 +51,8 @@ async def _login(client, username: str, password: str) -> dict:
 
 
 async def test_refresh_token_flow(client, fresh_user_store):
-    await client.post("/register", json={"username": "alice", "password": "super-secret"})
-    tokens = await _login(client, "alice", "super-secret")
+    await client.post("/register", json={"username": "alice", "password": TEST_PASSWORD})
+    tokens = await _login(client, "alice", TEST_PASSWORD)
     assert tokens["refresh_token"], "login must return a refresh token"
 
     # Refresh -> new access token that works.
@@ -72,8 +73,8 @@ async def test_refresh_token_flow(client, fresh_user_store):
 
 
 async def test_refresh_rejects_disabled_user(client, fresh_user_store):
-    await client.post("/register", json={"username": "alice", "password": "super-secret"})
-    tokens = await _login(client, "alice", "super-secret")
+    await client.post("/register", json={"username": "alice", "password": TEST_PASSWORD})
+    tokens = await _login(client, "alice", TEST_PASSWORD)
     await persistence.users.update_user("alice", disabled=True)
 
     r = await client.post("/refresh", json={"refresh_token": tokens["refresh_token"]})
@@ -86,36 +87,36 @@ async def test_refresh_rejects_disabled_user(client, fresh_user_store):
 
 
 async def test_change_own_password(client, fresh_user_store):
-    await client.post("/register", json={"username": "alice", "password": "super-secret"})
-    token = (await _login(client, "alice", "super-secret"))["access_token"]
+    await client.post("/register", json={"username": "alice", "password": TEST_PASSWORD})
+    token = (await _login(client, "alice", TEST_PASSWORD))["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
     # Wrong old password -> 400.
     r = await client.post(
         "/users/me/password",
-        json={"old_password": "wrong", "new_password": "new-secret-1"},
+        json={"old_password": "wrong", "new_password": TEST_NEW_PASSWORD},
         headers=headers,
     )
     assert r.status_code == 400, r.text
 
     r = await client.post(
         "/users/me/password",
-        json={"old_password": "super-secret", "new_password": "new-secret-1"},
+        json={"old_password": TEST_PASSWORD, "new_password": TEST_NEW_PASSWORD},
         headers=headers,
     )
     assert r.status_code == 200, r.text
     assert r.json()["username"] == "alice"
 
     # Old password no longer works; the new one does.
-    r = await client.post("/login", data={"username": "alice", "password": "super-secret"})
+    r = await client.post("/login", data={"username": "alice", "password": TEST_PASSWORD})
     assert r.status_code == 401, r.text
-    r = await client.post("/login", data={"username": "alice", "password": "new-secret-1"})
+    r = await client.post("/login", data={"username": "alice", "password": TEST_NEW_PASSWORD})
     assert r.status_code == 200, r.text
 
     # Short new password -> 422.
     r = await client.post(
         "/users/me/password",
-        json={"old_password": "new-secret-1", "new_password": "short"},
+        json={"old_password": TEST_NEW_PASSWORD, "new_password": "short"},
         headers=headers,
     )
     assert r.status_code == 422, r.text
@@ -136,7 +137,7 @@ async def test_admin_create_and_delete_user(client, fresh_user_store):
     # Admin creates a user, optionally with the admin role.
     r = await client.post(
         "/users",
-        json={"username": "bob", "password": "super-secret", "role": "admin"},
+        json={"username": "bob", "password": TEST_PASSWORD, "role": "admin"},
         headers=admin_headers,
     )
     assert r.status_code == 201, r.text
@@ -145,22 +146,22 @@ async def test_admin_create_and_delete_user(client, fresh_user_store):
 
     # Duplicate -> 409.
     r = await client.post(
-        "/users", json={"username": "bob", "password": "super-secret"}, headers=admin_headers
+        "/users", json={"username": "bob", "password": TEST_PASSWORD}, headers=admin_headers
     )
     assert r.status_code == 409, r.text
 
     # Non-admin cannot create users.
-    await client.post("/register", json={"username": "carol", "password": "super-secret"})
-    carol_token = (await _login(client, "carol", "super-secret"))["access_token"]
+    await client.post("/register", json={"username": "carol", "password": TEST_PASSWORD})
+    carol_token = (await _login(client, "carol", TEST_PASSWORD))["access_token"]
     r = await client.post(
         "/users",
-        json={"username": "dave", "password": "super-secret"},
+        json={"username": "dave", "password": TEST_PASSWORD},
         headers={"Authorization": f"Bearer {carol_token}"},
     )
     assert r.status_code == 403, r.text
 
     # Delete bob; his token stops working.
-    bob_token = (await _login(client, "bob", "super-secret"))["access_token"]
+    bob_token = (await _login(client, "bob", TEST_PASSWORD))["access_token"]
     r = await client.delete("/users/bob", headers=admin_headers)
     assert r.status_code == 204, r.text
     r = await client.get("/users/me/", headers={"Authorization": f"Bearer {bob_token}"})
@@ -180,19 +181,19 @@ async def test_admin_create_and_delete_user(client, fresh_user_store):
 
 async def test_login_rate_limit(client, fresh_user_store):
     login_limiter.clear()
-    await client.post("/register", json={"username": "ratelimit", "password": "super-secret"})
+    await client.post("/register", json={"username": "ratelimit", "password": TEST_PASSWORD})
 
     # A single failure is allowed; a successful login resets the counter.
     r = await client.post("/login", data={"username": "ratelimit", "password": "wrong"})
     assert r.status_code == 401
-    r = await client.post("/login", data={"username": "ratelimit", "password": "super-secret"})
+    r = await client.post("/login", data={"username": "ratelimit", "password": TEST_PASSWORD})
     assert r.status_code == 200
 
     # Hammer with failures: the cap (10) is enforced, then 429.
     for i in range(10):
         r = await client.post("/login", data={"username": "ratelimit", "password": "wrong"})
         assert r.status_code == 401, f"attempt {i} should be 401"
-    r = await client.post("/login", data={"username": "ratelimit", "password": "super-secret"})
+    r = await client.post("/login", data={"username": "ratelimit", "password": TEST_PASSWORD})
     assert r.status_code == 429, r.text
 
     # Other usernames are unaffected (key includes the username).
