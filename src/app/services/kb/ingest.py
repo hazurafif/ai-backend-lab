@@ -14,8 +14,8 @@ from fastapi.concurrency import run_in_threadpool
 
 from ...core.config import settings
 from ...core.database import persistence
-from .chunk import split_text
-from .parse import extract_text
+from .chunk import chunk_document
+from .parse import extract_pages
 from .vectorstore import KbUnavailableError, KbVectorStore, get_vector_store
 
 logger = logging.getLogger(__name__)
@@ -42,11 +42,11 @@ async def ingest_document(doc: dict, data: bytes, vector_store: KbVectorStore | 
         raise KbUnavailableError("Vector store is not configured (set WEAVIATE_URL)")
     await persistence.kb.update_document(owner, doc_id, status="processing")
     try:
-        text = await run_in_threadpool(extract_text, doc["path"], data)
+        pages = await run_in_threadpool(extract_pages, doc["path"], data)
         chunks = await run_in_threadpool(
-            split_text,
+            chunk_document,
             doc["path"],
-            text,
+            pages,
             chunk_size=settings.kb_chunk_size,
             chunk_overlap=settings.kb_chunk_overlap,
         )

@@ -54,11 +54,14 @@ def build_embeddings() -> Embeddings:
     if os.environ.get("OPENAI_API_KEY"):
         from langchain_openai import OpenAIEmbeddings
 
-        return OpenAIEmbeddings(
-            model=settings.embeddings_model,
-            base_url=settings.embeddings_base_url or None,
-            check_embedding_ctx_length=False,
-        )
+        kwargs: dict = {
+            "model": settings.embeddings_model,
+            "base_url": settings.embeddings_base_url or None,
+            "check_embedding_ctx_length": False,
+        }
+        if settings.embeddings_dimensions is not None:
+            kwargs["dimensions"] = settings.embeddings_dimensions
+        return OpenAIEmbeddings(**kwargs)
     logger.warning(
         "OPENAI_API_KEY not set: using the deterministic local embedder for the "
         "knowledge base (dev/tests only). Set OPENAI_API_KEY for real retrieval."

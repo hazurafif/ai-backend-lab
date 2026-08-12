@@ -94,14 +94,23 @@ async def search_all_kbs(
     current_user: dict = Depends(get_current_user),
     q: str = Query(min_length=1, max_length=500),
     limit: int = Query(default=5, ge=1, le=20),
+    alpha: float | None = Query(default=None, ge=0.0, le=1.0),
 ):
     """Hybrid search across all knowledge bases of the current user.
 
     Declared before `/{kb_id}` so the literal `search` segment wins.
+    `alpha` overrides KB_HYBRID_ALPHA per request (0 = keyword, 1 = vectors).
     """
     store = _vector_store_or_503()
+    effective_alpha = alpha if alpha is not None else settings.kb_hybrid_alpha
     try:
-        hits = await run_in_threadpool(store.search, q, owner=current_user["username"], limit=limit)
+        hits = await run_in_threadpool(
+            store.search,
+            q,
+            owner=current_user["username"],
+            limit=limit,
+            alpha=effective_alpha,
+        )
     except KbUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return SearchOut(query=q, hits=hits)
@@ -355,13 +364,23 @@ async def search_kb(
     current_user: dict = Depends(get_current_user),
     q: str = Query(min_length=1, max_length=500),
     limit: int = Query(default=5, ge=1, le=20),
+    alpha: float | None = Query(default=None, ge=0.0, le=1.0),
 ):
-    """Hybrid search (vector + keyword) within one knowledge base."""
+    """Hybrid search (vector + keyword) within one knowledge base.
+
+    `alpha` overrides KB_HYBRID_ALPHA per request (0 = keyword, 1 = vectors).
+    """
     await _get_owned_kb(kb_id, current_user["username"])
     store = _vector_store_or_503()
+    effective_alpha = alpha if alpha is not None else settings.kb_hybrid_alpha
     try:
         hits = await run_in_threadpool(
-            store.search, q, owner=current_user["username"], kb_id=kb_id, limit=limit
+            store.search,
+            q,
+            owner=current_user["username"],
+            kb_id=kb_id,
+            limit=limit,
+            alpha=effective_alpha,
         )
     except KbUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -31,6 +31,16 @@ def _load_json_env(name: str, default: Any) -> Any:
         return default
 
 
+def _load_optional_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 @dataclass
 class Settings:
     # --- Agent ---
@@ -111,6 +121,16 @@ class Settings:
     )
     embeddings_base_url: str | None = field(
         default_factory=lambda: os.environ.get("EMBEDDINGS_BASE_URL") or None
+    )
+    # Matryoshka truncation for text-embedding-3 models (e.g. 1024): 3x less
+    # storage/search cost for a few recall points. None = model default dims.
+    embeddings_dimensions: int | None = field(
+        default_factory=lambda: _load_optional_int("EMBEDDINGS_DIMENSIONS")
+    )
+    # BM25F field weights for Weaviate hybrid search: {"path": 2.0, "content": 1.0}
+    # boosts titles/paths over body text (keyword stage only).
+    kb_bm25_property_weights: dict[str, float] = field(
+        default_factory=lambda: _load_json_env("KB_BM25_PROPERTY_WEIGHTS", {"path": 2.0})
     )
     kb_max_file_size_mb: int = field(
         default_factory=lambda: int(os.environ.get("KB_MAX_FILE_SIZE_MB", "25"))

@@ -27,6 +27,14 @@ def _extract_pdf(data: bytes) -> str:
     return "\n\n".join(pages)
 
 
+def _extract_pdf_pages(data: bytes) -> list[str]:
+    """PDF text page-by-page (page-level chunking; NVIDIA: best average accuracy)."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    return [(page.extract_text() or "") for page in reader.pages]
+
+
 def _extract_docx(data: bytes) -> str:
     import docx
 
@@ -84,3 +92,19 @@ def extract_text(path: str, data: bytes) -> str:
         raise
     except Exception as exc:
         raise ParseError(f"Failed to parse {ext} file: {exc}") from exc
+
+
+def extract_pages(path: str, data: bytes) -> list[str]:
+    """Extract text page-by-page where the format supports pages (PDF).
+
+    Returns a list of page texts; non-PDF formats produce a single element.
+    Used by the ingest pipeline for page-level chunking.
+    """
+    if Path(path).suffix.lower() != ".pdf":
+        return [extract_text(path, data)]
+    try:
+        return _extract_pdf_pages(data)
+    except ParseError:
+        raise
+    except Exception as exc:
+        raise ParseError(f"Failed to parse .pdf file: {exc}") from exc

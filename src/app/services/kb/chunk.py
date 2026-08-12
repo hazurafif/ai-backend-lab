@@ -37,13 +37,38 @@ def _split_markdown(text: str, chunk_size: int, chunk_overlap: int) -> list[str]
 
 def split_text(path: str, text: str, *, chunk_size: int, chunk_overlap: int) -> list[str]:
     """Split extracted text into chunks for embedding."""
-    text = text.strip()
-    if not text:
-        return []
+    return chunk_document(path, [text], chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+
+def chunk_document(
+    path: str, pages: list[str], *, chunk_size: int, chunk_overlap: int
+) -> list[str]:
+    """Chunk a document's pages for embedding.
+
+    - `.md` -> markdown-aware splitting (headers, with header path prefixes)
+    - otherwise per-page: pages within the chunk budget are kept whole
+      (PDF page-level chunking; NVIDIA: highest average accuracy), oversized
+      pages fall back to the recursive splitter.
+    """
     if Path(path).suffix.lower() == ".md":
+        text = "\n\n".join(pages).strip()
+        if not text:
+            return []
         chunks = _split_markdown(text, chunk_size, chunk_overlap)
         if chunks:
             return chunks
-    return RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size, chunk_overlap=chunk_overlap
-    ).split_text(text)
+        return RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size, chunk_overlap=chunk_overlap
+        ).split_text(text)
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    chunks: list[str] = []
+    for page in pages:
+        page = page.strip()
+        if not page:
+            continue
+        if len(page) <= chunk_size:
+            chunks.append(page)
+        else:
+            chunks.extend(splitter.split_text(page))
+    return chunks

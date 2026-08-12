@@ -77,8 +77,21 @@ def build_kb_search_tool(vector_store: KbVectorStore | None = None) -> BaseTool 
             return f"Knowledge base search failed: {exc}"
         if not hits:
             return "No matching passages found in the knowledge base."
-        lines = [f"Found {len(hits)} passage(s) from your knowledge base:"]
+        # Dedup (same chunk reachable via different routes) and lost-in-the-
+        # middle ordering: LLMs attend most to the start/end of context, so the
+        # strongest evidence goes mid-list (research: rag-techniques-research.md).
+        seen: set[tuple[str, int]] = set()
+        unique: list = []
         for hit in hits:
+            key = (hit.doc_id, hit.chunk_index)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(hit)
+        if len(unique) > 2:
+            unique.insert(len(unique) // 2, unique.pop(0))
+        lines = [f"Found {len(unique)} passage(s) from your knowledge base:"]
+        for hit in unique:
             snippet = hit.content.strip().replace("\n", " ")[:_MAX_CHUNK_CHARS]
             lines.append(f"- `{hit.path}` (score {hit.score:.3f}): {snippet}")
         return "\n".join(lines)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import textwrap
 import zipfile
 from collections.abc import Sequence
 from typing import Any
@@ -36,7 +37,9 @@ from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent
 from app.services.chat import agent_stream
+from app.services.kb.chunk import chunk_document
 from app.services.kb.embeddings import LocalEmbeddings
+from app.services.kb.parse import extract_pages
 from app.services.kb.tool import build_kb_search_tool
 from app.services.kb.vectorstore import (
     InMemoryKbVectorStore,
@@ -636,3 +639,111 @@ async def test_agent_kb_tool_scoped_to_user(kb_env, memory_persistence):
     )
     output = tool_end["output"]["content"]
     assert "No matching passages" in output, output
+
+
+# ---------------------------------------------------------------------------
+# page-level chunking
+# ---------------------------------------------------------------------------
+
+
+async def test_chunk_document_page_level(kb_env):
+    # pages within the budget stay whole (PDF page-level behavior)
+    chunks = chunk_document(
+        "guide.pdf", ["short page one", "short page two"], chunk_size=100, chunk_overlap=20
+    )
+    assert chunks == ["short page one", "short page two"]
+
+    # oversized pages fall back to the recursive splitter
+    long_page = "word " * 300
+    chunks = chunk_document("guide.pdf", [long_page], chunk_size=100, chunk_overlap=20)
+    assert len(chunks) > 1
+    assert all(len(c) <= 100 + 20 for c in chunks)
+
+    # empty pages are skipped
+    chunks = chunk_document(
+        "guide.pdf", ["", "   ", "real content"], chunk_size=100, chunk_overlap=20
+    )
+    assert chunks == ["real content"]
+
+    # markdown stays header-aware with header path prefixes
+    md = textwrap.dedent(
+        """\
+        # Deployment
+        How we deploy.
+
+        ## Rollback
+        How we roll back.
+        """
+    )
+    chunks = chunk_document("runbook.md", [md], chunk_size=1000, chunk_overlap=100)
+    assert any("Deployment" in c and "How we deploy" in c for c in chunks)
+    assert any("Rollback" in c and "How we roll back" in c for c in chunks)
+
+
+async def test_extract_pages_non_pdf(kb_env):
+    # non-PDF formats produce a single page
+    pages = extract_pages("notes.txt", b"hello world")
+    assert pages == ["hello world"]
+
+
+# ---------------------------------------------------------------------------
+# per-request alpha on search endpoints
+# ---------------------------------------------------------------------------
+
+
+async def _api_client(app, username: str = "tester") -> httpx.AsyncClient:
+    await persistence.users.create_user(username=username, hashed_password="x")
+    token = create_access_token(data={"sub": username})
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+async def test_search_alpha_param(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=Scripted(responses=[AIMessage(content="ok")]),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _api_client(app) as http:
+        kb = (await http.post("/kb", json={"name": "alpha-test"})).json()
+        await http.post(
+            f"/kb/{kb['id']}/files",
+            files=[
+                (
+                    "files",
+                    ("deploy.md", b"# Deployment\n\nkubectl deployment rollout.", "text/markdown"),
+                )
+            ],
+        )
+        # alpha=0 -> keyword-only; alpha=1 -> vector-only; both must still work
+        for alpha in (0.0, 1.0):
+            r = await http.get(f"/kb/{kb['id']}/search", params={"q": "deployment", "alpha": alpha})
+            assert r.status_code == 200, r.text
+            assert r.json()["hits"], f"expected hits at alpha={alpha}"
+        # out-of-range alpha rejected
+        r = await http.get(f"/kb/{kb['id']}/search", params={"q": "deployment", "alpha": 1.5})
+        assert r.status_code == 422
+        # global search also accepts alpha
+        r = await http.get("/kb/search", params={"q": "deployment", "alpha": 0.5})
+        assert r.status_code == 200 and r.json()["hits"]
+
+
+async def test_bm25_property_weights_config(kb_env):
+    """KB_BM25_PROPERTY_WEIGHTS parsing: empty dict disables, default boosts path."""
+    assert isinstance(config.settings.kb_bm25_property_weights, dict)
+    from app.services.kb.vectorstore import WeaviateKbVectorStore
+
+    # only reachable statically (no Weaviate connection in offline tests)
+    assert WeaviateKbVectorStore._bm25_properties() == ["path^2.0"]
+    old = config.settings.kb_bm25_property_weights
+    config.settings.kb_bm25_property_weights = {}
+    try:
+        assert WeaviateKbVectorStore._bm25_properties() is None
+    finally:
+        config.settings.kb_bm25_property_weights = old

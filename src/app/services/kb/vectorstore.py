@@ -146,6 +146,8 @@ class WeaviateKbVectorStore(KbVectorStore):
             if kb_id is not None:
                 filters &= Filter.by_property("kb_id").equal(kb_id)
             query_vector = self._embeddings.embed_query(query)
+            # BM25F field weights: boost `path` (title-ish) over `content`.
+            properties = self._bm25_properties()
             response = collection.query.hybrid(
                 query=query,
                 vector=query_vector,
@@ -153,6 +155,7 @@ class WeaviateKbVectorStore(KbVectorStore):
                 limit=limit,
                 filters=filters,
                 return_metadata=MetadataQuery(score=True),
+                properties=properties,
             )
             hits: list[SearchHit] = []
             for obj in response.objects:
@@ -172,6 +175,14 @@ class WeaviateKbVectorStore(KbVectorStore):
             raise
         except Exception as exc:
             raise KbUnavailableError(f"Weaviate search failed: {exc}") from exc
+
+    @staticmethod
+    def _bm25_properties() -> list[str] | None:
+        """Weaviate `properties` list with ^boost syntax from settings."""
+        weights = settings.kb_bm25_property_weights
+        if not weights:
+            return None
+        return [f"{name}^{weight}" if weight != 1.0 else name for name, weight in weights.items()]
 
     def delete_document(self, doc_id: str) -> int:
         from weaviate.classes.query import Filter
