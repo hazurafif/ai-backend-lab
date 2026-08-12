@@ -132,6 +132,15 @@ class Settings:
     kb_bm25_property_weights: dict[str, float] = field(
         default_factory=lambda: _load_json_env("KB_BM25_PROPERTY_WEIGHTS", {"path": 2.0})
     )
+    # Reranking (R3): retrieve broad -> cross-encoder rerank -> top-k.
+    # KB_RERANK_MODEL unset -> no reranking (identity). Local CPU option:
+    # flashrank ms-marco-MiniLM-L-12-v2 (tiny, ~30ms per 20 candidates).
+    kb_rerank_model: str | None = field(
+        default_factory=lambda: os.environ.get("KB_RERANK_MODEL") or None
+    )
+    kb_rerank_candidates: int = field(
+        default_factory=lambda: int(os.environ.get("KB_RERANK_CANDIDATES", "20"))
+    )
     kb_max_file_size_mb: int = field(
         default_factory=lambda: int(os.environ.get("KB_MAX_FILE_SIZE_MB", "25"))
     )

@@ -31,6 +31,7 @@ from app.services.kb.chunk import chunk_document
 from app.services.kb.embeddings import build_embeddings
 from app.services.kb.eval import evaluate, load_golden
 from app.services.kb.parse import extract_pages
+from app.services.kb.rerank import build_reranker
 from app.services.kb.vectorstore import (
     InMemoryKbVectorStore,
     KbVectorStore,
@@ -98,10 +99,19 @@ async def _run(args: argparse.Namespace) -> None:
 
         queries = load_golden(args.golden)
         print(f"Golden queries: {len(queries)} (limit={args.limit})")
+        reranker = build_reranker() if args.rerank else None
+        print("Rerank: " + (f"on ({settings.kb_rerank_model})" if reranker else "off"))
         print(f"{'alpha':>6}  {'recall@k':>9}  {'mrr':>7}  {'ndcg@k':>7}")
         best = None
         for alpha in args.alphas:
-            result = evaluate(store, queries, owner=args.owner, alpha=alpha, limit=args.limit)
+            result = evaluate(
+                store,
+                queries,
+                owner=args.owner,
+                alpha=alpha,
+                limit=args.limit,
+                reranker=reranker,
+            )
             print(
                 f"{alpha:>6.2f}  {result['recall_at_k']:>9.3f}  "
                 f"{result['mrr']:>7.3f}  {result['ndcg_at_k']:>7.3f}"
@@ -127,6 +137,7 @@ def main() -> None:
         "--alphas", default="0,0.25,0.5,0.75,1.0", help="comma-separated alpha sweep"
     )
     parser.add_argument("--limit", type=int, default=5, help="top-k hits per query")
+    parser.add_argument("--rerank", action="store_true", help="enable reranking (KB_RERANK_MODEL)")
     parser.add_argument("--live", action="store_true", help="use the configured Weaviate store")
     parser.add_argument("--verbose", action="store_true", help="print per-query hit lists")
     args = parser.parse_args()

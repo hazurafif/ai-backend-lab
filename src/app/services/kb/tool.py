@@ -13,6 +13,7 @@ import logging
 from langchain_core.tools import BaseTool, tool
 
 from ...core.config import settings
+from .rerank import get_reranker, search_with_rerank
 from .vectorstore import KbVectorStore, get_vector_store
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,9 @@ def build_kb_search_tool(vector_store: KbVectorStore | None = None) -> BaseTool 
         if not user:
             return "Knowledge base search is unavailable in this session."
         try:
-            hits = store.search(
+            hits = search_with_rerank(
+                store,
+                get_reranker(),
                 query,
                 owner=user,
                 kb_id=kb_id,

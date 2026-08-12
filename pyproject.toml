@@ -29,6 +29,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "langchain-text-splitters>=0.3",
     "numpy>=2.0",
+    "flashrank>=0.2",
 ]
 
 [dependency-groups]

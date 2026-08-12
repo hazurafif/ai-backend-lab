@@ -32,6 +32,7 @@ from ....schema.kb_schema import (
 from ....services.kb.ingest import ingest_document
 from ....services.kb.ingest import reindex_kb as reindex_kb_documents
 from ....services.kb.paths import safe_path
+from ....services.kb.rerank import get_reranker, search_with_rerank
 from ....services.kb.vectorstore import KbUnavailableError, KbVectorStore, get_vector_store
 from ....services.kb.zip_upload import ZipValidationError, extract_zip_entries
 
@@ -105,7 +106,9 @@ async def search_all_kbs(
     effective_alpha = alpha if alpha is not None else settings.kb_hybrid_alpha
     try:
         hits = await run_in_threadpool(
-            store.search,
+            search_with_rerank,
+            store,
+            get_reranker(),
             q,
             owner=current_user["username"],
             limit=limit,
@@ -375,7 +378,9 @@ async def search_kb(
     effective_alpha = alpha if alpha is not None else settings.kb_hybrid_alpha
     try:
         hits = await run_in_threadpool(
-            store.search,
+            search_with_rerank,
+            store,
+            get_reranker(),
             q,
             owner=current_user["username"],
             kb_id=kb_id,
