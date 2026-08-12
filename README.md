@@ -43,6 +43,14 @@ uv run pre-commit install           # ruff + conventional-commits hooks
 
 Health check: `curl http://127.0.0.1:8000/health`
 
+## Container & CI
+
+- `docker build -t ai-backend .` — `python:3.12-slim` + `uv sync --frozen
+  --no-dev`; runs uvicorn on :8000. Postgres and SearXNG stay in
+  `docker-compose.yml`.
+- `.github/workflows/ci.yml` runs ruff (check + format) and the offline
+  pytest suite on every push/PR.
+
 ## Model configuration
 
 `DEEPAGENTS_MODEL` accepts any `provider:model` string understood by
@@ -55,19 +63,27 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `POST /login` | – | OAuth2 form `username`/`password` → JWT |
+| `POST /login` | – | OAuth2 form `username`/`password` → JWT (access + refresh token) |
+| `POST /refresh` | – | Exchange a refresh token for a new access token |
+| `POST /register` | – | Self-service registration (always creates a `user` role) |
 | `POST /chat` | Bearer | Run the agent; **SSE stream** of events |
-| `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`) |
-| `GET /threads` | Bearer | Conversations of the current user (newest first) |
+| `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`), incl. HITL resume |
+| `GET /threads` | Bearer | Conversations of the current user (newest first, `limit`/`offset` pagination) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
+| `PATCH /threads/{id}` | Bearer | Rename a thread |
+| `DELETE /threads/{id}` | Bearer | Delete a thread (state + history + metadata) |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
+| `POST /threads/{id}/cancel` | Bearer | Abort the active run of a thread (`done` event carries `cancelled: true`) |
 | `GET /agent/skills` + CRUD | Bearer (admin) | Manage agent skills (SKILL.md + bundled files, applied on next run) |
 | `DELETE /agent/skills/{name}/files/{path}` | Bearer (admin) | Delete one bundled skill file |
 | `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
 | `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
 | `GET /users/me` | Bearer | Current user |
+| `POST /users/me/password` | Bearer | Change your own password (old password must verify) |
 | `GET /users` | Bearer (admin) | List all users (no password hashes) |
+| `POST /users` | Bearer (admin) | Create a user (admin may grant the admin role) |
 | `PATCH /users/{username}` | Bearer (admin) | Change a user's role and/or disabled state |
+| `DELETE /users/{username}` | Bearer (admin) | Delete a user (their threads/history stay, orphaned) |
 | `GET /health` | – | Status: persistence backend, MCP servers, model, interrupt_on, searxng, execute, agent_resources |
 
 ### Auth
@@ -81,6 +97,15 @@ Roles: `user` (default — can chat, read own threads) and `admin` (manages
 users via `GET /users` / `PATCH /users/{username}` and all agent resources:
 skills, MCP tool servers). Registration always creates a `user`; promotion is
 admin-only. Disabled accounts are rejected on every authenticated request.
+
+Tokens: `POST /login` returns an access token (30 min) **plus a refresh
+token** (7 days); `POST /refresh` exchanges a refresh token for a fresh
+access token. Refresh tokens are stateless JWTs (no revocation store) —
+logout is client-side discard of both tokens.
+
+Login brute-force protection: failed logins are rate-limited per client IP +
+username (in-memory sliding window, `LOGIN_RATE_LIMIT_MAX` /
+`LOGIN_RATE_LIMIT_WINDOW`, default 10 per 15 min → `429`).
 
 ### Chat
 
@@ -111,8 +136,13 @@ event: subagent        {"name","status","output"?,"error"?}  delegated task life
 event: subagent_delta  {"subagent","delta"}                  subagent token chunk
 event: interrupt       {"thread_id","interrupts"[]}          run paused for human approval
 event: error           {"source","message"}                  recoverable error
-event: done            {"thread_id","messages"[],"interrupted"?}  final state
+event: done            {"thread_id","messages"[],"interrupted"?,"cancelled"?,"usage"?}  final state
 ```
+
+The `done` event may carry `cancelled: true` (run aborted via
+`POST /threads/{id}/cancel`) and `usage` (summed `input_tokens` /
+`output_tokens` / `total_tokens` across the run's finalized messages, when
+the model reports usage metadata).
 
 Frontend plan: `message_delta` renders the streaming bubble; `tool_*` events can
 render tool-call chips and, later, interactive components from MCP structured
@@ -139,11 +169,23 @@ instead of the raw SSE contract above. Request body:
 - Optional `enableSearch` field overrides the SearXNG web search toggle per
   chat (frontend search switch).
 - Response is the AI SDK data-stream protocol (SSE `data:` chunks:
-  `start`, `text-*`, `custom` for tool/subagent activity, `finish`, `[DONE]`).
+  `start`, `text-*`, `custom` for tool/subagent/interrupt activity, `finish`, `[DONE]`).
 - Auth is optional for now: a Bearer JWT scopes thread metadata to that user;
   without one, a `guest` namespace is used (the frontend has no login yet).
-- Human-in-the-loop pauses surface as an `error` chunk (resume is not wired
-  to this protocol yet).
+- **Human-in-the-loop**: when a run pauses for approval, the stream emits a
+  `custom` chunk `{"kind": "app.interrupt", "threadId", "interrupts"}` and
+  ends with `finish` (`finishReason: "other"`). The frontend shows the
+  approval UI, then resumes by posting to `/api/chat` again with the same
+  `id` plus `decision` (or `decisions`):
+
+  ```json
+  {"id": "<thread id>", "decision": {"type": "approve"}, "messages": []}
+  ```
+
+  Decision types match `POST /threads/{id}/resume`: `approve`, `edit`,
+  `reject`, `respond`. Resuming a thread that is not waiting returns `409`.
+  Cancelling an in-flight run: `POST /threads/{id}/cancel` (Bearer; 409 when
+  nothing is running).
 
 ## MCP servers (gofastmcp)
 
@@ -318,11 +360,14 @@ src/app/          package (src layout, installed editable by uv sync)
     database.py       Postgres checkpointer + store + chat_messages + users (in-memory fallback)
     migrations.py     SQL migration runner (applies migrations/*.sql at startup)
     dependencies.py   get_current_user (validates JWT against the users store)
-    security.py       bcrypt + JWT
+    security.py       bcrypt + JWT (access + refresh tokens)
+    rate_limit.py     in-memory sliding-window login limiter
+    run_registry.py   active agent runs keyed by thread_id (cancel support)
     exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)
-  migrations/      SQL migrations (0001_create_users.sql, 0002_create_chat_messages.sql)
+  migrations/      SQL migrations (0001_create_users.sql, 0002_create_chat_messages.sql,
+                   0003_create_user_roles.sql)
   schema/         per-domain API models
-    auth_schema.py    Token, TokenData, User, UserInDB
+    auth_schema.py    Token, TokenData, User, UserInDB, UserRole, UserUpdate
     chat_schema.py    ChatRequest, ThreadOut, AiSdkChatRequest, ResumeRequest
     agent_schema.py   SkillIn/Out, ToolServerIn/Out
   services/       business logic
