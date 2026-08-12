@@ -154,9 +154,14 @@ class UserStore:
         return user
 
     async def update_user(
-        self, username: str, *, role: str | None = None, disabled: bool | None = None
+        self,
+        username: str,
+        *,
+        role: str | None = None,
+        disabled: bool | None = None,
+        hashed_password: str | None = None,
     ) -> dict | None:
-        """Update role and/or disabled state; returns the updated row or None when unknown."""
+        """Update role, disabled state and/or password; returns the updated row or None when unknown."""
         sets: list[str] = []
         params: list = []
         if role is not None:
@@ -165,6 +170,9 @@ class UserStore:
         if disabled is not None:
             sets.append("disabled = %s")
             params.append(disabled)
+        if hashed_password is not None:
+            sets.append("hashed_password = %s")
+            params.append(hashed_password)
         if not sets:
             return await self.get_user(username)
         params.append(username)
@@ -183,7 +191,17 @@ class UserStore:
                 user["role"] = role
             if disabled is not None:
                 user["disabled"] = disabled
+            if hashed_password is not None:
+                user["hashed_password"] = hashed_password
         return await self.get_user(username)
+
+    async def delete_user(self, username: str) -> bool:
+        """Remove a user; returns False when unknown. Their threads/history rows stay (orphaned)."""
+        if self._use_postgres:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("DELETE FROM users WHERE username = %s", (username,))
+                return cur.rowcount > 0
+        return self._memory.pop(username, None) is not None
 
     async def list_users(self) -> list[dict]:
         """All users, newest first (no hashed_password)."""
@@ -299,6 +317,16 @@ class ChatHistoryStore:
             )
             added += 1
         return added
+
+    async def delete_thread(self, thread_id: str) -> int:
+        """Remove all message rows of a thread; returns the number of rows deleted."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("DELETE FROM chat_messages WHERE thread_id = %s", (thread_id,))
+                return cur.rowcount or 0
+        deleted = len(self._memory.pop(thread_id, []))
+        self._memory_ids.pop(thread_id, None)
+        return deleted
 
     async def list_messages(self, thread_id: str) -> list[dict]:
         """All stored messages of a thread in chronological order.

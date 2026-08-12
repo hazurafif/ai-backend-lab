@@ -107,6 +107,16 @@ class Settings:
         default_factory=lambda: os.environ.get("SECRET_KEY", "dev-secret-change-me")
     )
 
+    # --- Rate limiting (login brute-force protection, in-memory) ---
+    # Failed logins per (client IP + username) within the window; past the
+    # cap the endpoint returns 429 until failures age out.
+    login_rate_limit_max: int = field(
+        default_factory=lambda: int(os.environ.get("LOGIN_RATE_LIMIT_MAX", "10"))
+    )
+    login_rate_limit_window: float = field(
+        default_factory=lambda: float(os.environ.get("LOGIN_RATE_LIMIT_WINDOW", "900"))
+    )
+
     # --- Default admin (seeded on first start when the users store is empty) ---
     default_admin_username: str = field(
         default_factory=lambda: os.environ.get("DEFAULT_ADMIN_USERNAME", "admin")

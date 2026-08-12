@@ -21,6 +21,25 @@ class UserCreate(BaseModel):
     full_name: str | None = Field(default=None, max_length=100)
 
 
+class AdminUserCreate(UserCreate):
+    """Admin-only user creation; may grant the admin role directly."""
+
+    role: UserRole = UserRole.USER
+
+
+class PasswordChange(BaseModel):
+    """Self-service password change: verify the old one, store the new one."""
+
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class RefreshRequest(BaseModel):
+    """Body of POST /refresh: a valid refresh token."""
+
+    refresh_token: str = Field(min_length=1)
+
+
 class UserUpdate(BaseModel):
     """Admin-only user management payload: change role and/or disabled state."""
 
@@ -37,6 +56,7 @@ class UserUpdate(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    refresh_token: str | None = None
 
 
 class TokenData(BaseModel):
