@@ -155,12 +155,20 @@ async def sdk_stream(
             # Human-in-the-loop pause: surface the approval request as a
             # custom chunk; the frontend shows an approval UI and resumes by
             # posting to /api/chat again with `id` (the thread) + `decision`.
+            # providerMetadata must be keyed by provider name (the AI SDK's
+            # providerMetadataSchema is Record<provider, Record<key, value>>)
+            # — flat extra fields fail the strict uiMessageChunkSchema and
+            # kill the whole stream client-side.
             yield _chunk(
                 {
                     "type": "custom",
                     "kind": "app.interrupt",
-                    "threadId": data.get("thread_id"),
-                    "interrupts": data.get("interrupts"),
+                    "providerMetadata": {
+                        "app": {
+                            "threadId": data.get("thread_id"),
+                            "interrupts": data.get("interrupts"),
+                        },
+                    },
                 }
             )
             interrupt_seen = True
