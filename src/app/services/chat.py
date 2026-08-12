@@ -21,7 +21,7 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
-from ..core.constants import SSE_HEADERS
+from ..core.constants import SSE_HEADERS, thread_metadata_ns
 from ..core.database import persistence
 from ..core.run_registry import runs
 from ..util.date import now_iso
@@ -97,7 +97,7 @@ async def _record_thread_metadata(thread_id: str, username: str, message: str | 
     """Upsert thread metadata in the store: title on first message, `updated_at` on every run."""
     now = now_iso()
     try:
-        ns = ("threads", username)
+        ns = thread_metadata_ns(username)
         existing = await persistence.store.aget(ns, thread_id)
         value = dict(existing.value) if existing is not None else {}
         if message is not None:

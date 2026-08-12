@@ -27,6 +27,27 @@ class ThreadOut(BaseModel):
     title: str
     created_at: str
     updated_at: str | None = None
+    share_token: str | None = Field(
+        default=None,
+        description="Public share token when the thread has been shared",
+    )
+
+
+class ShareOut(BaseModel):
+    """Share-link payload: the token plus a URL to view the thread publicly."""
+
+    share_token: str
+    url: str
+
+
+class SharedChatOut(BaseModel):
+    """Public view of a shared thread (served without authentication)."""
+
+    thread_id: str
+    title: str | None = None
+    username: str
+    created_at: str | None = None
+    messages: list[dict[str, Any]]
 
 
 class AiSdkChatRequest(BaseModel):

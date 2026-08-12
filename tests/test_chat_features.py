@@ -110,8 +110,10 @@ async def test_ai_sdk_interrupt_emits_custom_chunk(memory_persistence):
             interrupt = [c for c in chunks if c.get("kind") == "app.interrupt"]
             assert interrupt, [c["type"] for c in chunks]
             assert interrupt[0]["type"] == "custom"
-            assert interrupt[0]["threadId"] == "chat-hitl"
-            action = interrupt[0]["interrupts"][0]["action_requests"][0]
+            # Payload is nested under providerMetadata.app (AI SDK strict schema).
+            payload = interrupt[0]["providerMetadata"]["app"]
+            assert payload["threadId"] == "chat-hitl"
+            action = payload["interrupts"][0]["action_requests"][0]
             assert action["name"] == "echo"
             assert action["args"] == {"x": "hello"}
 
@@ -305,6 +307,89 @@ async def test_thread_crud_pagination_and_ownership(memory_persistence):
 # ---------------------------------------------------------------------------
 # usage aggregation in done
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# chat sharing
+# ---------------------------------------------------------------------------
+
+
+async def test_share_chat_flow(memory_persistence):
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+    async with app.router.lifespan_context(app):
+        app.state.agent = build_scripted_agent(
+            memory_persistence.checkpointer, memory_persistence.store
+        )
+        await memory_persistence.users.create_user(username="tester", hashed_password="x")
+        await memory_persistence.users.create_user(username="bob", hashed_password="x")
+        token = create_access_token(data={"sub": "tester"})
+        bob_token = create_access_token(data={"sub": "bob"})
+        headers = {"Authorization": f"Bearer {token}"}
+        bob_headers = {"Authorization": f"Bearer {bob_token}"}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            r = await client.post("/chat", json={"message": "share me"}, headers=headers)
+            tid = extract_done(r.text)["thread_id"]
+
+            # Owner shares -> token + absolute url.
+            r = await client.post(f"/threads/{tid}/share", headers=headers)
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body["share_token"]
+            assert body["url"] == f"http://test/shared/{body['share_token']}", body
+            share_token = body["share_token"]
+
+            # Idempotent: sharing again returns the same token.
+            r = await client.post(f"/threads/{tid}/share", headers=headers)
+            assert r.status_code == 201 and r.json()["share_token"] == share_token
+
+            # Share status + the threads list exposes the token to the owner.
+            r = await client.get(f"/threads/{tid}/share", headers=headers)
+            assert r.status_code == 200 and r.json()["share_token"] == share_token
+            r = await client.get("/threads", headers=headers)
+            assert r.json()[0]["share_token"] == share_token
+
+            # Non-owner cannot share/unshare/read the share status.
+            r = await client.post(f"/threads/{tid}/share", headers=bob_headers)
+            assert r.status_code == 404, r.text
+            r = await client.delete(f"/threads/{tid}/share", headers=bob_headers)
+            assert r.status_code == 404, r.text
+
+            # Public view: no auth, messages + title served.
+            r = await client.get(f"/shared/{share_token}")
+            assert r.status_code == 200, r.text
+            view = r.json()
+            assert view["thread_id"] == tid
+            assert view["username"] == "tester"
+            assert view["title"] == "share me"
+            assert view["messages"][0]["type"] == "human"
+            assert any(m["type"] == "ai" for m in view["messages"])
+
+            # Unknown token -> 404.
+            r = await client.get("/shared/nope")
+            assert r.status_code == 404, r.text
+
+            # Owner revokes: link dies, status is 404 again.
+            r = await client.delete(f"/threads/{tid}/share", headers=headers)
+            assert r.status_code == 204, r.text
+            r = await client.get(f"/shared/{share_token}")
+            assert r.status_code == 404, r.text
+            r = await client.get(f"/threads/{tid}/share", headers=headers)
+            assert r.status_code == 404, r.text
+
+            # Re-share (new token), then thread deletion cleans the link too.
+            r = await client.post(f"/threads/{tid}/share", headers=headers)
+            token2 = r.json()["share_token"]
+            assert token2 != share_token, "revoked tokens must not be reused"
+            r = await client.delete(f"/threads/{tid}", headers=headers)
+            assert r.status_code == 204, r.text
+            r = await client.get(f"/shared/{token2}")
+            assert r.status_code == 404, "thread delete must revoke its share link"
+
+            # Share endpoints on a missing thread -> 404.
+            r = await client.post("/threads/ghost/share", headers=headers)
+            assert r.status_code == 404, r.text
 
 
 async def test_done_includes_usage(memory_persistence):

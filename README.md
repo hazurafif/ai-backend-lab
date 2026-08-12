@@ -78,6 +78,10 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `DELETE /threads/{id}` | Bearer | Delete a thread (state + history + metadata) |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
 | `POST /threads/{id}/cancel` | Bearer | Abort the active run of a thread (`done` event carries `cancelled: true`) |
+| `POST /threads/{id}/share` | Bearer | Create a public share link (owner; idempotent) |
+| `GET /threads/{id}/share` | Bearer | Current share link of a thread (owner) |
+| `DELETE /threads/{id}/share` | Bearer | Revoke the thread's share link (owner) |
+| `GET /shared/{token}` | – | **Public** read-only view of a shared thread (no auth) |
 | `GET /agent/skills` + CRUD | Bearer (admin) | Manage agent skills (SKILL.md + bundled files, applied on next run) |
 | `DELETE /agent/skills/{name}/files/{path}` | Bearer (admin) | Delete one bundled skill file |
 | `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
@@ -177,10 +181,11 @@ instead of the raw SSE contract above. Request body:
 - Auth is optional for now: a Bearer JWT scopes thread metadata to that user;
   without one, a `guest` namespace is used (the frontend has no login yet).
 - **Human-in-the-loop**: when a run pauses for approval, the stream emits a
-  `custom` chunk `{"kind": "app.interrupt", "threadId", "interrupts"}` and
-  ends with `finish` (`finishReason: "other"`). The frontend shows the
-  approval UI, then resumes by posting to `/api/chat` again with the same
-  `id` plus `decision` (or `decisions`):
+  `custom` chunk `{"kind": "app.interrupt", "providerMetadata": {"app":
+  {"threadId", "interrupts"}}}` (payload nested under the provider key, as
+  the AI SDK requires) and ends with `finish` (`finishReason: "other"`).
+  The frontend shows the approval UI, then resumes by posting to `/api/chat`
+  again with the same `id` plus `decision` (or `decisions`):
 
   ```json
   {"id": "<thread id>", "decision": {"type": "approve"}, "messages": []}
@@ -428,3 +433,21 @@ Decision types (one per `action_request`; use `decisions: [...]` for several):
 
 Resuming a thread that is not waiting returns `409`. The resumed run streams
 normal events (`tool_start`/`tool_end`, `message_delta`, ...) until `done`.
+
+### Sharing chats
+
+Threads can be shared as **public, read-only links** (no auth needed to
+view):
+
+```bash
+curl -X POST http://127.0.0.1:8000/threads/<id>/share -H "Authorization: Bearer $TOKEN"
+# {"share_token": "<unguessable-token>", "url": "http://127.0.0.1:8000/shared/<token>"}
+
+curl http://127.0.0.1:8000/shared/<token>   # no auth: thread_id, title, username, messages
+```
+
+- Share tokens are random 32-byte URL-safe strings; sharing is idempotent
+  (re-POST returns the existing token). Revoking (`DELETE
+  /threads/{id}/share`) or deleting the thread kills the link immediately.
+- `GET /threads` includes `share_token` so the frontend can render the
+  share state per thread; only the owner can create/read/revoke a link.

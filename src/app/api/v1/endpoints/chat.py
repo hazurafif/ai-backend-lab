@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from langgraph.graph.state import CompiledStateGraph
 
+from ....core.constants import thread_metadata_ns
 from ....core.database import persistence
 from ....core.dependencies import get_current_user
 from ....core.exceptions import NotFound
@@ -14,18 +15,22 @@ from ....schema.chat_schema import (
     AiSdkChatRequest,
     ChatRequest,
     ResumeRequest,
+    SharedChatOut,
+    ShareOut,
     ThreadOut,
     ThreadUpdate,
 )
 from ....services import ai_sdk_chat
+from ....services import share as share_service
 from ....services.chat import _serialize_message, agent_stream, sse_response
 from ....services.searxng import set_search_enabled
 
 router = APIRouter(tags=["chat"])
 
 
-def _thread_metadata_ns(username: str) -> tuple[str, ...]:
-    return ("threads", username)
+def _share_url(request: Request, share_token: str) -> str:
+    base = str(request.base_url).rstrip("/")
+    return f"{base}/shared/{share_token}"
 
 
 async def _assert_thread_owner(thread_id: str, username: str) -> None:
@@ -36,14 +41,14 @@ async def _assert_thread_owner(thread_id: str, username: str) -> None:
     guest) — keep serving those to avoid breaking old threads; only a
     positive match under another user's namespace is rejected.
     """
-    item = await persistence.store.aget(_thread_metadata_ns(username), thread_id)
+    item = await persistence.store.aget(thread_metadata_ns(username), thread_id)
     if item is not None:
         return
     for other in await persistence.users.list_users():
         other_name = other["username"]
         if other_name == username:
             continue
-        if await persistence.store.aget(_thread_metadata_ns(other_name), thread_id) is not None:
+        if await persistence.store.aget(thread_metadata_ns(other_name), thread_id) is not None:
             raise NotFound(detail=f"Thread '{thread_id}' not found")
 
 
@@ -176,7 +181,12 @@ async def delete_thread(
     if delete_thread is not None:
         await delete_thread(thread_id)
     await persistence.chat_history.delete_thread(thread_id)
-    await persistence.store.adelete(_thread_metadata_ns(current_user["username"]), thread_id)
+    # Drop the share link (if any) before removing the metadata that holds the token.
+    item = await persistence.store.aget(thread_metadata_ns(current_user["username"]), thread_id)
+    await share_service.revoke_by_thread(
+        thread_id, current_user["username"], item.value.get("share_token") if item else None
+    )
+    await persistence.store.adelete(thread_metadata_ns(current_user["username"]), thread_id)
     return None
 
 
@@ -187,7 +197,7 @@ async def rename_thread(
     current_user: dict = Depends(get_current_user),
 ):
     """Rename a thread (its metadata title)."""
-    ns = _thread_metadata_ns(current_user["username"])
+    ns = thread_metadata_ns(current_user["username"])
     item = await persistence.store.aget(ns, thread_id)
     if item is None:
         raise NotFound(detail=f"Thread '{thread_id}' not found")
@@ -197,13 +207,71 @@ async def rename_thread(
     return ThreadOut(thread_id=thread_id, **value)
 
 
+@router.post("/threads/{thread_id}/share", response_model=ShareOut, status_code=201)
+async def share_thread(
+    request: Request,
+    thread_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a public share link for a thread (owner only).
+
+    Idempotent: sharing an already-shared thread returns the existing token.
+    """
+    await _assert_thread_owner(thread_id, current_user["username"])
+    share = await share_service.create_share(thread_id, current_user["username"])
+    return ShareOut(share_token=share["share_token"], url=_share_url(request, share["share_token"]))
+
+
+@router.get("/threads/{thread_id}/share", response_model=ShareOut)
+async def get_thread_share(
+    request: Request,
+    thread_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Current share link of a thread (owner only); 404 when not shared."""
+    await _assert_thread_owner(thread_id, current_user["username"])
+    share = await share_service.get_share(thread_id, current_user["username"])
+    if share is None:
+        raise NotFound(detail=f"Thread '{thread_id}' is not shared")
+    return ShareOut(share_token=share["share_token"], url=_share_url(request, share["share_token"]))
+
+
+@router.delete("/threads/{thread_id}/share", status_code=204)
+async def unshare_thread(
+    thread_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Revoke the thread's share link (owner only)."""
+    await _assert_thread_owner(thread_id, current_user["username"])
+    if not await share_service.revoke_share(thread_id, current_user["username"]):
+        raise NotFound(detail=f"Thread '{thread_id}' is not shared")
+    return None
+
+
+@router.get("/shared/{share_token}", response_model=SharedChatOut)
+async def view_shared_chat(share_token: str):
+    """Public, unauthenticated read-only view of a shared thread."""
+    share = await share_service.lookup_share(share_token)
+    if share is None:
+        raise NotFound(detail="Share link not found")
+    history = await persistence.chat_history.list_messages(share["thread_id"])
+    item = await persistence.store.aget(thread_metadata_ns(share["username"]), share["thread_id"])
+    return SharedChatOut(
+        thread_id=share["thread_id"],
+        title=item.value.get("title") if item else None,
+        username=share["username"],
+        created_at=share.get("created_at"),
+        messages=history,
+    )
+
+
 @router.get("/threads", response_model=list[ThreadOut])
 async def list_threads(
     current_user: dict = Depends(get_current_user),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    items = await persistence.store.asearch(_thread_metadata_ns(current_user["username"]))
+    items = await persistence.store.asearch(thread_metadata_ns(current_user["username"]))
     threads = [ThreadOut(thread_id=it.key, **it.value) for it in items]
     threads.sort(key=lambda t: t.updated_at or t.created_at, reverse=True)
     return threads[offset : offset + limit]

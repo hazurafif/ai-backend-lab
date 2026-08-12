@@ -9,6 +9,16 @@ SKILLS_SOURCE = "/skills/"
 GLOBAL_SKILLS_NS = ("agent", "skills")
 TOOL_SERVERS_NS = ("agent", "mcp_servers")
 
+# Share links: key = unguessable share token, value =
+# {"thread_id", "username", "created_at"} — served publicly by GET /shared/{token}.
+SHARE_NS = ("shared",)
+
+
+def thread_metadata_ns(username: str) -> tuple[str, ...]:
+    """Store namespace for a user's thread metadata (title, timestamps, share_token)."""
+    return ("threads", username)
+
+
 # SSE streaming headers: disable buffering so events reach the client live.
 SSE_HEADERS = {
     "Cache-Control": "no-cache",

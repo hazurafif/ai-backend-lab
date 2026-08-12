@@ -14,6 +14,10 @@ Endpoints:
   DELETE /threads/{id}            -> delete a thread
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run
   POST /threads/{id}/cancel       -> abort the active run of a thread
+  POST /threads/{id}/share        -> create a public share link (owner; idempotent)
+  GET  /threads/{id}/share        -> current share link of a thread (owner)
+  DELETE /threads/{id}/share      -> revoke the share link (owner)
+  GET  /shared/{token}            -> public read-only view of a shared thread (no auth)
   POST /login                     -> JWT (access + refresh token)
   POST /refresh                   -> exchange a refresh token for a new access token
   GET  /users/me                  -> current user
