@@ -1,0 +1,437 @@
+"""Offline tests for the knowledge base feature (upload, ingest, search, agent tool).
+
+No network, no API keys, no Postgres: the KbStore falls back to in-memory
+dicts and the vector store is `InMemoryKbVectorStore` with the deterministic
+`LocalEmbeddings`. Verifies:
+
+  - /kb CRUD + owner isolation (user B cannot see/touch user A's KBs)
+  - multipart upload (files + relative paths = folder upload), per-file
+    validation (extension, path traversal, size), document status lifecycle
+  - hybrid search endpoint + vector cleanup on document/KB deletion
+  - the agent's `search_knowledge_base` tool resolves the runtime user and
+    only sees that user's chunks (through the full /chat SSE pipeline)
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Sequence
+from typing import Any
+
+import httpx
+import pytest
+import pytest_asyncio
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
+from langchain_core.messages import AIMessage, ToolCall
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import Runnable
+from pydantic import Field
+
+from app.core import config
+from app.core.database import persistence
+from app.core.security import create_access_token
+from app.main import create_app
+from app.services.agent import build_agent
+from app.services.chat import agent_stream
+from app.services.kb.embeddings import LocalEmbeddings
+from app.services.kb.tool import build_kb_search_tool
+from app.services.kb.vectorstore import (
+    InMemoryKbVectorStore,
+    reset_vector_store,
+    set_vector_store,
+)
+
+pytestmark = pytest.mark.filterwarnings(
+    r"ignore:The v3 streaming protocol on Pregel is experimental."
+)
+
+
+class Scripted(BaseChatModel):
+    """Returns a scripted sequence of AIMessages, clamping at the last."""
+
+    responses: list[AIMessage] = Field(default_factory=list)
+    tools: Sequence[dict | type] = ()
+    _idx: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def _generate(
+        self,
+        messages: Sequence[Any],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        i = min(self._idx, len(self.responses) - 1)
+        self._idx += 1
+        return ChatResult(generations=[ChatGeneration(message=self.responses[i])])
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict | type | BaseChatModel],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, AIMessage]:
+        self.tools = tools
+        return self
+
+
+@pytest_asyncio.fixture
+async def memory_persistence():
+    """Force in-memory checkpointer/store and start the persistence singleton."""
+    config.settings.database_uri = None
+    await persistence.start()
+    yield persistence
+    await persistence.stop()
+
+
+@pytest_asyncio.fixture
+async def kb_env(memory_persistence):
+    """In-memory persistence + an in-memory vector store with local embeddings."""
+    store = InMemoryKbVectorStore(embeddings=LocalEmbeddings())
+    set_vector_store(store)
+    yield store
+    reset_vector_store()
+
+
+async def _client_for(app, username: str = "tester", role: str = "user") -> httpx.AsyncClient:
+    await persistence.users.create_user(username=username, hashed_password="x", role=role)
+    token = create_access_token(data={"sub": username})
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _scripted_model() -> Scripted:
+    return Scripted(responses=[AIMessage(content="Final answer from the agent.")])
+
+
+def parse_sse_chunk(chunk: str) -> tuple[str, dict]:
+    ev, _, rest = chunk.partition("\n")
+    return ev.removeprefix("event: "), json.loads(rest.removeprefix("data: ").strip())
+
+
+async def collect_stream(agent, username, **kwargs) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    async for chunk in agent_stream(agent, username, **kwargs):
+        events.append(parse_sse_chunk(chunk))
+    return events
+
+
+# ---------------------------------------------------------------------------
+# KB CRUD + isolation
+# ---------------------------------------------------------------------------
+
+
+async def test_kb_crud_and_isolation(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        # create
+        r = await http.post("/kb", json={"name": "Engineering Docs", "description": "Runbook"})
+        assert r.status_code == 201, r.text
+        kb = r.json()
+        assert kb["name"] == "Engineering Docs"
+        assert kb["document_count"] == 0
+
+        # duplicate name -> 409
+        r = await http.post("/kb", json={"name": "Engineering Docs"})
+        assert r.status_code == 409, r.text
+
+        # invalid name -> 422
+        r = await http.post("/kb", json={"name": "../evil"})
+        assert r.status_code == 422, r.text
+
+        # list + get
+        r = await http.get("/kb")
+        assert r.status_code == 200 and [k["id"] for k in r.json()] == [kb["id"]]
+        r = await http.get(f"/kb/{kb['id']}")
+        assert r.status_code == 200 and r.json()["name"] == "Engineering Docs"
+
+        # patch
+        r = await http.patch(f"/kb/{kb['id']}", json={"name": "Docs", "description": None})
+        assert r.status_code == 200 and r.json()["name"] == "Docs"
+
+        # isolation: another user sees nothing and cannot touch it
+        async with await _client_for(app, username="other") as other:
+            r = await other.get("/kb")
+            assert r.status_code == 200 and r.json() == []
+            r = await other.get(f"/kb/{kb['id']}")
+            assert r.status_code == 404, r.text
+            r = await other.delete(f"/kb/{kb['id']}")
+            assert r.status_code == 404, r.text
+
+        # delete
+        r = await http.delete(f"/kb/{kb['id']}")
+        assert r.status_code == 204
+        r = await http.get(f"/kb/{kb['id']}")
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# upload + ingest + search
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_folder_and_search(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "runbook"})).json()
+        kb_id = kb["id"]
+
+        # folder upload: two files with relative paths + a markdown with headers
+        files = [
+            (
+                "files",
+                (
+                    "guides/deploy.md",
+                    b"# Deployment\n\nThe service is deployed with kubectl.",
+                    "text/markdown",
+                ),
+            ),
+            ("files", ("guides/backup.md", b"Backups run every night to S3.", "text/markdown")),
+        ]
+        paths = {"paths": ["guides/deploy.md", "guides/backup.md"]}
+        r = await http.post(f"/kb/{kb_id}/files", files=files, data=paths)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert all(res["ok"] for res in body["results"]), body
+        assert {res["path"] for res in body["results"]} == {
+            "guides/deploy.md",
+            "guides/backup.md",
+        }
+
+        # documents listed with status ready
+        r = await http.get(f"/kb/{kb_id}/files")
+        docs = r.json()
+        assert len(docs) == 2
+        assert {d["path"] for d in docs} == {"guides/deploy.md", "guides/backup.md"}
+        assert all(d["status"] == "ready" for d in docs)
+        assert all(d["chunk_count"] >= 1 for d in docs)
+
+        # KB stats reflect documents + chunks
+        r = await http.get(f"/kb/{kb_id}")
+        assert r.json()["document_count"] == 2
+        assert r.json()["chunk_count"] >= 2
+
+        # hybrid search finds the deployment passage
+        r = await http.get(f"/kb/{kb_id}/search", params={"q": "kubectl deployment", "limit": 5})
+        assert r.status_code == 200, r.text
+        hits = r.json()["hits"]
+        assert hits, "expected search hits"
+        assert hits[0]["path"] == "guides/deploy.md"
+        assert "kubectl" in hits[0]["content"]
+
+        # duplicate path -> per-file error result
+        r = await http.post(
+            f"/kb/{kb_id}/files",
+            files=[("files", ("guides/deploy.md", b"dup", "text/markdown"))],
+            data={"paths": "guides/deploy.md"},
+        )
+        assert r.status_code == 200
+        assert r.json()["results"][0]["ok"] is False
+
+
+async def test_upload_validation(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "v"})).json()
+
+        # unsupported extension
+        r = await http.post(
+            f"/kb/{kb['id']}/files",
+            files=[("files", ("evil.exe", b"MZ", "application/octet-stream"))],
+        )
+        body = r.json()
+        assert r.status_code == 200 and body["results"][0]["ok"] is False
+        assert "Unsupported file type" in body["results"][0]["error"]
+
+        # path traversal rejected
+        r = await http.post(
+            f"/kb/{kb['id']}/files",
+            files=[("files", ("x.md", b"# hi", "text/markdown"))],
+            data={"paths": "../../etc/passwd"},
+        )
+        assert r.json()["results"][0]["ok"] is False
+
+        # oversized file rejected
+        old = config.settings.kb_max_file_size_mb
+        config.settings.kb_max_file_size_mb = 0
+        try:
+            r = await http.post(
+                f"/kb/{kb['id']}/files",
+                files=[("files", ("big.md", b"x" * 100, "text/markdown"))],
+            )
+        finally:
+            config.settings.kb_max_file_size_mb = old
+        body = r.json()
+        assert r.status_code == 200 and body["results"][0]["ok"] is False
+        assert "too large" in body["results"][0]["error"]
+
+        # unparseable content -> document stored with status failed
+        r = await http.post(
+            f"/kb/{kb['id']}/files",
+            files=[("files", ("broken.md", b"   \n \n  ", "text/markdown"))],
+        )
+        body = r.json()
+        assert r.status_code == 200 and body["results"][0]["ok"] is False
+        assert "No extractable text" in body["results"][0]["error"]
+        docs = (await http.get(f"/kb/{kb['id']}/files")).json()
+        failed = next(d for d in docs if d["path"] == "broken.md")
+        assert failed["status"] == "failed" and failed["error"]
+
+
+async def test_delete_cleans_vectors_and_reindex(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "kb"})).json()
+        kb_id = kb["id"]
+        r = await http.post(
+            f"/kb/{kb_id}/files",
+            files=[
+                (
+                    "files",
+                    ("a.md", b"# Alpha\n\nAlpha content about alpha things.", "text/markdown"),
+                )
+            ],
+        )
+        doc_id = r.json()["results"][0]["doc_id"]
+
+        r = await http.get(f"/kb/{kb_id}/search", params={"q": "alpha"})
+        assert r.json()["hits"], "expected a hit before deletion"
+
+        # delete the document -> vectors gone
+        r = await http.delete(f"/kb/{kb_id}/files/{doc_id}")
+        assert r.status_code == 204
+        r = await http.get(f"/kb/{kb_id}/search", params={"q": "alpha"})
+        assert r.json()["hits"] == []
+
+        # reindex a second document
+        r = await http.post(
+            f"/kb/{kb_id}/files",
+            files=[
+                ("files", ("b.md", b"# Beta\n\nBeta content about beta things.", "text/markdown"))
+            ],
+        )
+        r = await http.post(f"/kb/{kb_id}/reindex")
+        assert r.status_code == 200 and r.json()["processed"] == 1, r.text
+        r = await http.get(f"/kb/{kb_id}/search", params={"q": "beta"})
+        assert r.json()["hits"], "expected a hit after reindex"
+
+        # deleting the KB also cleans the vector store
+        r = await http.delete(f"/kb/{kb_id}")
+        assert r.status_code == 204
+        assert kb_env._chunks == []
+
+
+async def test_search_requires_vector_store(kb_env):
+    """Without a configured vector store the search endpoint returns 503."""
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "x"})).json()
+        reset_vector_store()  # simulate WEAVIATE_URL unset
+        try:
+            r = await http.get(f"/kb/{kb['id']}/search", params={"q": "anything"})
+        finally:
+            set_vector_store(kb_env)
+        assert r.status_code == 503, r.text
+
+
+# ---------------------------------------------------------------------------
+# agent tool (full SSE pipeline, context.user_id resolution)
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_kb_tool_scoped_to_user(kb_env, memory_persistence):
+    """The search_knowledge_base tool sees only the runtime user's chunks."""
+    # Seed a KB + document for "tester" via the service layer (same stores the
+    # agent's tool reads through get_vector_store()).
+    kb = await persistence.kb.create_kb("tester", "docs", None)
+    doc = await persistence.kb.add_document(
+        "tester", kb["id"], "notes/deploy.md", "text/markdown", 42, b"x"
+    )
+    from app.services.kb.ingest import ingest_document
+
+    await ingest_document(doc, b"# Deployment\n\nDeploy with kubectl rollout.", kb_env)
+
+    model = Scripted(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="search_knowledge_base",
+                        args={"query": "kubectl deployment", "top_k": 3},
+                    )
+                ],
+            ),
+            AIMessage(content="Deployment uses kubectl rollout."),
+        ]
+    )
+
+    def agent_for() -> Any:
+        return build_agent(
+            checkpointer=memory_persistence.checkpointer,
+            store=memory_persistence.store,
+            extra_tools=[build_kb_search_tool(vector_store=kb_env)],
+            model=Scripted(responses=list(model.responses)),
+            system_prompt="test",
+        )
+
+    # tester sees the passage
+    events = await collect_stream(agent_for(), "tester", message="how do we deploy?")
+    tool_end = next(
+        d for e, d in events if e == "tool_end" and d["name"] == "search_knowledge_base"
+    )
+    output = tool_end["output"]["content"]
+    assert "notes/deploy.md" in output, output
+    assert "kubectl" in output
+
+    # another user gets no results (isolation via runtime context)
+    events = await collect_stream(agent_for(), "other", message="how do we deploy?")
+    tool_end = next(
+        d for e, d in events if e == "tool_end" and d["name"] == "search_knowledge_base"
+    )
+    output = tool_end["output"]["content"]
+    assert "No matching passages" in output, output

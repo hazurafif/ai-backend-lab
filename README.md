@@ -347,6 +347,45 @@ curl -X POST http://127.0.0.1:8000/agent/tools/reconnect -H "$AUTH"      # apply
 - When the store has tool servers, they **replace** the `MCP_SERVERS_JSON` /
   `mcp_servers.json` env config; delete all entries to fall back.
 
+## Knowledge bases (RAG)
+
+Per-user knowledge bases: upload files (or folders — send each file with its
+relative `path`), the backend extracts text, chunks it and embeds it into
+**Weaviate** (hybrid BM25F + vector search). The agent gets a
+`search_knowledge_base` tool so it can answer from uploaded documents during
+chat; the tool only ever sees the current user's KBs (the run context carries
+`user_id`, which also activates per-user workspace isolation).
+
+```bash
+# Start the vector store once
+# docker compose up -d weaviate
+
+export AUTH="Authorization: Bearer $(curl -s -X POST http://127.0.0.1:8000/login -d 'username=admin&password=admin' | jq -r .access_token)"
+
+# create a KB + upload a folder (file + relative path pairs)
+KB=$(curl -s -X POST http://127.0.0.1:8000/kb -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"runbook","description":"Ops docs"}' | jq -r .id)
+curl -X POST "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH" \
+  -F "file=@guides/deploy.md;type=text/markdown" -F "paths=guides/deploy.md" \
+  -F "file=@guides/backup.md;type=text/markdown" -F "paths=guides/backup.md"
+
+curl "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH"                       # status per file
+curl "http://127.0.0.1:8000/kb/$KB/search?q=kubectl%20deployment" -H "$AUTH"  # hybrid search
+curl -X POST "http://127.0.0.1:8000/kb/$KB/reindex" -H "$AUTH"             # re-embed everything
+curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # delete KB + vectors
+```
+
+- Supported extensions: `.md .txt .pdf .docx .csv .html .json` + common code
+  files (configurable via `KB_ALLOWED_EXTENSIONS`); cap 25 MB/file
+  (`KB_MAX_FILE_SIZE_MB`).
+- Ingest status per document: `pending → processing → ready | failed` (with
+  error message).
+- Embeddings: OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`)
+  when `OPENAI_API_KEY` is set; otherwise a deterministic local embedder for
+  dev/tests.
+- Without `WEAVIATE_URL`, upload/search return 503 and the agent has no KB
+  tool — the rest of the app is unaffected.
+
 ## Code layout
 
 Follows the [fastapi-clean-architecture](https://github.com/jujumilk3/fastapi-clean-architecture)
