@@ -93,7 +93,9 @@ def _sse(event: str, data: dict) -> str:
     )
 
 
-async def _record_thread_metadata(thread_id: str, username: str, message: str | None) -> None:
+async def _record_thread_metadata(
+    thread_id: str, username: str, message: str | None, agent_name: str = "default"
+) -> None:
     """Upsert thread metadata in the store: title on first message, `updated_at` on every run."""
     now = now_iso()
     try:
@@ -104,6 +106,7 @@ async def _record_thread_metadata(thread_id: str, username: str, message: str | 
             value.setdefault("title", message[:80])
             value.setdefault("created_at", now)
         value["updated_at"] = now
+        value["agent"] = agent_name
         await persistence.store.aput(ns, thread_id, value)
     except Exception:
         logger.exception("failed to record thread metadata for %s", thread_id)
@@ -149,11 +152,13 @@ async def agent_stream(
     message: str | None = None,
     thread_id: str | None = None,
     resume: Any = None,
+    agent_name: str = "default",
 ) -> AsyncIterator[str]:
     """Run the agent and forward v3 stream projections as normalized SSE events.
 
     - `message`: new user message for /chat
     - `resume`: value for `Command(resume=...)` (HITL continuation, /resume)
+    - `agent_name`: agent config this thread runs on (recorded in thread metadata)
     """
     thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
     config = {"configurable": {"thread_id": thread_id}}
@@ -328,7 +333,7 @@ async def agent_stream(
     # Persist history + refresh thread metadata before the terminal events, so
     # GET /threads and GET /threads/{id}/messages see the finished run.
     await _save_history(thread_id, username, messages)
-    await _record_thread_metadata(thread_id, username, message)
+    await _record_thread_metadata(thread_id, username, message, agent_name)
     if interrupts:
         # Run paused for human input: surface the HITL requests.
         yield _sse("interrupt", {"thread_id": thread_id, "interrupts": interrupts})

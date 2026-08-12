@@ -52,17 +52,43 @@ async def _assert_thread_owner(thread_id: str, username: str) -> None:
             raise NotFound(detail=f"Thread '{thread_id}' not found")
 
 
+async def _resolve_agent(request: Request, name: str | None, username: str) -> CompiledStateGraph:
+    """Resolve the compiled graph for an agent config (404 when unknown).
+
+    The built-in 'default' agent is served by `app.state.agent` (lifespan-
+    built, and overridable in tests); named agents come from the registry.
+    """
+    name = name or "default"
+    if name == "default" and request.app.state.agent is not None:
+        return request.app.state.agent
+    try:
+        return await request.app.state.agents.resolve(name, username)
+    except KeyError:
+        raise NotFound(detail=f"Agent '{name}' not found") from None
+
+
+async def _thread_agent(request: Request, thread_id: str, username: str) -> CompiledStateGraph:
+    """The graph the thread was last run with (thread metadata agent, else default)."""
+    item = await persistence.store.aget(thread_metadata_ns(username), thread_id)
+    name = (item.value or {}).get("agent") if item is not None else None
+    return await _resolve_agent(request, name, username)
+
+
 @router.post("/chat")
 async def chat(
     request: Request,
     body: ChatRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    agent: CompiledStateGraph = request.app.state.agent
+    agent = await _resolve_agent(request, body.agent, current_user["username"])
     set_search_enabled(body.enable_search)
     return sse_response(
         agent_stream(
-            agent, current_user["username"], message=body.message, thread_id=body.thread_id
+            agent,
+            current_user["username"],
+            message=body.message,
+            thread_id=body.thread_id,
+            agent_name=body.agent or "default",
         )
     )
 
@@ -100,6 +126,7 @@ async def ai_sdk_chat_endpoint(
         thread_id = body.id
         if username != "guest":
             await _assert_thread_owner(thread_id, username)
+        agent = await _thread_agent(request, thread_id, username)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = await agent.aget_state(config)
         if snapshot is None or not snapshot.values.get("messages"):
@@ -114,7 +141,10 @@ async def ai_sdk_chat_endpoint(
     if not text:
         raise HTTPException(status_code=422, detail="No user message found in request")
 
-    events = agent_stream(agent, username, message=text, thread_id=body.id)
+    agent = await _resolve_agent(request, body.agent, username)
+    events = agent_stream(
+        agent, username, message=text, thread_id=body.id, agent_name=body.agent or "default"
+    )
     return sse_response(ai_sdk_chat.sdk_stream(events))
 
 
@@ -134,7 +164,7 @@ async def resume_thread(
     current_user: dict = Depends(get_current_user),
 ):
     """Resume a run paused on a human-in-the-loop interrupt."""
-    agent: CompiledStateGraph = request.app.state.agent
+    agent = await _thread_agent(request, thread_id, current_user["username"])
     await _assert_thread_owner(thread_id, current_user["username"])
 
     if not await _thread_is_waiting(agent, thread_id):

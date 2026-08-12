@@ -9,6 +9,32 @@ SKILLS_SOURCE = "/skills/"
 GLOBAL_SKILLS_NS = ("agent", "skills")
 TOOL_SERVERS_NS = ("agent", "mcp_servers")
 
+# Agent configs (customizable agent profiles): global agents are shared by
+# all users; user agents live under ("agents", <username>).
+GLOBAL_AGENTS_NS = ("agent", "agents")
+DEFAULT_AGENT_NAME = "default"
+
+
+def user_agents_ns(username: str) -> tuple[str, ...]:
+    """Store namespace for a user's own agent configs."""
+    return ("agents", username)
+
+
+def agent_skills_ns(owner: str, name: str) -> tuple[str, ...]:
+    """Store namespace for a named agent's skills (snapshot copies).
+
+    `owner` is the username for user agents, "global" for global agents.
+    Kept under a distinct top-level segment so prefix searches on
+    GLOBAL_SKILLS_NS never see per-agent copies.
+    """
+    return ("agent", "agent_skills", owner, name)
+
+
+def agent_skills_source(owner: str, name: str) -> str:
+    """Filesystem source path a named agent's SkillsMiddleware reads."""
+    return f"{SKILLS_SOURCE}{owner}/{name}/"
+
+
 # Share links: key = unguessable share token, value =
 # {"thread_id", "username", "created_at"} — served publicly by GET /shared/{token}.
 SHARE_NS = ("shared",)

@@ -13,6 +13,13 @@ class ChatRequest(BaseModel):
         default=None,
         description="Conversation id. Omit to start a new conversation.",
     )
+    agent: str | None = Field(
+        default=None,
+        description=(
+            "Agent config name (customizable profile: model + system prompt + "
+            "skills + tools). Omit for the built-in 'default' agent."
+        ),
+    )
     enable_search: bool | None = Field(
         default=None,
         description=(
@@ -27,6 +34,10 @@ class ThreadOut(BaseModel):
     title: str
     created_at: str
     updated_at: str | None = None
+    agent: str | None = Field(
+        default=None,
+        description="Agent config the thread runs on ('default' when not set)",
+    )
     share_token: str | None = Field(
         default=None,
         description="Public share token when the thread has been shared",
@@ -66,7 +77,17 @@ class AiSdkChatRequest(BaseModel):
     selected_chat_model: str | None = Field(
         default=None,
         alias="selectedChatModel",
-        description="Model id chosen in the UI (informational for now)",
+        description=(
+            "Model id chosen in the UI; superseded by `agent` (the agent config "
+            "pins the model). Kept for backward compatibility."
+        ),
+    )
+    agent: str | None = Field(
+        default=None,
+        description=(
+            "Agent config name (customizable profile: model + system prompt + "
+            "skills + tools). Omit for the built-in 'default' agent."
+        ),
     )
     enable_search: bool | None = Field(
         default=None,

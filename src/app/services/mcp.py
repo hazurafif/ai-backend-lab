@@ -49,6 +49,8 @@ class MCPServers:
         self._config: dict[str, dict[str, Any]] = {}
         self.tools: list[BaseTool] = []
         self.failed: dict[str, str] = {}
+        # server name -> tool names it exposes (per-agent tool selection)
+        self.tools_by_server: dict[str, list[str]] = {}
 
     @property
     def names(self) -> list[str]:
@@ -59,6 +61,8 @@ class MCPServers:
 
         Config comes from the durable store when it has entries (CRUD API),
         otherwise from env/file (`MCP_SERVERS_JSON` / `mcp_servers.json`).
+        Tools are fetched per server so `tools_by_server` can attribute tool
+        names to their server (tool names themselves are not prefixed).
         """
         self._config = (
             await load_tool_server_configs(store)
@@ -70,12 +74,25 @@ class MCPServers:
             return []
 
         client = MultiServerMCPClient(self._config)
-        self.tools = await client.get_tools()
+        self.tools = []
+        self.tools_by_server = {}
+        seen: set[str] = set()
+        for server_name in self._config:
+            server_tools = await client.get_tools(server_name=server_name)
+            names: list[str] = []
+            for tool in server_tools:
+                if tool.name in seen:
+                    continue  # duplicate tool name across servers: first wins
+                seen.add(tool.name)
+                names.append(tool.name)
+                self.tools.append(tool)
+            self.tools_by_server[server_name] = names
         logger.info("Connected MCP servers: %s (%d tools total)", self.names, len(self.tools))
         return self.tools
 
     async def close(self) -> None:
         self.tools = []
+        self.tools_by_server = {}
 
 
 mcp_servers = MCPServers()

@@ -28,6 +28,10 @@ Endpoints:
   DELETE /users/{username}        -> admin: delete a user
   GET  /agent/skills|tools        -> agent resource CRUD (store-backed; skills
                                     include bundled files, e.g. scripts/)
+  GET|POST /agents                -> list / create agent configs (customizable
+                                    profiles: model + system prompt + skills +
+                                    tools; scope=global requires admin)
+  GET|PUT|DELETE /agents/{name}   -> read / replace / delete an agent config
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):
@@ -57,14 +61,18 @@ from langgraph.graph.state import CompiledStateGraph
 from .api.v1.routes import api_router
 from .core.config import settings
 from .core.database import persistence
-from .services.agent import build_agent, build_backend
+from .services.agent import AgentRegistry, build_backend
 from .services.mcp import mcp_servers
 from .services.searxng import build_search_tool
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
+def create_app(
+    *,
+    agent: CompiledStateGraph | None = None,
+    agent_registry: AgentRegistry | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await persistence.start()
@@ -77,16 +85,26 @@ def create_app(*, agent: CompiledStateGraph | None = None) -> FastAPI:
         except Exception:
             logger.exception("MCP connect failed; continuing without MCP tools")
         search_tool = build_search_tool()
-        app.state.agent = agent or build_agent(
+        # Agent registry: lazy graph factory keyed by agent config (model +
+        # system prompt + skills + tools). `agent` (tests) becomes the static
+        # default; every resolve() then returns that graph.
+        app.state.agents = agent_registry or AgentRegistry(
             checkpointer=persistence.checkpointer,
             store=persistence.store,
+            backend=app.state.backend,
             mcp_tools=mcp_servers.tools,
             extra_tools=[search_tool] if search_tool else None,
-            backend=app.state.backend,
-            model=settings.model,
-            system_prompt=settings.system_prompt,
-            interrupt_on=settings.interrupt_on,
+            tools_by_server=mcp_servers.tools_by_server,
+            static_default=agent,
         )
+        # Registries injected from outside (tests) may hold pre-start
+        # checkpointer/store references — rebind to the live instances.
+        app.state.agents.update_persistence(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+        )
+        app.state.backend = app.state.agents.backend
+        app.state.agent = await app.state.agents.resolve("default", "anonymous")
         logger.info(
             "Agent ready: model=%s persistence=%s mcp=%s searxng=%s execute=%s",
             settings.model,

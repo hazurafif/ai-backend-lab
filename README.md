@@ -68,9 +68,9 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `POST /login` | – | OAuth2 form `username`/`password` → JWT (access + refresh token) |
 | `POST /refresh` | – | Exchange a refresh token for a new access token |
 | `POST /register` | – | Self-service registration (always creates a `user` role) |
-| `POST /chat` | Bearer | Run the agent; **SSE stream** of events |
-| `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`), incl. HITL resume |
-| `GET /threads` | Bearer | Conversations of the current user (newest first, `limit`/`offset` pagination) |
+| `POST /chat` | Bearer | Run the agent; **SSE stream** of events. Optional `agent` field selects a custom agent config |
+| `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`), incl. HITL resume. Optional `agent` field |
+| `GET /threads` | Bearer | Conversations of the current user (newest first, `limit`/`offset` pagination; each thread carries the `agent` it runs on) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
 | `PATCH /threads/{id}` | Bearer | Rename a thread |
 | `DELETE /threads/{id}` | Bearer | Delete a thread (state + history + metadata) |
@@ -84,6 +84,9 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `DELETE /agent/skills/{name}/files/{path}` | Bearer (admin) | Delete one bundled skill file |
 | `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
 | `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
+| `GET /agents` | Bearer | List agent configs (builtin `default` + yours + global) |
+| `POST /agents` | Bearer | Create an agent config (profile: model + system prompt + skills + tools; `scope: "global"` requires admin) |
+| `GET/PUT/DELETE /agents/{name}` | Bearer | Read / replace / delete an agent config (owner; global ones: admin) |
 | `GET /users/me` | Bearer | Current user |
 | `POST /users/me/password` | Bearer | Change your own password (old password must verify) |
 | `GET /users` | Bearer (admin) | List all users (no password hashes) |
@@ -166,7 +169,8 @@ instead of the raw SSE contract above. Request body:
 {
   "id": "chat-uuid",
   "messages": [{"id": "m1", "role": "user", "parts": [{"type": "text", "text": "hi"}]}],
-  "selectedChatModel": "openai:deepseek-v4-flash"
+  "selectedChatModel": "openai:deepseek-v4-flash",
+  "agent": "research"
 }
 ```
 
@@ -193,6 +197,44 @@ instead of the raw SSE contract above. Request body:
   `reject`, `respond`. Resuming a thread that is not waiting returns `409`.
   Cancelling an in-flight run: `POST /threads/{id}/cancel` (Bearer; 409 when
   nothing is running).
+
+## Agent configs (customizable agent profiles)
+
+Beyond picking a model, you can define **named agent profiles** that bundle
+model + system prompt + a selection of skills and MCP tool servers, then
+reference them from chat requests via the `agent` field:
+
+```json
+// POST /agents  (Bearer)
+{
+  "name": "research",
+  "model": "anthropic:claude-sonnet-4-5",
+  "system_prompt": "You are a research assistant. Cite sources.",
+  "skills": ["sql-guru"],
+  "tools": ["weather", "web_search"],
+  "temperature": 0.3
+}
+```
+
+- **Resolution**: a chat request picks the caller's own agent with that
+  name, then a global one, then the builtin `default` (env-driven,
+  `DEEPAGENTS_MODEL` + `SYSTEM_PROMPT`). The name `default` is reserved.
+- **Semantics**: `skills: null` / `tools: null` inherit the global behavior
+  (all global skills / all configured MCP tools); `[]` disables them; a
+  non-empty list selects. `web_search` is a built-in pseudo-tool name.
+- **Skills**: selecting a skill snapshot-copies its `SKILL.md` + bundled
+  files into the agent's own namespace (`/skills/<owner>/<name>/` backend
+  route), so the agent sees exactly its selection. Editing the global skill
+  later does not propagate to existing snapshots (re-save the agent to
+  re-sync).
+- **Per-thread**: thread metadata records the agent, so `resume` and thread
+  history use the same agent. `GET /threads` returns the `agent` field.
+- **Scope**: `scope: "user"` (default) agents are private; `scope:
+  "global"` agents are shared by all users and require admin.
+- **Implementation note**: the deep-agents graph bakes model + prompt +
+  skills in at build time, so graphs are built lazily per distinct config
+  and cached (`AgentRegistry`); skills/tools/config CRUD invalidates the
+  cache. Conversations survive rebuilds (shared checkpointer).
 
 ## MCP servers (gofastmcp)
 
