@@ -20,7 +20,8 @@ import math
 import statistics
 from dataclasses import dataclass, field
 
-from .rerank import Reranker, search_with_rerank
+from .rerank import IdentityReranker, Reranker, search_with_rerank
+from .rewrite import QueryRewriter
 from .vectorstore import KbVectorStore
 
 GOLDEN_SCHEMA = {
@@ -102,21 +103,28 @@ def evaluate(
     alpha: float,
     limit: int,
     reranker: Reranker | None = None,
+    rewriter: QueryRewriter | None = None,
 ) -> dict:
     """Evaluate one configuration; returns aggregates + per-query details.
 
     `owner` must match the owner the corpus was upserted with (multi-tenant
-    invariant: evaluation never bypasses the owner filter). Pass `reranker` to
-    measure the retrieve-broad/rerank-fine pipeline against plain retrieval.
+    invariant: evaluation never bypasses the owner filter). Pass `reranker` /
+    `rewriter` to measure those stages against plain retrieval.
     """
     per_query: list[QueryEval] = []
     for golden in queries:
         relevant = set(golden.relevant)
-        if reranker is None:
+        if reranker is None and rewriter is None:
             hits = store.search(golden.query, owner=owner, limit=limit, alpha=alpha)
         else:
             hits = search_with_rerank(
-                store, reranker, golden.query, owner=owner, limit=limit, alpha=alpha
+                store,
+                reranker or IdentityReranker(),
+                golden.query,
+                owner=owner,
+                limit=limit,
+                alpha=alpha,
+                rewriter=rewriter,
             )
         per_query.append(
             QueryEval(
@@ -132,6 +140,7 @@ def evaluate(
         "alpha": alpha,
         "limit": limit,
         "rerank": reranker is not None,
+        "rewrite": rewriter is not None,
         "queries": len(per_query),
         "recall_at_k": statistics.fmean(q.recall_at_k for q in per_query),
         "mrr": statistics.fmean(q.mrr for q in per_query),

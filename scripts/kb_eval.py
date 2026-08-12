@@ -32,6 +32,7 @@ from app.services.kb.embeddings import build_embeddings
 from app.services.kb.eval import evaluate, load_golden
 from app.services.kb.parse import extract_pages
 from app.services.kb.rerank import build_reranker
+from app.services.kb.rewrite import build_rewriter
 from app.services.kb.vectorstore import (
     InMemoryKbVectorStore,
     KbVectorStore,
@@ -101,6 +102,8 @@ async def _run(args: argparse.Namespace) -> None:
         print(f"Golden queries: {len(queries)} (limit={args.limit})")
         reranker = build_reranker() if args.rerank else None
         print("Rerank: " + (f"on ({settings.kb_rerank_model})" if reranker else "off"))
+        rewriter = build_rewriter(force=True) if args.rewrite else None
+        print("Rewrite: " + ("on" if rewriter else "off"))
         print(f"{'alpha':>6}  {'recall@k':>9}  {'mrr':>7}  {'ndcg@k':>7}")
         best = None
         for alpha in args.alphas:
@@ -111,6 +114,7 @@ async def _run(args: argparse.Namespace) -> None:
                 alpha=alpha,
                 limit=args.limit,
                 reranker=reranker,
+                rewriter=rewriter,
             )
             print(
                 f"{alpha:>6.2f}  {result['recall_at_k']:>9.3f}  "
@@ -138,6 +142,7 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=5, help="top-k hits per query")
     parser.add_argument("--rerank", action="store_true", help="enable reranking (KB_RERANK_MODEL)")
+    parser.add_argument("--rewrite", action="store_true", help="enable query rewriting (LLM)")
     parser.add_argument("--live", action="store_true", help="use the configured Weaviate store")
     parser.add_argument("--verbose", action="store_true", help="print per-query hit lists")
     args = parser.parse_args()

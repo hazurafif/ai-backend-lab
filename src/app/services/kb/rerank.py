@@ -89,13 +89,18 @@ def search_with_rerank(
     limit: int = 5,
     alpha: float = 0.5,
     candidates: int | None = None,
+    rewriter=None,
 ) -> list[SearchHit]:
-    """Hybrid retrieve (broad) + rerank (fine) in one call.
+    """Rewrite -> hybrid retrieve (broad) -> rerank (fine) in one call.
 
-    With the identity reranker this is exactly a plain `store.search` at the
-    final limit, so behavior is unchanged unless reranking is configured.
+    With identity reranker/rewriter this is exactly a plain `store.search` at
+    the final limit, so behavior is unchanged unless the stages are enabled.
     """
-    if isinstance(reranker, IdentityReranker):
+    from .rewrite import IdentityQueryRewriter
+
+    if rewriter is not None and not isinstance(rewriter, IdentityQueryRewriter):
+        query = rewriter.rewrite(query)
+    if reranker is None or isinstance(reranker, IdentityReranker):
         return store.search(query, owner=owner, kb_id=kb_id, limit=limit, alpha=alpha)
     pool = max(candidates or settings.kb_rerank_candidates, limit)
     broad = store.search(query, owner=owner, kb_id=kb_id, limit=pool, alpha=alpha)

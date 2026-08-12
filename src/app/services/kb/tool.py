@@ -14,6 +14,7 @@ from langchain_core.tools import BaseTool, tool
 
 from ...core.config import settings
 from .rerank import get_reranker, search_with_rerank
+from .rewrite import get_rewriter
 from .vectorstore import KbVectorStore, get_vector_store
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ def build_kb_search_tool(vector_store: KbVectorStore | None = None) -> BaseTool 
                 kb_id=kb_id,
                 limit=max(1, min(top_k, 20)),
                 alpha=settings.kb_hybrid_alpha,
+                rewriter=get_rewriter(),
             )
         except Exception as exc:
             logger.exception("knowledge base search failed")

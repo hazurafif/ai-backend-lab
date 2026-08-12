@@ -33,6 +33,7 @@ from ....services.kb.ingest import ingest_document
 from ....services.kb.ingest import reindex_kb as reindex_kb_documents
 from ....services.kb.paths import safe_path
 from ....services.kb.rerank import get_reranker, search_with_rerank
+from ....services.kb.rewrite import get_rewriter
 from ....services.kb.vectorstore import KbUnavailableError, KbVectorStore, get_vector_store
 from ....services.kb.zip_upload import ZipValidationError, extract_zip_entries
 
@@ -113,6 +114,7 @@ async def search_all_kbs(
             owner=current_user["username"],
             limit=limit,
             alpha=effective_alpha,
+            rewriter=get_rewriter(),
         )
     except KbUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -386,6 +388,7 @@ async def search_kb(
             kb_id=kb_id,
             limit=limit,
             alpha=effective_alpha,
+            rewriter=get_rewriter(),
         )
     except KbUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

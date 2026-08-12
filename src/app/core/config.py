@@ -141,6 +141,19 @@ class Settings:
     kb_rerank_candidates: int = field(
         default_factory=lambda: int(os.environ.get("KB_RERANK_CANDIDATES", "20"))
     )
+    # Query rewriting (R4): LLM call before retrieval for vague queries.
+    # Opt-in (KB_QUERY_REWRITE=true); failures/trivial queries degrade to the
+    # original query. Model defaults to DEEPAGENTS_MODEL.
+    kb_query_rewrite: bool = field(
+        default_factory=lambda: os.environ.get("KB_QUERY_REWRITE", "false").lower() == "true"
+    )
+    kb_rewrite_model: str | None = field(
+        default_factory=lambda: os.environ.get("KB_REWRITE_MODEL") or None
+    )
+    # Queries shorter than this are left untouched (keyword search handles them).
+    kb_rewrite_min_length: int = field(
+        default_factory=lambda: int(os.environ.get("KB_REWRITE_MIN_LENGTH", "8"))
+    )
     kb_max_file_size_mb: int = field(
         default_factory=lambda: int(os.environ.get("KB_MAX_FILE_SIZE_MB", "25"))
     )
