@@ -96,9 +96,9 @@ roadmap penerapan terurut berdasarkan ROI.
 | Per-user quota, zip, download | ✅ | Hardening commit |
 | Reindex (ganti embedding model) | ✅ | `POST /kb/{id}/reindex` |
 | Embeddings swappable + Matryoshka dims | ✅ | `EMBEDDINGS_MODEL` / `EMBEDDINGS_DIMENSIONS`; ganti model = reindex |
-| **Evaluasi (golden set + IR metrics)** | ✅ | `scripts/kb_eval.py` + `services/kb/eval.py` (R1); `--rerank` membandingkan pipeline |
-| Reranking | ✅ | Fase R3: `services/kb/rerank.py` — FlashRank lokal CPU (KB_RERANK_MODEL), retrieve broad → rerank fine |
-| Query rewrite | ❌ | Belum (sebagian ditutup agent loop) |
+| **Evaluasi (golden set + IR metrics)** | ✅ | `scripts/kb_eval.py` + `services/kb/eval.py` (R1); `--rerank`/`--rewrite` membandingkan pipeline |
+| Reranking | ✅ | Fase R3: `services/kb/rerank.py` — FlashRank lokal CPU (KB_RERANK_MODEL), retrieve broad → rerank fine; live check `scripts/test_reranker.py` |
+| Query rewrite | ✅ | Fase R4: `services/kb/rewrite.py` — opt-in (KB_QUERY_REWRITE), gate query trivial + cache + fallback aman |
 | Contextual retrieval | ❌ | Belum |
 | Dedup + lost-in-middle reorder | ✅ | Tool agent (gratis) |
 

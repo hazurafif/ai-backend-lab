@@ -400,6 +400,20 @@ curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # del
   cross-encoder, ~30ms for 20 candidates; model downloads on first use).
   Retrieval pulls `KB_RERANK_CANDIDATES` (default 20) then reranks down to
   the requested limit. Unset → plain hybrid search.
+- Query rewriting (opt-in, `KB_QUERY_REWRITE=true`): an LLM call rewrites
+  vague queries before retrieval (`KB_REWRITE_MODEL`, defaults to the agent
+  model; queries shorter than `KB_REWRITE_MIN_LENGTH` or single tokens are
+  left untouched; results cached per query; failures degrade to the original
+  query).
+
+### Live reranker check
+
+```bash
+uv run python scripts/test_reranker.py   # real FlashRank vs store ranking on a demo corpus
+```
+
+Downloads the model once (~22 MB to /tmp) and prints per-query before/after
+rankings so you can eyeball whether reranking changes orders sensibly.
 
 ### Retrieval evaluation (golden set)
 
