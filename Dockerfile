@@ -9,6 +9,9 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 COPY src ./src
+# SQL migrations are applied at startup (core/migrations.py resolves them
+# relative to the repo root).
+COPY migrations ./migrations
 
 RUN uv sync --frozen --no-dev
 

@@ -1,4 +1,18 @@
 services:
+  app:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # In-compose the app reaches Postgres via the service name.
+      DATABASE_URI: postgresql://aibackend:aibackend@postgres:5432/aibackend
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     image: postgres:16-alpine
     environment:
