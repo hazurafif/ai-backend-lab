@@ -97,6 +97,46 @@ class Settings:
         default_factory=lambda: os.environ.get("EXECUTE_INHERIT_ENV", "false").lower() == "true"
     )
 
+    # --- Knowledge base (RAG) ---
+    # WEAVIATE_URL unset -> no vector store: KB uploads are rejected with 503
+    # and the agent's search_knowledge_base tool is not registered.
+    weaviate_url: str | None = field(default_factory=lambda: os.environ.get("WEAVIATE_URL") or None)
+    weaviate_api_key: str | None = field(
+        default_factory=lambda: os.environ.get("WEAVIATE_API_KEY") or None
+    )
+    # Embeddings: OpenAIEmbeddings when OPENAI_API_KEY is present (model + optional
+    # custom base URL), otherwise a deterministic local embedder (dev/tests only).
+    embeddings_model: str = field(
+        default_factory=lambda: os.environ.get("EMBEDDINGS_MODEL", "text-embedding-3-small")
+    )
+    embeddings_base_url: str | None = field(
+        default_factory=lambda: os.environ.get("EMBEDDINGS_BASE_URL") or None
+    )
+    kb_max_file_size_mb: int = field(
+        default_factory=lambda: int(os.environ.get("KB_MAX_FILE_SIZE_MB", "25"))
+    )
+    kb_allowed_extensions: list[str] = field(
+        default_factory=lambda: [
+            e.strip()
+            for e in os.environ.get(
+                "KB_ALLOWED_EXTENSIONS",
+                ".md,.txt,.pdf,.docx,.csv,.html,.json,.py,.js,.ts,.go,.rs,.java,.sql,.yml,.yaml,.xml",
+            ).split(",")
+            if e.strip()
+        ]
+    )
+    kb_chunk_size: int = field(default_factory=lambda: int(os.environ.get("KB_CHUNK_SIZE", "1000")))
+    kb_chunk_overlap: int = field(
+        default_factory=lambda: int(os.environ.get("KB_CHUNK_OVERLAP", "200"))
+    )
+    kb_max_upload_batch: int = field(
+        default_factory=lambda: int(os.environ.get("KB_MAX_UPLOAD_BATCH", "100"))
+    )
+    # Vector vs keyword weight for Weaviate hybrid search (0 = BM25F only, 1 = vectors only).
+    kb_hybrid_alpha: float = field(
+        default_factory=lambda: float(os.environ.get("KB_HYBRID_ALPHA", "0.5"))
+    )
+
     # --- API ---
     cors_origins: list[str] = field(
         default_factory=lambda: [

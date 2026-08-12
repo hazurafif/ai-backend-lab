@@ -23,6 +23,12 @@ dependencies = [
     "mcp>=1.9.0",
     # Web search (SearXNG client)
     "httpx>=0.28.0",
+    "weaviate-client>=1.30",
+    "pypdf>=5.0",
+    "python-docx>=1.1",
+    "beautifulsoup4>=4.12",
+    "langchain-text-splitters>=0.3",
+    "numpy>=2.0",
 ]
 
 [dependency-groups]
@@ -51,8 +57,8 @@ ignore = ["E501"]  # long strings/URLs; formatter handles line wrapping
 "scripts/*" = ["S101"]
 
 [tool.ruff.lint.flake8-bugbear]
-# Depends() in argument defaults is the idiomatic FastAPI pattern.
-extend-immutable-calls = ["fastapi.Depends"]
+# Depends()/File()/Form()/Query() in argument defaults is the idiomatic FastAPI pattern.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -39,5 +39,22 @@ services:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     restart: unless-stopped
 
+  # Vector store for the knowledge base (RAG): hybrid search, no vectorizer
+  # modules — embeddings are computed in app code (WEAVIATE_URL in .env).
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.30.0
+    environment:
+      QUERY_DEFAULTS_LIMIT: "25"
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: "none"
+      CLUSTER_HOSTNAME: node1
+    ports:
+      - "8081:8080"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  weaviate_data:
