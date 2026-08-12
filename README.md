@@ -395,6 +395,11 @@ curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # del
   the BM25F stage. Embedding dimensions via `EMBEDDINGS_DIMENSIONS`
   (Matryoshka truncation); switching embedding models requires a
   `POST /kb/{id}/reindex`.
+- Reranking (retrieve broad → rerank fine): set `KB_RERANK_MODEL` to a
+  flashrank model name (e.g. `ms-marco-MiniLM-L-12-v2`, a tiny CPU
+  cross-encoder, ~30ms for 20 candidates; model downloads on first use).
+  Retrieval pulls `KB_RERANK_CANDIDATES` (default 20) then reranks down to
+  the requested limit. Unset → plain hybrid search.
 
 ### Retrieval evaluation (golden set)
 
@@ -415,6 +420,11 @@ uv run python scripts/kb_eval.py --kb runbook --golden data/golden_set.json --ve
 
 Output: Recall@k, MRR and nDCG@k per alpha value, plus the best alpha.
 Every future retrieval change should be gated on these numbers.
+
+```bash
+# compare reranking vs plain retrieval on the same golden set
+uv run python scripts/kb_eval.py --kb runbook --golden data/golden_set.json --rerank
+```
 - Ingest status per document: `pending → processing → ready | failed` (with
   error message).
 - Embeddings: OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`)
