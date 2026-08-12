@@ -109,6 +109,9 @@ Rules:
 - Override auth in tests with `app.dependency_overrides`, not monkeypatching.
 - Changes to the agent pipeline (streaming, middleware, persistence) → extend
   `tests/test_smoke.py` with a scripted-model test.
+- Test-only dummy credentials live in `tests/conftest.py` (`TEST_PASSWORD`,
+  `TEST_NEW_PASSWORD`) with `# gitguardian:ignore` comments. Never inline
+  password literals in test files — GitGuardian flags them as leaked secrets.
 
 ## Git workflow
 
@@ -133,5 +136,7 @@ Rules:
 ## Security
 
 - Never commit `.env`, secrets, or generated files (see `.gitignore`).
+- Never hardcode credential literals (passwords, API keys, tokens) anywhere in
+  tracked code; test fixtures use the shared dummies in `tests/conftest.py`.
 - "Trust the LLM" model: enforce boundaries via permissions/sandboxes, not
   prompt instructions.
