@@ -43,7 +43,7 @@ uv run pre-commit install           # ruff + conventional-commits hooks
 
 Health check: `curl http://127.0.0.1:8000/health`
 
-## Container & CI
+## Container
 
 - `docker compose up -d --build` — builds and runs the app (:8000) together
   with Postgres (:5432); the app reaches the DB via the compose service
@@ -52,8 +52,6 @@ Health check: `curl http://127.0.0.1:8000/health`
   image, creates a pod (postgres + app) and runs the **app capped at 1 GB
   RAM** (`--memory=1g --memory-swap=1g`; the podman machine VM gets 2 GB).
   Subcommands: `start` (default), `stop`, `clean`.
-- `.github/workflows/ci.yml` runs ruff (check + format) and the offline
-  pytest suite on every push/PR.
 
 ## Model configuration
 
