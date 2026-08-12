@@ -6,12 +6,22 @@ below is normative — keep it in sync with `app/services/chat.py`.
 
 Endpoints:
   POST /chat                      -> SSE stream of agent events
-  POST /api/chat                  -> AI SDK data-stream protocol (frontend useChat)
-  GET  /threads                   -> conversations for the current user
+  POST /api/chat                  -> AI SDK data-stream protocol (frontend useChat;
+                                     supports HITL resume via `decision`/`decisions`)
+  GET  /threads                   -> conversations for the current user (limit/offset)
   GET  /threads/{id}/messages     -> full message history of a thread
+  PATCH /threads/{id}             -> rename a thread
+  DELETE /threads/{id}            -> delete a thread
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run
-  POST /login                     -> JWT
+  POST /threads/{id}/cancel       -> abort the active run of a thread
+  POST /login                     -> JWT (access + refresh token)
+  POST /refresh                   -> exchange a refresh token for a new access token
   GET  /users/me                  -> current user
+  POST /users/me/password         -> change your own password
+  GET  /users                     -> admin: list users
+  POST /users                     -> admin: create a user
+  PATCH /users/{username}         -> admin: change role/disabled state
+  DELETE /users/{username}        -> admin: delete a user
   GET  /agent/skills|tools        -> agent resource CRUD (store-backed; skills
                                     include bundled files, e.g. scripts/)
   GET  /health                    -> status
@@ -26,7 +36,9 @@ SSE events (event: <name>, data: <json>):
   subagent_delta  {"subagent", "delta"}                     subagent token chunk
   interrupt       {"thread_id", "interrupts"[{value, when}]} run paused for human input
   error           {"source", "message"}                     recoverable stream error
-  done            {"thread_id", "messages"[], "interrupted"?} final state
+  done            {"thread_id", "messages"[], "interrupted"?,
+                   "cancelled"?, "usage"?}                  final state (usage = summed
+                                                             token counts when reported)
 """
 
 from __future__ import annotations

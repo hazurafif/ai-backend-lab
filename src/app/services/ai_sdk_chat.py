@@ -73,6 +73,7 @@ async def sdk_stream(
     started_text: set[str] = set()
     emitted_error = False
     finished = False
+    interrupt_seen = False
 
     yield _chunk({"type": "start", "messageId": response_id})
 
@@ -151,19 +152,18 @@ async def sdk_stream(
                 }
             )
         elif name == "interrupt":
-            # Human-in-the-loop pause: surface as an error so useChat stops
-            # and the UI can show the toast. Resume flow (POST
-            # /threads/{id}/resume) is not wired into this protocol yet.
+            # Human-in-the-loop pause: surface the approval request as a
+            # custom chunk; the frontend shows an approval UI and resumes by
+            # posting to /api/chat again with `id` (the thread) + `decision`.
             yield _chunk(
                 {
-                    "type": "error",
-                    "errorText": (
-                        "Agent paused for human approval (resume flow not wired to this UI yet)."
-                    ),
+                    "type": "custom",
+                    "kind": "app.interrupt",
+                    "threadId": data.get("thread_id"),
+                    "interrupts": data.get("interrupts"),
                 }
             )
-            emitted_error = True
-            break
+            interrupt_seen = True
         elif name == "error":
             yield _chunk(
                 {
@@ -176,17 +176,24 @@ async def sdk_stream(
             emitted_error = True
             break
         elif name == "done":
-            if data.get("interrupted") and not emitted_error:
-                yield _chunk(
-                    {
-                        "type": "error",
-                        "errorText": (
-                            "Agent run was interrupted (human-in-the-loop). "
-                            "Resume is not wired to this UI yet."
-                        ),
-                    }
-                )
-                emitted_error = True
+            if data.get("cancelled"):
+                yield _chunk({"type": "finish", "finishReason": "stop"})
+                finished = True
+            elif data.get("interrupted"):
+                if not interrupt_seen:
+                    yield _chunk(
+                        {
+                            "type": "error",
+                            "errorText": "Agent run was interrupted (human-in-the-loop).",
+                        }
+                    )
+                    emitted_error = True
+                else:
+                    # Interrupt already surfaced as an app.interrupt custom
+                    # chunk; close the stream so the UI can render the
+                    # approval flow.
+                    yield _chunk({"type": "finish", "finishReason": "other"})
+                    finished = True
             elif not emitted_error:
                 yield _chunk({"type": "finish", "finishReason": "stop"})
                 finished = True

@@ -55,6 +55,23 @@ class AiSdkChatRequest(BaseModel):
             "(None = use SEARXNG_ENABLED config)"
         ),
     )
+    decision: dict | None = Field(
+        default=None,
+        description=(
+            "HITL resume: single decision (approve | edit | reject | respond) "
+            "for a paused run; requires `id` = the paused thread"
+        ),
+    )
+    decisions: list[dict] | None = Field(
+        default=None,
+        description="HITL resume: one decision per action_request of the interrupt",
+    )
+
+
+class ThreadUpdate(BaseModel):
+    """Rename payload for PATCH /threads/{id}."""
+
+    title: str = Field(min_length=1, max_length=120)
 
 
 class ResumeRequest(BaseModel):

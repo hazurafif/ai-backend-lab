@@ -23,6 +23,7 @@ from langgraph.types import Command
 
 from ..core.constants import SSE_HEADERS
 from ..core.database import persistence
+from ..core.run_registry import runs
 from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,22 @@ def _jsonable(v: Any) -> Any:
         except Exception:
             pass
     return str(v)
+
+
+def _aggregate_usage(messages: list[dict]) -> dict | None:
+    """Sum usage_metadata (input/output/total tokens) over finalized messages."""
+    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    seen = False
+    for m in messages:
+        usage = m.get("usage_metadata") if isinstance(m, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        for key in totals:
+            value = usage.get(key)
+            if isinstance(value, int):
+                totals[key] += value
+                seen = True
+    return totals if seen else None
 
 
 def _sse(event: str, data: dict) -> str:
@@ -261,14 +278,34 @@ async def agent_stream(
         await queue.put(None)
 
     producer = asyncio.create_task(drain())
+    stop_event = runs.register(thread_id)
+    cancelled = False
     try:
         while True:
-            item = await queue.get()
+            get_task = asyncio.create_task(queue.get())
+            stop_task = asyncio.create_task(stop_event.wait())
+            done_tasks, pending = await asyncio.wait(
+                {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            if stop_task in done_tasks:
+                # POST /threads/{id}/cancel fired: abort the run and close
+                # the stream with a terminal done event.
+                cancelled = True
+                break
+            item = get_task.result()
             if item is None:
                 break
             yield _sse(item["event"], item["data"])
     finally:
         producer.cancel()
+        runs.unregister(thread_id)
+
+    if cancelled:
+        # No history/metadata writes for aborted runs (partial state).
+        yield _sse("done", {"thread_id": thread_id, "messages": [], "cancelled": True})
+        return
 
     # Final state. With v3 streaming a HITL interrupt does not raise — the
     # run ends normally, so we detect it from the persisted state's pending
@@ -287,6 +324,7 @@ async def agent_stream(
 
     snapshot = await agent.aget_state(config)
     interrupts = _collect_interrupts(snapshot)
+    usage = _aggregate_usage(messages)
     # Persist history + refresh thread metadata before the terminal events, so
     # GET /threads and GET /threads/{id}/messages see the finished run.
     await _save_history(thread_id, username, messages)
@@ -294,6 +332,9 @@ async def agent_stream(
     if interrupts:
         # Run paused for human input: surface the HITL requests.
         yield _sse("interrupt", {"thread_id": thread_id, "interrupts": interrupts})
-        yield _sse("done", {"thread_id": thread_id, "messages": messages, "interrupted": True})
+        done_data: dict = {"thread_id": thread_id, "messages": messages, "interrupted": True}
     else:
-        yield _sse("done", {"thread_id": thread_id, "messages": messages})
+        done_data = {"thread_id": thread_id, "messages": messages}
+    if usage:
+        done_data["usage"] = usage
+    yield _sse("done", done_data)
