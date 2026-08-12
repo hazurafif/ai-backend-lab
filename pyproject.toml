@@ -31,8 +31,6 @@ dev = [
     "pytest-asyncio>=0.25.0",
     "ruff>=0.9.0",
     "pre-commit>=4.0.0",
-    # FastMCP app servers (apps/): prefab_ui + `fastmcp dev apps` browser preview
-    "fastmcp[apps]>=3.4.0",
 ]
 
 [tool.uv]
@@ -42,7 +40,7 @@ package = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "apps"]
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC", "RUF"]

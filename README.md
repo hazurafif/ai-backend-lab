@@ -208,10 +208,6 @@ Server config comes from `MCP_SERVERS_JSON` (env) or `mcp_servers.json` (see
     "transport": "streamable_http",
     "headers": {"Authorization": "Bearer xxx"}
   },
-  "quiz": {
-    "url": "http://127.0.0.1:8091/mcp",
-    "transport": "streamable_http"
-  },
   "local-cli": {
     "command": "/path/to/gofastmcp-tool",
     "args": ["serve"],
@@ -236,25 +232,6 @@ MCP_SERVERS_JSON='{"weather-demo":{"url":"http://127.0.0.1:8090/mcp","transport"
   uv run uvicorn app.main:app --port 8000
 # GET /health -> mcp_servers: ["weather-demo"]; ask the agent about the weather in Jakarta
 ```
-
-### Python MCP apps (`apps/`)
-
-`apps/` holds **FastMCP app servers** (Python) — MCP tools that return
-interactive Prefab UIs instead of raw JSON, built with `FastMCPApp` (see
-`apps/README.md`). Example: `apps/quiz/quiz_server.py` — the LLM launches a
-quiz UI, the user answers via buttons, each click grades through a backend
-tool, and the final score is sent back to the conversation.
-
-```bash
-uv sync                            # dev group installs fastmcp[apps]
-uv run fastmcp dev apps apps/quiz/quiz_server.py --mcp-port 8091
-# dev UI: http://localhost:8080   MCP server: http://127.0.0.1:8091/mcp
-```
-
-Apps speak the same streamable-HTTP protocol, so register them in
-`mcp_servers.json` like any other server (see the `quiz` entry above) and the
-agent can launch their UIs — tool outputs stream back as structured events
-for the frontend to render.
 
 ## Web search (SearXNG)
 
@@ -412,7 +389,6 @@ src/app/          package (src layout, installed editable by uv sync)
   util/
     date.py       time helpers (now_iso)
 tests/            offline pytest suite (scripted model, no API key): uv run pytest -q
-apps/             FastMCP app servers (interactive Prefab UIs), see apps/README.md
 scripts/
   live_test.py       live E2E against a running server + real model
   test_mcp_server.py tiny MCP server (streamable HTTP) to test MCP wiring
