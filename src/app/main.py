@@ -34,10 +34,14 @@ Endpoints:
   POST /kb/{id}/files              -> multipart upload (file + relative path per
                                     file; folder upload = many pairs). Each file
                                     is ingested: parse -> chunk -> embed -> Weaviate
+  POST /kb/{id}/zip                -> upload a .zip of documents (safe extraction:
+                                    traversal + zip-bomb guards, per-entry results)
   GET  /kb/{id}/files              -> documents with ingest status
   GET|DELETE /kb/{id}/files/{doc}  -> document detail / delete (vectors too)
+  GET  /kb/{id}/files/{doc}/content-> raw file bytes (inline preview)
   POST /kb/{id}/reindex            -> re-parse + re-embed all documents
   GET  /kb/{id}/search             -> hybrid (vector + keyword) search over a KB
+  GET  /kb/search                  -> hybrid search across all the user's KBs
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):

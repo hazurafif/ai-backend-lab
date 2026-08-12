@@ -518,6 +518,17 @@ class KbStore:
                 return cur.rowcount > 0
         return self._memory_kbs.get(owner, {}).pop(kb_id, None) is not None
 
+    async def total_bytes(self, owner: str) -> int:
+        """Sum of raw document bytes across all KBs of `owner` (quota check)."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT coalesce(sum(size_bytes), 0) FROM kb_documents WHERE owner = %s",
+                    (owner,),
+                )
+                return (await cur.fetchone())[0] or 0
+        return sum(d["size_bytes"] for d in self._memory_docs.get(owner, {}).values())
+
     # ------------------------------------------------------------- documents
 
     async def add_document(

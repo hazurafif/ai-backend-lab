@@ -136,6 +136,15 @@ class Settings:
     kb_hybrid_alpha: float = field(
         default_factory=lambda: float(os.environ.get("KB_HYBRID_ALPHA", "0.5"))
     )
+    # Per-user storage quota (raw bytes of all documents across KBs).
+    kb_quota_mb: int = field(default_factory=lambda: int(os.environ.get("KB_QUOTA_MB", "500")))
+    # Zip upload hardening: max entries + max total uncompressed size (zip-bomb guard).
+    kb_zip_max_entries: int = field(
+        default_factory=lambda: int(os.environ.get("KB_ZIP_MAX_ENTRIES", "500"))
+    )
+    kb_zip_max_total_mb: int = field(
+        default_factory=lambda: int(os.environ.get("KB_ZIP_MAX_TOTAL_MB", "100"))
+    )
 
     # --- API ---
     cors_origins: list[str] = field(

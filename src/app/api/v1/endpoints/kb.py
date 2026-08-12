@@ -31,11 +31,11 @@ from ....schema.kb_schema import (
 )
 from ....services.kb.ingest import ingest_document
 from ....services.kb.ingest import reindex_kb as reindex_kb_documents
+from ....services.kb.paths import safe_path
 from ....services.kb.vectorstore import KbUnavailableError, KbVectorStore, get_vector_store
+from ....services.kb.zip_upload import ZipValidationError, extract_zip_entries
 
 router = APIRouter(prefix="/kb", tags=["knowledge base"])
-
-_MAX_PATH_LEN = 500
 
 
 def _vector_store_or_503() -> KbVectorStore:
@@ -49,21 +49,6 @@ def _vector_store_or_503() -> KbVectorStore:
     return store
 
 
-def _safe_path(raw: str | None) -> str | None:
-    """Normalize a client-supplied relative path; None when unsafe/invalid."""
-    if not raw:
-        return None
-    path = raw.replace("\\", "/").strip().lstrip("/")
-    if not path or len(path) > _MAX_PATH_LEN:
-        return None
-    parts = [p for p in path.split("/") if p not in ("", ".")]
-    if not parts or any(p == ".." for p in parts):
-        return None
-    if any(ch in path for ch in "\x00\r\n\t"):
-        return None
-    return "/".join(parts)
-
-
 def _check_extension(path: str) -> None:
     if Path(path).suffix.lower() not in settings.kb_allowed_extensions:
         allowed = ", ".join(settings.kb_allowed_extensions)
@@ -71,6 +56,12 @@ def _check_extension(path: str) -> None:
             status_code=422,
             detail=f"Unsupported file type for '{path}'. Allowed: {allowed}",
         )
+
+
+async def _quota_remaining(username: str) -> int:
+    """Bytes of storage quota still available for `username`."""
+    used = await persistence.kb.total_bytes(username)
+    return settings.kb_quota_mb * 1024 * 1024 - used
 
 
 async def _get_owned_kb(kb_id: str, username: str) -> dict:
@@ -96,6 +87,24 @@ async def create_kb(body: KBIn, current_user: dict = Depends(get_current_user)):
 @router.get("", response_model=list[KBOut])
 async def list_kbs(current_user: dict = Depends(get_current_user)):
     return await persistence.kb.list_kbs(current_user["username"])
+
+
+@router.get("/search", response_model=SearchOut)
+async def search_all_kbs(
+    current_user: dict = Depends(get_current_user),
+    q: str = Query(min_length=1, max_length=500),
+    limit: int = Query(default=5, ge=1, le=20),
+):
+    """Hybrid search across all knowledge bases of the current user.
+
+    Declared before `/{kb_id}` so the literal `search` segment wins.
+    """
+    store = _vector_store_or_503()
+    try:
+        hits = await run_in_threadpool(store.search, q, owner=current_user["username"], limit=limit)
+    except KbUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return SearchOut(query=q, hits=hits)
 
 
 @router.get("/{kb_id}", response_model=KBOut)
@@ -160,10 +169,11 @@ async def upload_files(
         raise HTTPException(status_code=422, detail="'paths' must match the number of files")
 
     max_bytes = settings.kb_max_file_size_mb * 1024 * 1024
+    remaining = await _quota_remaining(username)
     results: list[UploadResult] = []
     for index, upload in enumerate(files):
         raw_path = paths[index] if paths else (upload.filename or "")
-        path = _safe_path(raw_path)
+        path = safe_path(raw_path)
         if path is None:
             results.append(
                 UploadResult(path=raw_path or "(unnamed)", ok=False, error="Invalid file path")
@@ -184,6 +194,9 @@ async def upload_files(
                 )
             )
             continue
+        if len(data) > remaining:
+            results.append(UploadResult(path=path, ok=False, error="Storage quota exceeded"))
+            continue
         doc = await persistence.kb.add_document(
             username, kb_id, path, upload.content_type, len(data), data
         )
@@ -192,8 +205,75 @@ async def upload_files(
                 UploadResult(path=path, ok=False, error="Duplicate path or knowledge base missing")
             )
             continue
+        remaining -= len(data)
         try:
             await ingest_document(doc, data)
+            results.append(UploadResult(path=path, ok=True, doc_id=doc["id"]))
+        except KbUnavailableError as exc:
+            results.append(UploadResult(path=path, ok=False, error=str(exc)))
+        except Exception as exc:
+            results.append(UploadResult(path=path, ok=False, doc_id=doc["id"], error=str(exc)))
+    return UploadResponse(kb_id=kb_id, results=results)
+
+
+@router.post("/{kb_id}/zip", response_model=UploadResponse)
+async def upload_zip(
+    kb_id: str,
+    current_user: dict = Depends(get_current_user),
+    file: UploadFile = File(...),
+):
+    """Upload a .zip archive of documents (folder upload in one request).
+
+    Structural safety (valid zip, entry count, per-entry size, total size,
+    path traversal) is enforced before anything is stored; per-entry checks
+    (extension allowlist, quota) produce per-entry results.
+    """
+    username = current_user["username"]
+    await _get_owned_kb(kb_id, username)
+    data = await file.read()
+    if len(data) > settings.kb_max_file_size_mb * 1024 * 1024:
+        return UploadResponse(
+            kb_id=kb_id,
+            results=[
+                UploadResult(
+                    path=file.filename or "archive.zip",
+                    ok=False,
+                    error=f"Archive too large (max {settings.kb_max_file_size_mb} MB)",
+                )
+            ],
+        )
+    try:
+        entries = await run_in_threadpool(extract_zip_entries, data)
+    except ZipValidationError as exc:
+        return UploadResponse(
+            kb_id=kb_id,
+            results=[UploadResult(path=file.filename or "archive.zip", ok=False, error=str(exc))],
+        )
+
+    remaining = await _quota_remaining(username)
+    results: list[UploadResult] = []
+    for entry in entries:
+        path = entry["path"]
+        try:
+            _check_extension(path)
+        except HTTPException as exc:
+            results.append(UploadResult(path=path, ok=False, error=exc.detail))
+            continue
+        entry_data = entry["data"]
+        if len(entry_data) > remaining:
+            results.append(UploadResult(path=path, ok=False, error="Storage quota exceeded"))
+            continue
+        doc = await persistence.kb.add_document(
+            username, kb_id, path, entry["mime_type"], len(entry_data), entry_data
+        )
+        if doc is None:
+            results.append(
+                UploadResult(path=path, ok=False, error="Duplicate path or knowledge base missing")
+            )
+            continue
+        remaining -= len(entry_data)
+        try:
+            await ingest_document(doc, entry_data)
             results.append(UploadResult(path=path, ok=True, doc_id=doc["id"]))
         except KbUnavailableError as exc:
             results.append(UploadResult(path=path, ok=False, error=str(exc)))
@@ -215,6 +295,28 @@ async def get_document(kb_id: str, doc_id: str, current_user: dict = Depends(get
     if doc is None:
         raise NotFound("Document not found")
     return doc
+
+
+@router.get("/{kb_id}/files/{doc_id}/content")
+async def download_document(
+    kb_id: str, doc_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Serve the raw uploaded bytes (inline preview; `Content-Disposition` set)."""
+    from urllib.parse import quote
+
+    from fastapi import Response
+
+    await _get_owned_kb(kb_id, current_user["username"])
+    fetched = await persistence.kb.get_document_content(current_user["username"], doc_id)
+    if fetched is None:
+        raise NotFound("Document not found")
+    meta, data = fetched
+    filename = Path(meta["path"]).name
+    return Response(
+        content=data,
+        media_type=meta["mime_type"] or "application/octet-stream",
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}"},
+    )
 
 
 @router.delete("/{kb_id}/files/{doc_id}", status_code=204)

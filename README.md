@@ -369,8 +369,13 @@ curl -X POST "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH" \
   -F "file=@guides/deploy.md;type=text/markdown" -F "paths=guides/deploy.md" \
   -F "file=@guides/backup.md;type=text/markdown" -F "paths=guides/backup.md"
 
+# ...or one zip for a whole folder tree
+curl -X POST "http://127.0.0.1:8000/kb/$KB/zip" -H "$AUTH" -F "file=@docs.zip"
+
 curl "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH"                       # status per file
 curl "http://127.0.0.1:8000/kb/$KB/search?q=kubectl%20deployment" -H "$AUTH"  # hybrid search
+curl "http://127.0.0.1:8000/kb/search?q=deployment" -H "$AUTH"             # search all my KBs
+curl -o deploy.md "http://127.0.0.1:8000/kb/$KB/files/<doc_id>/content" -H "$AUTH"  # raw file
 curl -X POST "http://127.0.0.1:8000/kb/$KB/reindex" -H "$AUTH"             # re-embed everything
 curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # delete KB + vectors
 ```
@@ -378,6 +383,11 @@ curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # del
 - Supported extensions: `.md .txt .pdf .docx .csv .html .json` + common code
   files (configurable via `KB_ALLOWED_EXTENSIONS`); cap 25 MB/file
   (`KB_MAX_FILE_SIZE_MB`).
+- Zip uploads are guarded: path traversal, entry count (`KB_ZIP_MAX_ENTRIES`)
+  and total uncompressed size (`KB_ZIP_MAX_TOTAL_MB`) are rejected before
+  anything is stored; per-entry extension/quota issues produce per-entry
+  results.
+- Per-user storage quota: `KB_QUOTA_MB` (default 500 MB, sum of raw bytes).
 - Ingest status per document: `pending → processing → ready | failed` (with
   error message).
 - Embeddings: OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`)

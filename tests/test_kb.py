@@ -14,7 +14,9 @@ dicts and the vector store is `InMemoryKbVectorStore` with the deterministic
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from collections.abc import Sequence
 from typing import Any
 
@@ -375,6 +377,205 @@ async def test_search_requires_vector_store(kb_env):
         finally:
             set_vector_store(kb_env)
         assert r.status_code == 503, r.text
+
+
+# ---------------------------------------------------------------------------
+# hardening: zip upload, download, quota, global search
+# ---------------------------------------------------------------------------
+
+
+def _zip_bytes(entries: list[tuple[str, bytes]]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in entries:
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+async def test_zip_upload(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "zipped"})).json()
+        archive = _zip_bytes(
+            [
+                ("docs/intro.md", b"# Intro\n\nIntro about the zipped docs."),
+                ("docs/notes.txt", b"Zipped notes about packaging."),
+            ]
+        )
+        r = await http.post(
+            f"/kb/{kb['id']}/zip",
+            files=[("file", ("docs.zip", archive, "application/zip"))],
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert all(res["ok"] for res in body["results"]), body
+        assert {res["path"] for res in body["results"]} == {
+            "docs/intro.md",
+            "docs/notes.txt",
+        }
+
+        docs = (await http.get(f"/kb/{kb['id']}/files")).json()
+        assert {d["path"] for d in docs} == {"docs/intro.md", "docs/notes.txt"}
+        assert all(d["status"] == "ready" for d in docs)
+        r = await http.get(f"/kb/{kb['id']}/search", params={"q": "packaging"})
+        assert r.json()["hits"][0]["path"] == "docs/notes.txt"
+
+
+async def test_zip_upload_guards(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "guarded"})).json()
+
+        # path traversal entry aborts the whole archive
+        r = await http.post(
+            f"/kb/{kb['id']}/zip",
+            files=[("file", ("evil.zip", _zip_bytes([("../evil.md", b"# x")]), "application/zip"))],
+        )
+        body = r.json()
+        assert r.status_code == 200 and body["results"][0]["ok"] is False
+        assert "Unsafe path" in body["results"][0]["error"]
+
+        # not a zip
+        r = await http.post(
+            f"/kb/{kb['id']}/zip",
+            files=[("file", ("fake.zip", b"not a zip at all", "application/zip"))],
+        )
+        assert "Not a valid zip" in r.json()["results"][0]["error"]
+
+        # total size guard (0 MB cap rejects any content)
+        old = config.settings.kb_zip_max_total_mb
+        config.settings.kb_zip_max_total_mb = 0
+        try:
+            r = await http.post(
+                f"/kb/{kb['id']}/zip",
+                files=[("file", ("big.zip", _zip_bytes([("a.md", b"# hi")]), "application/zip"))],
+            )
+        finally:
+            config.settings.kb_zip_max_total_mb = old
+        assert "total size" in r.json()["results"][0]["error"]
+
+        # per-entry extension check (soft: other entries still processed)
+        r = await http.post(
+            f"/kb/{kb['id']}/zip",
+            files=[
+                (
+                    "file",
+                    (
+                        "mixed.zip",
+                        _zip_bytes([("ok.md", b"# ok"), ("bad.exe", b"MZ")]),
+                        "application/zip",
+                    ),
+                )
+            ],
+        )
+        results = {res["path"]: res for res in r.json()["results"]}
+        assert results["ok.md"]["ok"] is True
+        assert results["bad.exe"]["ok"] is False
+        assert "Unsupported file type" in results["bad.exe"]["error"]
+
+        # nothing was stored from the rejected archives
+        docs = (await http.get(f"/kb/{kb['id']}/files")).json()
+        assert {d["path"] for d in docs} == {"ok.md"}
+
+
+async def test_download_document_content(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "dl"})).json()
+        payload = b"# Hello\n\nDownload me."
+        r = await http.post(
+            f"/kb/{kb['id']}/files",
+            files=[("files", ("hello.md", payload, "text/markdown"))],
+        )
+        doc_id = r.json()["results"][0]["doc_id"]
+
+        r = await http.get(f"/kb/{kb['id']}/files/{doc_id}/content")
+        assert r.status_code == 200
+        assert r.content == payload
+        assert r.headers["content-type"].startswith("text/markdown")
+        assert "inline" in r.headers["content-disposition"]
+        assert "hello.md" in r.headers["content-disposition"]
+
+        # owner isolation
+        async with await _client_for(app, username="other") as other:
+            r = await other.get(f"/kb/{kb['id']}/files/{doc_id}/content")
+            assert r.status_code == 404
+
+
+async def test_quota_enforced(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb = (await http.post("/kb", json={"name": "quota"})).json()
+        old = config.settings.kb_quota_mb
+        config.settings.kb_quota_mb = 0  # no free space at all
+        try:
+            r = await http.post(
+                f"/kb/{kb['id']}/files",
+                files=[("files", ("a.md", b"# hi", "text/markdown"))],
+            )
+            r2 = await http.post(
+                f"/kb/{kb['id']}/zip",
+                files=[("file", ("a.zip", _zip_bytes([("b.md", b"# yo")]), "application/zip"))],
+            )
+        finally:
+            config.settings.kb_quota_mb = old
+        assert r.json()["results"][0]["error"] == "Storage quota exceeded"
+        assert r2.json()["results"][0]["error"] == "Storage quota exceeded"
+        assert (await http.get(f"/kb/{kb['id']}/files")).json() == []
+
+
+async def test_global_search_across_kbs(kb_env):
+    app = create_app(
+        agent=build_agent(
+            checkpointer=persistence.checkpointer,
+            store=persistence.store,
+            model=_scripted_model(),
+            system_prompt="test",
+        )
+    )
+    async with app.router.lifespan_context(app), await _client_for(app) as http:
+        kb1 = (await http.post("/kb", json={"name": "one"})).json()
+        kb2 = (await http.post("/kb", json={"name": "two"})).json()
+        await http.post(
+            f"/kb/{kb1['id']}/files",
+            files=[("files", ("a.md", b"# Alpha\n\nAlpha documentation.", "text/markdown"))],
+        )
+        await http.post(
+            f"/kb/{kb2['id']}/files",
+            files=[("files", ("b.md", b"# Beta\n\nBeta documentation.", "text/markdown"))],
+        )
+        r = await http.get("/kb/search", params={"q": "documentation", "limit": 10})
+        assert r.status_code == 200, r.text
+        paths = {hit["path"] for hit in r.json()["hits"]}
+        assert paths == {"a.md", "b.md"}, paths
 
 
 # ---------------------------------------------------------------------------
