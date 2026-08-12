@@ -40,9 +40,9 @@ from ..core.constants import (
     agent_skills_ns,
     agent_skills_source,
     user_agents_ns,
+    user_skills_ns,
 )
 from ..schema.agent_config_schema import AgentConfigIn, AgentConfigOut
-from . import resources
 
 logger = logging.getLogger(__name__)
 
@@ -180,14 +180,38 @@ def _validate_tools(tools: list[str] | None, known_servers: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def sync_agent_skills(
-    store: BaseStore, owner: str, name: str, skills: list[str] | None
-) -> None:
-    """Copy the referenced global skills into the agent's namespace.
+async def _skill_source(
+    store: BaseStore, skill: str, username: str, *, allow_user_skills: bool
+) -> tuple[tuple[str, ...], str]:
+    """Where a referenced skill lives: the user's own skills first, then global.
 
-    SKILL.md + every bundled file are copied, so the agent's SkillsMiddleware
-    (which reads all skills under its source path) sees exactly the selected
-    set. Existing copies are replaced on update; unlisted skills are removed.
+    Returns (namespace, key) or raises ValueError when the skill is unknown.
+    """
+    if allow_user_skills:
+        user_ns = user_skills_ns(username)
+        if await store.aget(user_ns, _skill_file_key(skill)) is not None:
+            return user_ns, _skill_file_key(skill)
+    if await store.aget(GLOBAL_SKILLS_NS, _skill_file_key(skill)) is not None:
+        return GLOBAL_SKILLS_NS, _skill_file_key(skill)
+    raise ValueError(f"Unknown skill '{skill}'")
+
+
+async def sync_agent_skills(
+    store: BaseStore,
+    owner: str,
+    name: str,
+    skills: list[str] | None,
+    *,
+    username: str,
+    allow_user_skills: bool,
+) -> None:
+    """Copy the referenced skills into the agent's namespace (snapshot).
+
+    Skills resolve against the user's own skills first, then the global
+    skills store. SKILL.md + every bundled file are copied, so the agent's
+    SkillsMiddleware (which reads all skills under its source path) sees
+    exactly the selected set. Existing copies are replaced on update;
+    unlisted skills are removed.
     """
     ns = agent_skills_ns(owner, name)
     for item in await store.asearch(ns):
@@ -195,13 +219,13 @@ async def sync_agent_skills(
     if not skills:
         return
     for skill in skills:
-        md_key = _skill_file_key(skill)
-        item = await store.aget(GLOBAL_SKILLS_NS, md_key)
-        if item is None:
-            raise KeyError(skill)
+        source_ns, md_key = await _skill_source(
+            store, skill, username, allow_user_skills=allow_user_skills
+        )
+        item = await store.aget(source_ns, md_key)
         await store.aput(ns, md_key, item.value)
         prefix = f"/{skill}/"
-        for aux in await store.asearch(GLOBAL_SKILLS_NS):
+        for aux in await store.asearch(source_ns):
             key = aux.key or ""
             if key.startswith(prefix) and key != md_key:
                 await store.aput(ns, key, aux.value)
@@ -276,11 +300,20 @@ async def create_config(
         or await store.aget(GLOBAL_AGENTS_NS, cfg.name) is not None
     ):
         raise KeyError(cfg.name)
+    # User agents may reference the owner's own skills + global skills;
+    # global agents only reference global skills.
+    allow_user_skills = cfg.scope != "global"
     for skill in cfg.skills or []:
-        if await resources.get_skill(store, skill) is None:
-            raise ValueError(f"Unknown skill '{skill}'")
+        await _skill_source(store, skill, username, allow_user_skills=allow_user_skills)
     _validate_tools(cfg.tools, known_servers)
-    await sync_agent_skills(store, owner, cfg.name, cfg.skills)
+    await sync_agent_skills(
+        store,
+        owner,
+        cfg.name,
+        cfg.skills,
+        username=username,
+        allow_user_skills=allow_user_skills,
+    )
     value = _value(cfg, owner=owner)
     await store.aput(ns, cfg.name, value)
     logger.info("agent config created: name=%s scope=%s owner=%s", cfg.name, cfg.scope, owner)
@@ -302,12 +335,19 @@ async def update_config(
     existing = await store.aget(ns, name)
     if existing is None:
         raise KeyError(name)
+    allow_user_skills = cfg.scope != "global"
     for skill in cfg.skills or []:
-        if await resources.get_skill(store, skill) is None:
-            raise ValueError(f"Unknown skill '{skill}'")
+        await _skill_source(store, skill, username, allow_user_skills=allow_user_skills)
     _validate_tools(cfg.tools, known_servers)
     owner = existing.value.get("owner") or _GLOBAL_OWNER
-    await sync_agent_skills(store, owner, name, cfg.skills)
+    await sync_agent_skills(
+        store,
+        owner,
+        name,
+        cfg.skills,
+        username=username,
+        allow_user_skills=allow_user_skills,
+    )
     value = _value(cfg, owner=owner, created_at=existing.value.get("created_at"))
     await store.aput(ns, name, value)
     return _to_out(value)

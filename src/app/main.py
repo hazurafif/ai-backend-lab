@@ -27,11 +27,16 @@ Endpoints:
   PATCH /users/{username}         -> admin: change role/disabled state
   DELETE /users/{username}        -> admin: delete a user
   GET  /agent/skills|tools        -> agent resource CRUD (store-backed; skills
-                                    include bundled files, e.g. scripts/)
+                                    include bundled files, e.g. scripts/;
+                                    listing is readable by any user, mutations
+                                    are admin-only)
+  GET|POST /skills                -> user-scoped "my skills" CRUD (private per
+                                    user, attachable to own agent configs)
   GET|POST /agents                -> list / create agent configs (customizable
                                     profiles: model + system prompt + skills +
                                     tools; scope=global requires admin)
   GET|PUT|DELETE /agents/{name}   -> read / replace / delete an agent config
+  POST /agents/{name}/test        -> dry-run: build the graph (validates model)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):

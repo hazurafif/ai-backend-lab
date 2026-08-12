@@ -58,6 +58,31 @@ async def get_agent(name: str, current_user: dict = Depends(get_current_user)):
     return out
 
 
+@router.post("/{name}/test")
+async def test_agent(name: str, request: Request, current_user: dict = Depends(get_current_user)):
+    """Dry-run: resolve the config and build the graph (validates model + skills + tools).
+
+    Returns the resolved spec; a 400 means the config cannot be built (e.g.
+    an invalid provider:model string). The built graph is cached.
+    """
+    try:
+        graph = await request.app.state.agents.resolve(name, current_user["username"])
+    except KeyError:
+        raise NotFound(f"Agent '{name}' not found") from None
+    except Exception as exc:
+        raise BadRequest(f"Agent '{name}' cannot be built: {exc}") from None
+    spec = await agent_configs.load_spec(persistence.store, name, current_user["username"])
+    return {
+        "status": "ok",
+        "name": name,
+        "graph_built": graph is not None,
+        "model": spec.model if spec else None,
+        "skills": spec.skills if spec else None,
+        "tools": spec.tools if spec else None,
+        "temperature": spec.temperature if spec else None,
+    }
+
+
 @router.put("/{name}", response_model=AgentConfigOut)
 async def update_agent(
     name: str,

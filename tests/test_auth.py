@@ -263,7 +263,7 @@ async def test_admin_cannot_demote_or_disable_self(client, fresh_user_store):
 
 @pytest.mark.asyncio
 async def test_agent_routes_require_admin_role():
-    """Skills/tools CRUD is admin-only; a regular user gets 403."""
+    """Skills/tools CRUD is admin-only; listing is readable by any user."""
     from app.main import create_app as _create_app
 
     config.settings.database_uri = None
@@ -275,7 +275,15 @@ async def test_agent_routes_require_admin_role():
             transport=httpx.ASGITransport(app=_create_app()), base_url="http://test"
         ) as http:
             headers = {"Authorization": f"Bearer {token}"}
+            # Read-only listing/lookup is open to any authenticated user.
             r = await http.get("/agent/skills", headers=headers)
+            assert r.status_code == 200
+            # Mutations stay admin-only.
+            r = await http.post(
+                "/agent/skills",
+                headers=headers,
+                json={"name": "x", "description": "d", "content": "c"},
+            )
             assert r.status_code == 403
             # No token at all -> 401.
             r = await http.get("/agent/skills")

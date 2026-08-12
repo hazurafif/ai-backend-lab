@@ -58,6 +58,11 @@ def _skill_path(name: str) -> str:
     return f"{SKILLS_SOURCE}{name}/SKILL.md"
 
 
+def _user_skill_path(username: str, name: str) -> str:
+    """Display path for a user-scoped skill (not a mounted backend route)."""
+    return f"{SKILLS_SOURCE}@{username}/{name}/SKILL.md"
+
+
 def _skill_value(content: str) -> dict:
     return {
         "content": content,
@@ -67,8 +72,8 @@ def _skill_value(content: str) -> dict:
     }
 
 
-def _skill_out(name: str, content: str, files: list[SkillFileOut]) -> SkillOut:
-    return SkillOut(name=name, content=content, path=_skill_path(name), files=files)
+def _skill_out(name: str, content: str, files: list[SkillFileOut], path: str) -> SkillOut:
+    return SkillOut(name=name, content=content, path=path, files=files)
 
 
 def _skill_markdown(skill: SkillIn) -> str:
@@ -88,12 +93,12 @@ def _validate_skill_files(files: list[SkillFileIn]) -> None:
             raise ValueError("'SKILL.md' is reserved for the skill definition")
 
 
-async def _skill_files(store: BaseStore, name: str) -> list[SkillFileOut]:
+async def _skill_files(store: BaseStore, name: str, ns: tuple[str, ...]) -> list[SkillFileOut]:
     """All bundled files of a skill (path + content), sorted by path."""
     prefix = f"/{name}/"
     skill_md = f"/{name}/SKILL.md"
     files: list[SkillFileOut] = []
-    for item in await store.asearch(SKILLS_NS):
+    for item in await store.asearch(ns):
         key = item.key or ""
         if not key.startswith(prefix) or key == skill_md:
             continue
@@ -109,8 +114,10 @@ async def _skill_files(store: BaseStore, name: str) -> list[SkillFileOut]:
 # ---------------------------------------------------------------------------
 
 
-async def list_skills(store: BaseStore) -> list[SkillOut]:
-    items = await store.asearch(SKILLS_NS)
+async def list_skills(store: BaseStore, ns: tuple[str, ...] | None = None) -> list[SkillOut]:
+    """All skills in a namespace (default: the global agent skills)."""
+    ns = ns or SKILLS_NS
+    items = await store.asearch(ns)
     by_name: dict[str, list] = {}
     for item in items:
         m = re.fullmatch(r"/([^/]+)/(.+)", item.key or "")
@@ -129,59 +136,81 @@ async def list_skills(store: BaseStore) -> list[SkillOut]:
             if it.key != _skill_file_key(name)
         ]
         files.sort(key=lambda f: f.path)
-        skills.append(_skill_out(name, (md.value or {}).get("content", ""), files))
+        path = _skill_path(name) if ns == SKILLS_NS else _user_skill_path(ns[-1], name)
+        skills.append(_skill_out(name, (md.value or {}).get("content", ""), files, path))
     skills.sort(key=lambda s: s.name)
     return skills
 
 
-async def get_skill(store: BaseStore, name: str) -> SkillOut | None:
-    item = await store.aget(SKILLS_NS, _skill_file_key(name))
+async def get_skill(
+    store: BaseStore, name: str, ns: tuple[str, ...] | None = None
+) -> SkillOut | None:
+    """One skill from a namespace (default: global)."""
+    ns = ns or SKILLS_NS
+    item = await store.aget(ns, _skill_file_key(name))
     if item is None:
         return None
-    return _skill_out(name, (item.value or {}).get("content", ""), await _skill_files(store, name))
+    path = _skill_path(name) if ns == SKILLS_NS else _user_skill_path(ns[-1], name)
+    return _skill_out(
+        name, (item.value or {}).get("content", ""), await _skill_files(store, name, ns), path
+    )
 
 
-async def create_skill(store: BaseStore, skill: SkillIn) -> SkillOut:
+async def create_skill(
+    store: BaseStore, skill: SkillIn, ns: tuple[str, ...] | None = None
+) -> SkillOut:
+    """Create a skill in a namespace (default: global)."""
+    ns = ns or SKILLS_NS
     _validate_skill_files(skill.files)
-    await store.aput(SKILLS_NS, _skill_file_key(skill.name), _skill_value(_skill_markdown(skill)))
+    await store.aput(ns, _skill_file_key(skill.name), _skill_value(_skill_markdown(skill)))
     for f in skill.files:
-        await store.aput(SKILLS_NS, _skill_aux_key(skill.name, f.path), _skill_value(f.content))
+        await store.aput(ns, _skill_aux_key(skill.name, f.path), _skill_value(f.content))
     files = sorted(
         (SkillFileOut(path=f.path, content=f.content) for f in skill.files), key=lambda f: f.path
     )
-    return _skill_out(skill.name, _skill_markdown(skill), files)
+    path = _skill_path(skill.name) if ns == SKILLS_NS else _user_skill_path(ns[-1], skill.name)
+    return _skill_out(skill.name, _skill_markdown(skill), files, path)
 
 
-async def update_skill(store: BaseStore, name: str, skill: SkillIn) -> SkillOut:
-    existing = await store.aget(SKILLS_NS, _skill_file_key(name))
+async def update_skill(
+    store: BaseStore, name: str, skill: SkillIn, ns: tuple[str, ...] | None = None
+) -> SkillOut:
+    """Replace a skill in a namespace (default: global)."""
+    ns = ns or SKILLS_NS
+    existing = await store.aget(ns, _skill_file_key(name))
     if existing is None:
         raise KeyError(name)
     _validate_skill_files(skill.files)
     # SKILL.md + listed files are replaced; unlisted bundled files are kept.
-    await store.aput(SKILLS_NS, _skill_file_key(name), _skill_value(_skill_markdown(skill)))
+    await store.aput(ns, _skill_file_key(name), _skill_value(_skill_markdown(skill)))
     for f in skill.files:
-        await store.aput(SKILLS_NS, _skill_aux_key(name, f.path), _skill_value(f.content))
-    return _skill_out(skill.name, _skill_markdown(skill), await _skill_files(store, name))
+        await store.aput(ns, _skill_aux_key(name, f.path), _skill_value(f.content))
+    path = _skill_path(name) if ns == SKILLS_NS else _user_skill_path(ns[-1], name)
+    return _skill_out(skill.name, _skill_markdown(skill), await _skill_files(store, name, ns), path)
 
 
-async def delete_skill(store: BaseStore, name: str) -> bool:
-    """Delete SKILL.md and every bundled file of the skill."""
+async def delete_skill(store: BaseStore, name: str, ns: tuple[str, ...] | None = None) -> bool:
+    """Delete SKILL.md and every bundled file of the skill (default: global)."""
+    ns = ns or SKILLS_NS
     prefix = f"/{name}/"
-    items = [it for it in await store.asearch(SKILLS_NS) if (it.key or "").startswith(prefix)]
+    items = [it for it in await store.asearch(ns) if (it.key or "").startswith(prefix)]
     if not items:
         return False
     for it in items:
-        await store.adelete(SKILLS_NS, it.key)
+        await store.adelete(ns, it.key)
     return True
 
 
-async def delete_skill_file(store: BaseStore, name: str, path: str) -> bool:
-    """Delete a single bundled file (never SKILL.md)."""
+async def delete_skill_file(
+    store: BaseStore, name: str, path: str, ns: tuple[str, ...] | None = None
+) -> bool:
+    """Delete a single bundled file (never SKILL.md); default: global."""
+    ns = ns or SKILLS_NS
     key = _skill_aux_key(name, path)
-    item = await store.aget(SKILLS_NS, key)
+    item = await store.aget(ns, key)
     if item is None:
         return False
-    await store.adelete(SKILLS_NS, key)
+    await store.adelete(ns, key)
     return True
 
 

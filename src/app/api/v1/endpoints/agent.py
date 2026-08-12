@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ....core.database import persistence
-from ....core.dependencies import get_admin_user
+from ....core.dependencies import get_admin_user, get_current_user
 from ....core.exceptions import Conflict, NotFound
 from ....schema.agent_schema import SkillIn, SkillOut, ToolServerIn, ToolServerOut
 from ....services import resources
@@ -25,7 +25,8 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 
 @router.get("/skills", response_model=list[SkillOut])
-async def list_skills(_: dict = Depends(get_admin_user)):
+async def list_skills(current_user: dict = Depends(get_current_user)):
+    """Read-only listing for any authenticated user (pick global skills for agent configs)."""
     return await resources.list_skills(persistence.store)
 
 
@@ -39,7 +40,8 @@ async def create_skill(body: SkillIn, request: Request, _: dict = Depends(get_ad
 
 
 @router.get("/skills/{name}", response_model=SkillOut)
-async def get_skill(name: str, _: dict = Depends(get_admin_user)):
+async def get_skill(name: str, current_user: dict = Depends(get_current_user)):
+    """Read-only lookup for any authenticated user."""
     skill = await resources.get_skill(persistence.store, name)
     if skill is None:
         raise NotFound("Skill not found")

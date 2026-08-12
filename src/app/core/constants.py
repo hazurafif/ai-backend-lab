@@ -9,6 +9,12 @@ SKILLS_SOURCE = "/skills/"
 GLOBAL_SKILLS_NS = ("agent", "skills")
 TOOL_SERVERS_NS = ("agent", "mcp_servers")
 
+
+def user_skills_ns(username: str) -> tuple[str, ...]:
+    """Store namespace for a user's own skills ("my skills")."""
+    return ("user", "skills", username)
+
+
 # Agent configs (customizable agent profiles): global agents are shared by
 # all users; user agents live under ("agents", <username>).
 GLOBAL_AGENTS_NS = ("agent", "agents")

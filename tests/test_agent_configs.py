@@ -426,3 +426,129 @@ async def test_registry_cache_and_invalidate(persistence):
             d1 = await registry.resolve("default", "alice")
             d2 = await registry.resolve("default", "bob")
             assert d1 is d2
+
+
+# ---------------------------------------------------------------------------
+# user-scoped skills (/skills) + agent references
+# ---------------------------------------------------------------------------
+
+
+def skill_payload(name: str, content: str = "Skill body.") -> dict:
+    return {"name": name, "description": f"{name} description", "content": content}
+
+
+async def test_user_skills_crud(persistence):
+    app = make_app(persistence, model=RecordingModel())
+    async with app.router.lifespan_context(app), await client_for(app, "alice") as client:
+        # create
+        r = await client.post("/skills", json=skill_payload("my-skill"))
+        assert r.status_code == 201, r.text
+        assert r.json()["path"].startswith("/skills/@alice/")
+
+        # duplicate -> 409
+        assert (await client.post("/skills", json=skill_payload("my-skill"))).status_code == 409
+
+        # list/get/update
+        r = await client.get("/skills")
+        assert [s["name"] for s in r.json()] == ["my-skill"]
+        assert (await client.get("/skills/my-skill")).status_code == 200
+        r = await client.put("/skills/my-skill", json=skill_payload("my-skill", "updated body"))
+        assert r.status_code == 200 and "updated body" in r.json()["content"]
+
+        # bundled file + delete file
+        r = await client.post(
+            "/skills",
+            json={
+                **skill_payload("with-files"),
+                "files": [{"path": "scripts/run.py", "content": "print(1)"}],
+            },
+        )
+        assert r.status_code == 201
+        assert (await client.delete("/skills/with-files/files/scripts/run.py")).status_code == 204
+
+        # delete
+        assert (await client.delete("/skills/my-skill")).status_code == 204
+        assert (await client.get("/skills/my-skill")).status_code == 404
+
+
+async def test_user_skills_ownership(persistence):
+    app = make_app(persistence, model=RecordingModel())
+    async with app.router.lifespan_context(app):
+        async with await client_for(app, "alice") as alice:
+            assert (await alice.post("/skills", json=skill_payload("private"))).status_code == 201
+        async with await client_for(app, "bob") as bob:
+            # bob cannot see/update/delete alice's skill
+            assert (await bob.get("/skills/private")).status_code == 404
+            assert (
+                await bob.put("/skills/private", json=skill_payload("private"))
+            ).status_code == 404
+            assert (await bob.delete("/skills/private")).status_code == 404
+            # same name is fine for bob
+            assert (await bob.post("/skills", json=skill_payload("private"))).status_code == 201
+
+
+async def test_agent_can_reference_user_skill(persistence):
+    model = RecordingModel()
+    app = make_app(persistence, model=model)
+    async with app.router.lifespan_context(app), await client_for(app, "alice") as client:
+        await client.post("/skills", json=skill_payload("sql-guru", "You are an SQL expert."))
+        r = await client.post("/agents", json=agent_payload("dba", skills=["sql-guru"]))
+        assert r.status_code == 201, r.text
+
+        # snapshot copied from the USER namespace into the agent's namespace
+        ns = agent_skills_ns("alice", "dba")
+        md = await persistence.store.aget(ns, "/sql-guru/SKILL.md")
+        assert md is not None and "SQL expert" in md.value["content"]
+
+        # the user skill shadows a global skill with the same name
+        async with await client_for(app, "boss", role="admin") as admin:
+            await admin.post("/agent/skills", json=skill_payload("sql-guru", "global version"))
+        r = await client.put("/agents/dba", json=agent_payload("dba", skills=["sql-guru"]))
+        assert r.status_code == 200, r.text
+        md = await persistence.store.aget(agent_skills_ns("alice", "dba"), "/sql-guru/SKILL.md")
+        assert "SQL expert" in md.value["content"], "user skill must shadow the global one"
+
+        # ...while another user (no own skill) gets the global version
+        async with await client_for(app, "bob") as bob:
+            r = await bob.post("/agents", json=agent_payload("dba2", skills=["sql-guru"]))
+            assert r.status_code == 201, r.text
+        md = await persistence.store.aget(agent_skills_ns("bob", "dba2"), "/sql-guru/SKILL.md")
+        assert "global version" in md.value["content"]
+
+        # run it: the skill reaches the system prompt
+        model.system_prompts.clear()
+        r = await client.post("/chat", json={"message": "hi", "agent": "dba"})
+        assert r.status_code == 200
+        assert any("sql-guru" in p for p in model.system_prompts), model.system_prompts
+
+
+async def test_global_agent_cannot_reference_user_skill(persistence):
+    app = make_app(persistence, model=RecordingModel())
+    async with (
+        app.router.lifespan_context(app),
+        await client_for(app, "boss", role="admin") as admin,
+    ):
+        await admin.post("/skills", json=skill_payload("private-skill"))
+        r = await admin.post(
+            "/agents", json=agent_payload("shared", scope="global", skills=["private-skill"])
+        )
+        assert r.status_code == 400, r.text
+
+
+async def test_agent_dry_run_test_endpoint(persistence):
+    model = RecordingModel()
+    app = make_app(persistence, model=model)
+    async with app.router.lifespan_context(app), await client_for(app, "alice") as client:
+        await client.post("/agents", json=agent_payload("research"))
+        r = await client.post("/agents/research/test")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ok" and body["graph_built"] is True
+        assert body["model"] == "openai:gpt-4o-mini"
+
+        # builtin default is testable too
+        r = await client.post("/agents/default/test")
+        assert r.status_code == 200, r.text
+
+        # unknown agent -> 404
+        assert (await client.post("/agents/ghost/test")).status_code == 404
