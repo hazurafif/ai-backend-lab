@@ -87,19 +87,20 @@ roadmap penerapan terurut berdasarkan ROI.
 
 | Komponen | Status | Catatan |
 |---|---|---|
-| Hybrid search (Weaviate BM25F + dense) | ✅ | `alpha` configurable; filter `owner` wajib |
+| Hybrid search (Weaviate BM25F + dense) | ✅ | `alpha` configurable (env + per-request `?alpha=`); filter `owner` wajib |
+| BM25F property weights | ✅ | `KB_BM25_PROPERTY_WEIGHTS` (default `{"path": 2.0}`) |
 | Chunking markdown-aware + recursive | ✅ | `services/kb/chunk.py` |
+| Page-level chunking (PDF) | ✅ | NVIDIA: best average accuracy |
 | Metadata (path, doc_id, kb_id, owner) | ✅ | Sudah jadi property + filter |
 | Multi-tenant isolation | ✅ | Filter owner di semua query |
 | Per-user quota, zip, download | ✅ | Hardening commit |
 | Reindex (ganti embedding model) | ✅ | `POST /kb/{id}/reindex` |
-| Embeddings swappable | ✅ | OpenAI ↔ lokal; ganti model = reindex |
-| **Evaluasi (golden set + RAGAS)** | ❌ | Belum ada — prioritas #1 |
-| Reranking | ❌ | Belum |
+| Embeddings swappable + Matryoshka dims | ✅ | `EMBEDDINGS_MODEL` / `EMBEDDINGS_DIMENSIONS`; ganti model = reindex |
+| **Evaluasi (golden set + IR metrics)** | ✅ | `scripts/kb_eval.py` + `services/kb/eval.py` (R1) |
+| Reranking | ❌ | Fase R3 berikutnya |
 | Query rewrite | ❌ | Belum (sebagian ditutup agent loop) |
 | Contextual retrieval | ❌ | Belum |
-| BM25F property weights / boost | ❌ | Belum (mudah, murah) |
-| Dedup + lost-in-middle reorder | ❌ | Belum (gratis) |
+| Dedup + lost-in-middle reorder | ✅ | Tool agent (gratis) |
 
 ---
 

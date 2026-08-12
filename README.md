@@ -382,12 +382,39 @@ curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # del
 
 - Supported extensions: `.md .txt .pdf .docx .csv .html .json` + common code
   files (configurable via `KB_ALLOWED_EXTENSIONS`); cap 25 MB/file
-  (`KB_MAX_FILE_SIZE_MB`).
+  (`KB_MAX_FILE_SIZE_MB`). PDFs are chunked **page-level** (NVIDIA benchmark:
+  best average retrieval accuracy); markdown is split on headers.
 - Zip uploads are guarded: path traversal, entry count (`KB_ZIP_MAX_ENTRIES`)
   and total uncompressed size (`KB_ZIP_MAX_TOTAL_MB`) are rejected before
   anything is stored; per-entry extension/quota issues produce per-entry
   results.
 - Per-user storage quota: `KB_QUOTA_MB` (default 500 MB, sum of raw bytes).
+- Hybrid search tuning: `KB_HYBRID_ALPHA` (0 = keyword, 1 = vectors, default
+  0.5) and per-request `?alpha=` on both search endpoints;
+  `KB_BM25_PROPERTY_WEIGHTS` (default `{"path": 2.0}`) boosts titles/paths in
+  the BM25F stage. Embedding dimensions via `EMBEDDINGS_DIMENSIONS`
+  (Matryoshka truncation); switching embedding models requires a
+  `POST /kb/{id}/reindex`.
+
+### Retrieval evaluation (golden set)
+
+Before tuning anything, build a golden set of real queries + relevant
+document paths and measure. See `data/golden_set.example.json` for the
+format and `docs/rag-techniques-research.md` for why this comes first.
+
+```bash
+# in-memory sweep (uses configured embeddings; no Weaviate needed)
+uv run python scripts/kb_eval.py --kb runbook --owner admin --golden data/golden_set.json
+
+# against the live Weaviate store
+uv run python scripts/kb_eval.py --kb runbook --golden data/golden_set.json --live
+
+# per-query hit lists
+uv run python scripts/kb_eval.py --kb runbook --golden data/golden_set.json --verbose
+```
+
+Output: Recall@k, MRR and nDCG@k per alpha value, plus the best alpha.
+Every future retrieval change should be gated on these numbers.
 - Ingest status per document: `pending → processing → ready | failed` (with
   error message).
 - Embeddings: OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`)

@@ -41,7 +41,9 @@ Endpoints:
   GET  /kb/{id}/files/{doc}/content-> raw file bytes (inline preview)
   POST /kb/{id}/reindex            -> re-parse + re-embed all documents
   GET  /kb/{id}/search             -> hybrid (vector + keyword) search over a KB
+                                    (optional ?alpha= 0..1 per request)
   GET  /kb/search                  -> hybrid search across all the user's KBs
+                                    (optional ?alpha= 0..1 per request)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):
