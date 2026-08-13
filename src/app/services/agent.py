@@ -38,9 +38,25 @@ from langgraph.types import Checkpointer
 
 from ..core.config import settings
 from ..core.constants import GLOBAL_SKILLS_NS, SKILLS_SOURCE
+from ..services.kb.tool import build_kb_search_tool
+from ..services.searxng import build_search_tool
 from .agent_configs import AgentSpec, load_spec
 
 logger = logging.getLogger(__name__)
+
+
+def build_extra_tools() -> list[BaseTool]:
+    """Optional agent tools: web search (SearXNG) + knowledge base search.
+
+    Each tool is only included when its backend is configured (SEARXNG_URL /
+    WEAVIATE_URL), so an unconfigured service never registers a dead tool.
+    """
+    tools: list[BaseTool] = []
+    for candidate in (build_search_tool, build_kb_search_tool):
+        tool_ = candidate()
+        if tool_ is not None:
+            tools.append(tool_)
+    return tools
 
 
 def _user_namespace_factory(rt: Any) -> tuple[str, ...]:
@@ -294,6 +310,11 @@ class AgentRegistry:
         self._mcp_tools = list(mcp_tools or [])
         if tools_by_server is not None:
             self._tools_by_server = dict(tools_by_server)
+        self.invalidate()
+
+    def update_extra_tools(self, extra_tools: list[BaseTool] | None) -> None:
+        """Replace the non-MCP tools (web_search, kb search, ...) and drop cached graphs."""
+        self._extra_tools = list(extra_tools or [])
         self.invalidate()
 
     def update_persistence(self, *, checkpointer: Checkpointer, store: BaseStore) -> None:

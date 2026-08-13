@@ -390,6 +390,106 @@ curl -X POST http://127.0.0.1:8000/agent/tools/reconnect -H "$AUTH"      # apply
 - When the store has tool servers, they **replace** the `MCP_SERVERS_JSON` /
   `mcp_servers.json` env config; delete all entries to fall back.
 
+## Knowledge bases (RAG)
+
+Per-user knowledge bases: upload files (or folders — send each file with its
+relative `path`), the backend extracts text, chunks it and embeds it into
+**Weaviate** (hybrid BM25F + vector search). The agent gets a
+`search_knowledge_base` tool so it can answer from uploaded documents during
+chat; the tool only ever sees the current user's KBs (the run context carries
+`user_id`, which also activates per-user workspace isolation).
+
+```bash
+# Start the vector store once
+# docker compose up -d weaviate
+
+export AUTH="Authorization: Bearer $(curl -s -X POST http://127.0.0.1:8000/login -d 'username=admin&password=admin' | jq -r .access_token)"
+
+# create a KB + upload a folder (file + relative path pairs)
+KB=$(curl -s -X POST http://127.0.0.1:8000/kb -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"runbook","description":"Ops docs"}' | jq -r .id)
+curl -X POST "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH" \
+  -F "file=@guides/deploy.md;type=text/markdown" -F "paths=guides/deploy.md" \
+  -F "file=@guides/backup.md;type=text/markdown" -F "paths=guides/backup.md"
+
+# ...or one zip for a whole folder tree
+curl -X POST "http://127.0.0.1:8000/kb/$KB/zip" -H "$AUTH" -F "file=@docs.zip"
+
+curl "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH"                       # status per file
+curl "http://127.0.0.1:8000/kb/$KB/search?q=kubectl%20deployment" -H "$AUTH"  # hybrid search
+curl "http://127.0.0.1:8000/kb/search?q=deployment" -H "$AUTH"             # search all my KBs
+curl -o deploy.md "http://127.0.0.1:8000/kb/$KB/files/<doc_id>/content" -H "$AUTH"  # raw file
+curl -X POST "http://127.0.0.1:8000/kb/$KB/reindex" -H "$AUTH"             # re-embed everything
+curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # delete KB + vectors
+```
+
+- Supported extensions: `.md .txt .pdf .docx .csv .html .json` + common code
+  files (configurable via `KB_ALLOWED_EXTENSIONS`); cap 25 MB/file
+  (`KB_MAX_FILE_SIZE_MB`). PDFs are chunked **page-level** (NVIDIA benchmark:
+  best average retrieval accuracy); markdown is split on headers.
+- Zip uploads are guarded: path traversal, entry count (`KB_ZIP_MAX_ENTRIES`)
+  and total uncompressed size (`KB_ZIP_MAX_TOTAL_MB`) are rejected before
+  anything is stored; per-entry extension/quota issues produce per-entry
+  results.
+- Per-user storage quota: `KB_QUOTA_MB` (default 500 MB, sum of raw bytes).
+- Hybrid search tuning: `KB_HYBRID_ALPHA` (0 = keyword, 1 = vectors, default
+  0.5) and per-request `?alpha=` on both search endpoints;
+  `KB_BM25_PROPERTY_WEIGHTS` (default `{"path": 2.0}`) boosts titles/paths in
+  the BM25F stage. Embedding dimensions via `EMBEDDINGS_DIMENSIONS`
+  (Matryoshka truncation); switching embedding models requires a
+  `POST /kb/{id}/reindex`.
+- Reranking (retrieve broad → rerank fine): set `KB_RERANK_MODEL` to a
+  flashrank model name (e.g. `ms-marco-MiniLM-L-12-v2`, a tiny CPU
+  cross-encoder, ~30ms for 20 candidates; model downloads on first use).
+  Retrieval pulls `KB_RERANK_CANDIDATES` (default 20) then reranks down to
+  the requested limit. Unset → plain hybrid search.
+- Query rewriting (opt-in, `KB_QUERY_REWRITE=true`): an LLM call rewrites
+  vague queries before retrieval (`KB_REWRITE_MODEL`, defaults to the agent
+  model; queries shorter than `KB_REWRITE_MIN_LENGTH` or single tokens are
+  left untouched; results cached per query; failures degrade to the original
+  query).
+
+### Live reranker check
+
+```bash
+uv run python scripts/test_reranker.py   # real FlashRank vs store ranking on a demo corpus
+```
+
+Downloads the model once (~22 MB to /tmp) and prints per-query before/after
+rankings so you can eyeball whether reranking changes orders sensibly.
+
+### Retrieval evaluation (golden set)
+
+Before tuning anything, build a golden set of real queries + relevant
+document paths and measure. See `data/golden_set.example.json` for the
+format and `docs/rag-techniques-research.md` for why this comes first.
+
+```bash
+# in-memory sweep (uses configured embeddings; no Weaviate needed)
+uv run python scripts/kb_eval.py --kb runbook --owner admin --golden data/golden_set.json
+
+# against the live Weaviate store
+uv run python scripts/kb_eval.py --kb runbook --golden data/golden_set.json --live
+
+# per-query hit lists
+uv run python scripts/kb_eval.py --kb runbook --golden data/golden_set.json --verbose
+```
+
+Output: Recall@k, MRR and nDCG@k per alpha value, plus the best alpha.
+Every future retrieval change should be gated on these numbers.
+
+```bash
+# compare reranking vs plain retrieval on the same golden set
+uv run python scripts/kb_eval.py --kb runbook --golden data/golden_set.json --rerank
+```
+- Ingest status per document: `pending → processing → ready | failed` (with
+  error message).
+- Embeddings: OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`)
+  when `OPENAI_API_KEY` is set; otherwise a deterministic local embedder for
+  dev/tests.
+- Without `WEAVIATE_URL`, upload/search return 503 and the agent has no KB
+  tool — the rest of the app is unaffected.
+
 ## Code layout
 
 Follows the [fastapi-clean-architecture](https://github.com/jujumilk3/fastapi-clean-architecture)

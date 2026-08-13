@@ -37,6 +37,22 @@ Endpoints:
                                     tools; scope=global requires admin)
   GET|PUT|DELETE /agents/{name}   -> read / replace / delete an agent config
   POST /agents/{name}/test        -> dry-run: build the graph (validates model)
+  POST /kb                         -> create a knowledge base (per-user)
+  GET  /kb                         -> list the user's knowledge bases
+  GET|PATCH|DELETE /kb/{id}        -> detail / rename / delete a KB (vectors too)
+  POST /kb/{id}/files              -> multipart upload (file + relative path per
+                                    file; folder upload = many pairs). Each file
+                                    is ingested: parse -> chunk -> embed -> Weaviate
+  POST /kb/{id}/zip                -> upload a .zip of documents (safe extraction:
+                                    traversal + zip-bomb guards, per-entry results)
+  GET  /kb/{id}/files              -> documents with ingest status
+  GET|DELETE /kb/{id}/files/{doc}  -> document detail / delete (vectors too)
+  GET  /kb/{id}/files/{doc}/content-> raw file bytes (inline preview)
+  POST /kb/{id}/reindex            -> re-parse + re-embed all documents
+  GET  /kb/{id}/search             -> hybrid (vector + keyword) search over a KB
+                                    (optional ?alpha= 0..1 per request)
+  GET  /kb/search                  -> hybrid search across all the user's KBs
+                                    (optional ?alpha= 0..1 per request)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):
@@ -66,9 +82,8 @@ from langgraph.graph.state import CompiledStateGraph
 from .api.v1.routes import api_router
 from .core.config import settings
 from .core.database import persistence
-from .services.agent import AgentRegistry, build_backend
+from .services.agent import AgentRegistry, build_backend, build_extra_tools
 from .services.mcp import mcp_servers
-from .services.searxng import build_search_tool
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +104,7 @@ def create_app(
             await mcp_servers.connect(store=persistence.store)
         except Exception:
             logger.exception("MCP connect failed; continuing without MCP tools")
-        search_tool = build_search_tool()
+        search_tool = build_extra_tools()  # list: web_search + kb search tool (when configured)
         # Agent registry: lazy graph factory keyed by agent config (model +
         # system prompt + skills + tools). `agent` (tests) becomes the static
         # default; every resolve() then returns that graph.
@@ -98,7 +113,7 @@ def create_app(
             store=persistence.store,
             backend=app.state.backend,
             mcp_tools=mcp_servers.tools,
-            extra_tools=[search_tool] if search_tool else None,
+            extra_tools=search_tool or None,
             tools_by_server=mcp_servers.tools_by_server,
             static_default=agent,
         )

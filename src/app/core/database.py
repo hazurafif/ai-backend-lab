@@ -344,6 +344,417 @@ class ChatHistoryStore:
         return [dict(row["content"]) for row in self._memory.get(thread_id, [])]
 
 
+class KbStore:
+    """Knowledge bases + ingested documents in Postgres (`kb`, `kb_documents`).
+
+    Owner-scoped: every method takes `owner` so users can only touch their own
+    data. Rows are plain dicts shaped like `schema/kb_schema` outputs.
+    Falls back to in-memory dicts when Postgres is off (dev mode).
+    """
+
+    def __init__(self) -> None:
+        self._pool: AsyncConnectionPool | None = None
+        self._memory_kbs: dict[str, dict[str, dict]] = {}  # owner -> kb_id -> row
+        self._memory_docs: dict[str, dict[str, dict]] = {}  # owner -> doc_id -> row
+
+    @property
+    def is_postgres(self) -> bool:
+        return self._pool is not None
+
+    async def start(self, pool: AsyncConnectionPool | None) -> None:
+        self._pool = pool
+        self._memory_kbs, self._memory_docs = {}, {}
+
+    async def stop(self) -> None:
+        self._pool = None
+        self._memory_kbs, self._memory_docs = {}, {}
+
+    # ------------------------------------------------------------------ kbs
+
+    async def create_kb(self, owner: str, name: str, description: str | None) -> dict | None:
+        """Insert a KB; returns the row, or None when (owner, name) is taken."""
+        now = now_iso()
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO kb (owner, name, description) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (owner, name) DO NOTHING RETURNING id, created_at, updated_at",
+                    (owner, name, description),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {
+                    "id": str(row[0]),
+                    "name": name,
+                    "description": description,
+                    "created_at": row[1].isoformat(),
+                    "updated_at": row[2].isoformat(),
+                }
+        bucket = self._memory_kbs.setdefault(owner, {})
+        if any(kb["name"] == name for kb in bucket.values()):
+            return None
+        kb_id = str(uuid.uuid4())
+        row = {
+            "id": kb_id,
+            "name": name,
+            "description": description,
+            "created_at": now,
+            "updated_at": now,
+        }
+        bucket[kb_id] = row
+        return dict(row)
+
+    async def get_kb(self, owner: str, kb_id: str) -> dict | None:
+        """KB metadata of `owner` incl. stats (None when unknown or not owned)."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT k.id, k.name, k.description, k.created_at, k.updated_at, "
+                    "count(d.id) AS document_count, coalesce(sum(d.chunk_count), 0) AS chunk_count "
+                    "FROM kb k LEFT JOIN kb_documents d ON d.kb_id = k.id "
+                    "WHERE k.owner = %s AND k.id = %s GROUP BY k.id",
+                    (owner, kb_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {
+                    "id": str(row[0]),
+                    "name": row[1],
+                    "description": row[2],
+                    "created_at": row[3].isoformat(),
+                    "updated_at": row[4].isoformat(),
+                    "document_count": row[5],
+                    "chunk_count": row[6] or 0,
+                }
+        kb = self._memory_kbs.get(owner, {}).get(kb_id)
+        if kb is None:
+            return None
+        out = dict(kb)
+        docs = [d for d in self._memory_docs.get(owner, {}).values() if d["kb_id"] == kb_id]
+        out["document_count"] = len(docs)
+        out["chunk_count"] = sum(d["chunk_count"] for d in docs)
+        return out
+
+    async def list_kbs(self, owner: str) -> list[dict]:
+        """All KBs of `owner`, newest first, with document/chunk stats."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT k.id, k.name, k.description, k.created_at, k.updated_at, "
+                    "count(d.id) AS document_count, coalesce(sum(d.chunk_count), 0) AS chunk_count "
+                    "FROM kb k LEFT JOIN kb_documents d ON d.kb_id = k.id "
+                    "WHERE k.owner = %s GROUP BY k.id ORDER BY k.updated_at DESC",
+                    (owner,),
+                )
+                return [
+                    {
+                        "id": str(r[0]),
+                        "name": r[1],
+                        "description": r[2],
+                        "created_at": r[3].isoformat(),
+                        "updated_at": r[4].isoformat(),
+                        "document_count": r[5],
+                        "chunk_count": r[6] or 0,
+                    }
+                    for r in await cur.fetchall()
+                ]
+        kbs = [dict(kb) for kb in self._memory_kbs.get(owner, {}).values()]
+        for kb in kbs:
+            docs = [d for d in self._memory_docs.get(owner, {}).values() if d["kb_id"] == kb["id"]]
+            kb["document_count"] = len(docs)
+            kb["chunk_count"] = sum(d["chunk_count"] for d in docs)
+        kbs.sort(key=lambda k: k["updated_at"], reverse=True)
+        return kbs
+
+    async def update_kb(
+        self, owner: str, kb_id: str, *, name: str | None, description: str | None
+    ) -> dict | None:
+        """Rename / re-describe a KB; None when unknown."""
+        if self._pool is not None:
+            sets, params = [], []
+            if name is not None:
+                sets.append("name = %s")
+                params.append(name)
+            if description is not None:
+                sets.append("description = %s")
+                params.append(description)
+            if not sets:
+                return await self.get_kb(owner, kb_id)
+            params += [owner, kb_id]
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    f"UPDATE kb SET {', '.join(sets)}, updated_at = now() "
+                    "WHERE owner = %s AND id = %s RETURNING id, name, description, "
+                    "created_at, updated_at",
+                    tuple(params),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {
+                    "id": str(row[0]),
+                    "name": row[1],
+                    "description": row[2],
+                    "created_at": row[3].isoformat(),
+                    "updated_at": row[4].isoformat(),
+                }
+        kb = self._memory_kbs.get(owner, {}).get(kb_id)
+        if kb is None:
+            return None
+        if name is not None:
+            kb["name"] = name
+        if description is not None:
+            kb["description"] = description
+        kb["updated_at"] = now_iso()
+        return dict(kb)
+
+    async def delete_kb(self, owner: str, kb_id: str) -> bool:
+        """Remove a KB and its documents (cascade). Vectors are the caller's job."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("DELETE FROM kb WHERE owner = %s AND id = %s", (owner, kb_id))
+                return cur.rowcount > 0
+        return self._memory_kbs.get(owner, {}).pop(kb_id, None) is not None
+
+    async def total_bytes(self, owner: str) -> int:
+        """Sum of raw document bytes across all KBs of `owner` (quota check)."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT coalesce(sum(size_bytes), 0) FROM kb_documents WHERE owner = %s",
+                    (owner,),
+                )
+                return (await cur.fetchone())[0] or 0
+        return sum(d["size_bytes"] for d in self._memory_docs.get(owner, {}).values())
+
+    # ------------------------------------------------------------- documents
+
+    async def add_document(
+        self,
+        owner: str,
+        kb_id: str,
+        path: str,
+        mime_type: str | None,
+        size_bytes: int,
+        content: bytes,
+    ) -> dict | None:
+        """Insert a document with status `pending`; None when the KB is unknown
+        or the (kb_id, path) pair already exists."""
+        now = now_iso()
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO kb_documents (kb_id, owner, path, mime_type, size_bytes, content) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (kb_id, path) DO NOTHING "
+                    "RETURNING id, created_at, updated_at",
+                    (kb_id, owner, path, mime_type, size_bytes, content),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {
+                    "id": str(row[0]),
+                    "kb_id": kb_id,
+                    "owner": owner,
+                    "path": path,
+                    "mime_type": mime_type,
+                    "size_bytes": size_bytes,
+                    "status": "pending",
+                    "error": None,
+                    "chunk_count": 0,
+                    "created_at": row[1].isoformat(),
+                    "updated_at": row[2].isoformat(),
+                }
+        if kb_id not in self._memory_kbs.get(owner, {}):
+            return None
+        docs = self._memory_docs.setdefault(owner, {})
+        if any(d["path"] == path for d in docs.values()):
+            return None
+        doc_id = str(uuid.uuid4())
+        row = {
+            "id": doc_id,
+            "kb_id": kb_id,
+            "owner": owner,
+            "path": path,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "content": content,
+            "status": "pending",
+            "error": None,
+            "chunk_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        docs[doc_id] = row
+        out = dict(row)
+        out.pop("content", None)
+        return out
+
+    async def get_document(self, owner: str, doc_id: str) -> dict | None:
+        """Document metadata (no blob); None when unknown or not owned."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, kb_id, path, mime_type, size_bytes, status, error, "
+                    "chunk_count, created_at, updated_at FROM kb_documents "
+                    "WHERE owner = %s AND id = %s",
+                    (owner, doc_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {
+                    "id": str(row[0]),
+                    "kb_id": str(row[1]),
+                    "path": row[2],
+                    "mime_type": row[3],
+                    "size_bytes": row[4],
+                    "status": row[5],
+                    "error": row[6],
+                    "chunk_count": row[7],
+                    "created_at": row[8].isoformat(),
+                    "updated_at": row[9].isoformat(),
+                }
+        doc = self._memory_docs.get(owner, {}).get(doc_id)
+        if doc is None:
+            return None
+        out = dict(doc)
+        out.pop("content", None)
+        return out
+
+    async def get_document_content(self, owner: str, doc_id: str) -> tuple[dict, bytes] | None:
+        """Document metadata + raw blob (for re-indexing); None when unknown."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, kb_id, path, mime_type, size_bytes, status, error, "
+                    "chunk_count, created_at, updated_at, content FROM kb_documents "
+                    "WHERE owner = %s AND id = %s",
+                    (owner, doc_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                meta = {
+                    "id": str(row[0]),
+                    "kb_id": str(row[1]),
+                    "path": row[2],
+                    "mime_type": row[3],
+                    "size_bytes": row[4],
+                    "status": row[5],
+                    "error": row[6],
+                    "chunk_count": row[7],
+                    "created_at": row[8].isoformat(),
+                    "updated_at": row[9].isoformat(),
+                }
+                return meta, bytes(row[10])
+        doc = self._memory_docs.get(owner, {}).get(doc_id)
+        if doc is None:
+            return None
+        out = dict(doc)
+        content = out.pop("content")
+        return out, content
+
+    async def list_documents(self, owner: str, kb_id: str) -> list[dict]:
+        """All documents of a KB (metadata only), by path."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, kb_id, path, mime_type, size_bytes, status, error, "
+                    "chunk_count, created_at, updated_at FROM kb_documents "
+                    "WHERE owner = %s AND kb_id = %s ORDER BY path",
+                    (owner, kb_id),
+                )
+                return [
+                    {
+                        "id": str(r[0]),
+                        "kb_id": str(r[1]),
+                        "path": r[2],
+                        "mime_type": r[3],
+                        "size_bytes": r[4],
+                        "status": r[5],
+                        "error": r[6],
+                        "chunk_count": r[7],
+                        "created_at": r[8].isoformat(),
+                        "updated_at": r[9].isoformat(),
+                    }
+                    for r in await cur.fetchall()
+                ]
+        docs = [dict(d) for d in self._memory_docs.get(owner, {}).values() if d["kb_id"] == kb_id]
+        for doc in docs:
+            doc.pop("content", None)
+        docs.sort(key=lambda d: d["path"])
+        return docs
+
+    async def update_document(
+        self,
+        owner: str,
+        doc_id: str,
+        *,
+        status: str | None = None,
+        error: str | None = None,
+        clear_error: bool = False,
+        chunk_count: int | None = None,
+    ) -> bool:
+        """Update ingest status/error/chunk_count of a document."""
+        sets, params = [], []
+        if status is not None:
+            sets.append("status = %s")
+            params.append(status)
+        if clear_error:
+            sets.append("error = NULL")
+        elif error is not None:
+            sets.append("error = %s")
+            params.append(error)
+        if chunk_count is not None:
+            sets.append("chunk_count = %s")
+            params.append(chunk_count)
+        if not sets:
+            return await self.get_document(owner, doc_id) is not None
+        params += [owner, doc_id]
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    f"UPDATE kb_documents SET {', '.join(sets)}, updated_at = now() "
+                    "WHERE owner = %s AND id = %s",
+                    tuple(params),
+                )
+                return cur.rowcount > 0
+        doc = self._memory_docs.get(owner, {}).get(doc_id)
+        if doc is None:
+            return False
+        if status is not None:
+            doc["status"] = status
+        if clear_error:
+            doc["error"] = None
+        elif error is not None:
+            doc["error"] = error
+        if chunk_count is not None:
+            doc["chunk_count"] = chunk_count
+        doc["updated_at"] = now_iso()
+        return True
+
+    async def delete_document(self, owner: str, doc_id: str) -> dict | None:
+        """Remove a document; returns its metadata (for vector cleanup) or None."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM kb_documents WHERE owner = %s AND id = %s "
+                    "RETURNING id, kb_id, path",
+                    (owner, doc_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {"id": str(row[0]), "kb_id": str(row[1]), "path": row[2]}
+        doc = self._memory_docs.get(owner, {}).pop(doc_id, None)
+        if doc is None:
+            return None
+        return {"id": doc["id"], "kb_id": doc["kb_id"], "path": doc["path"]}
+
+
 class Persistence:
     """Owns the checkpointer, store, chat history and users; set up at startup and closed at shutdown."""
 
@@ -352,6 +763,7 @@ class Persistence:
         self.store: BaseStore | None = None
         self.chat_history = ChatHistoryStore()
         self.users = UserStore()
+        self.kb = KbStore()
         self.backend_name = "memory"
         self._pool: AsyncConnectionPool | None = None
         self._saver_cm = None
@@ -401,6 +813,7 @@ class Persistence:
 
         await self.users.start(pool, postgres_ready)
         await self.chat_history.start(pool)
+        await self.kb.start(pool)
         if pool is None:
             self.checkpointer = InMemorySaver()
             self.store = InMemoryStore()
@@ -425,6 +838,7 @@ class Persistence:
             self._pool = None
         await self.users.stop()
         await self.chat_history.stop()
+        await self.kb.stop()
 
     async def ensure_default_admin(self) -> None:
         """Guarantee an admin account exists; seed the default on a fresh store.

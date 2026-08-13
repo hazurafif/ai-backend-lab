@@ -13,7 +13,7 @@ from ....core.dependencies import get_admin_user, get_current_user
 from ....core.exceptions import Conflict, NotFound
 from ....schema.agent_schema import SkillIn, SkillOut, ToolServerIn, ToolServerOut
 from ....services import resources
-from ....services.agent import AgentRegistry
+from ....services.agent import AgentRegistry, build_extra_tools
 from ....services.mcp import mcp_servers
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -133,6 +133,7 @@ async def reconnect_tools(request: Request, _: dict = Depends(get_admin_user)):
     await mcp_servers.connect(store=persistence.store)
     registry: AgentRegistry = request.app.state.agents
     registry.update_mcp_tools(mcp_servers.tools, mcp_servers.tools_by_server)
+    registry.update_extra_tools(build_extra_tools() or None)
     request.app.state.agent = await registry.resolve("default", "anonymous")
     request.app.state.backend = registry.backend
     return {"connected": mcp_servers.names, "tools": len(mcp_servers.tools)}

@@ -1,0 +1,21 @@
+{
+  "description": "Example golden set for scripts/kb_eval.py — copy to data/golden_set.json and replace with real queries + document paths from your KB.",
+  "queries": [
+    {
+      "query": "how do we deploy the service",
+      "relevant": ["guides/deploy.md"]
+    },
+    {
+      "query": "kubectl rollout deployment",
+      "relevant": ["guides/deploy.md"]
+    },
+    {
+      "query": "when do backups run",
+      "relevant": ["guides/backup.md"]
+    },
+    {
+      "query": "what happens if the database goes down",
+      "relevant": ["guides/disaster-recovery.md"]
+    }
+  ]
+}
