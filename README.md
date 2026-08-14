@@ -85,6 +85,7 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET/POST /skills` + `GET/PUT/DELETE /skills/{name}` | Bearer | **User-scoped** "my skills" (private; attachable to your own agent configs) |
 | `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
 | `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
+| `POST /mcp/tools/call` | Bearer | MCP apps tools proxy: invoke a tool on a configured MCP server (`server_hint` or fan-out; `CallToolResult` passthrough — 200 with `isError`, 502 transport, 404 no match) |
 | `GET|POST /agents` | Bearer | List / create agent configs (profile: model + system prompt + skills + tools; `scope: "global"` requires admin) |
 | `GET/PUT/DELETE /agents/{name}` | Bearer | Read / replace / delete an agent config (owner; global ones: admin) |
 | `POST /agents/{name}/test` | Bearer | Dry-run: build the graph (validates the model string); `400` when it cannot be built |

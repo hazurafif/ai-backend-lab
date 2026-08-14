@@ -53,6 +53,10 @@ Endpoints:
                                     (optional ?alpha= 0..1 per request)
   GET  /kb/search                  -> hybrid search across all the user's KBs
                                     (optional ?alpha= 0..1 per request)
+  POST /mcp/tools/call             -> prefab app tools proxy: invoke a tool on a
+                                    configured MCP server (server_hint or fan-out;
+                                    CallToolResult passthrough: 200 with isError,
+                                    502 transport, 404 no match)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):

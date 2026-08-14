@@ -39,6 +39,11 @@ class Conflict(DetailedHTTPException):
     DETAIL = "Conflict"
 
 
+class BadGateway(DetailedHTTPException):
+    STATUS_CODE = status.HTTP_502_BAD_GATEWAY
+    DETAIL = "Upstream error"
+
+
 class NotAuthenticated(DetailedHTTPException):
     STATUS_CODE = status.HTTP_401_UNAUTHORIZED
     DETAIL = "User not authenticated"
