@@ -6,9 +6,12 @@
 # non-root user with a healthcheck.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
+# The execute tool inherits this PATH (EXECUTE_INHERIT_ENV=true), so the
+# agent's shell resolves `python`/`uv`/`uvicorn` like a dev shell.
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
