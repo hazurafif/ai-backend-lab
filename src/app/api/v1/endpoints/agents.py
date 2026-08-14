@@ -80,6 +80,7 @@ async def test_agent(name: str, request: Request, current_user: dict = Depends(g
         "skills": spec.skills if spec else None,
         "tools": spec.tools if spec else None,
         "temperature": spec.temperature if spec else None,
+        "thinking": spec.thinking if spec else None,
     }
 
 

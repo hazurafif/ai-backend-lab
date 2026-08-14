@@ -235,6 +235,7 @@ async def test_agent_model_uses_llm_connection(persistence):
         tools=None,
         temperature=None,
         interrupt_on=None,
+        thinking=None,
         builtin=True,
     )
     model = registry._resolve_model(spec)

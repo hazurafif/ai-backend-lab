@@ -19,8 +19,9 @@ from ....schema.chat_schema import (
     ShareOut,
     ThreadOut,
     ThreadUpdate,
+    ThreadUsageOut,
 )
-from ....services import ai_sdk_chat
+from ....services import agent_configs, ai_sdk_chat, session_stats
 from ....services import share as share_service
 from ....services.chat import _serialize_message, agent_stream, sse_response
 from ....services.searxng import set_search_enabled
@@ -313,10 +314,17 @@ async def thread_messages(
     thread_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    # Prefer the readable chat_messages table; fall back to checkpoint
-    # rehydration for threads created before the table existed (or when the
-    # run ended in an error before history was written).
     await _assert_thread_owner(thread_id, current_user["username"])
+    return await _thread_history(request, thread_id)
+
+
+async def _thread_history(request: Request, thread_id: str) -> list[dict]:
+    """Readable history rows; falls back to checkpoint rehydration.
+
+    Prefers the `chat_messages` table; falls back to checkpoint rehydration
+    for threads created before the table existed (or when the run ended in
+    an error before history was written).
+    """
     history = await persistence.chat_history.list_messages(thread_id)
     if history:
         return history
@@ -327,5 +335,42 @@ async def thread_messages(
     snapshot = await agent.aget_state({"configurable": {"thread_id": thread_id}})
     if snapshot is None or not snapshot.values.get("messages"):
         raise HTTPException(status_code=404, detail="Thread not found")
-    messages = snapshot.values["messages"]
-    return [_serialize_message(m) for m in messages]
+    return [_serialize_message(m) for m in snapshot.values["messages"]]
+
+
+@router.get("/threads/{thread_id}/usage", response_model=ThreadUsageOut)
+async def thread_usage(
+    request: Request,
+    thread_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Context + token usage of a thread (the "current session" view).
+
+    - `messages`: stored message count + content size
+    - `usage`: cumulative input/output/total tokens from usage_metadata
+      (null when the provider reports none)
+    - `context`: the last run's input tokens (= context the model currently
+      sees) vs the model's context window (utilization, remaining) — null
+      before the first run
+    - `active_run`: true while a run is in progress on this thread
+    """
+    await _assert_thread_owner(thread_id, current_user["username"])
+    history = await _thread_history(request, thread_id)
+
+    item = await persistence.store.aget(thread_metadata_ns(current_user["username"]), thread_id)
+    agent_name = (item.value or {}).get("agent") if item is not None else None
+    spec = await agent_configs.load_spec(
+        persistence.store, agent_name or "default", current_user["username"]
+    )
+    model = spec.model if spec is not None else None
+    return ThreadUsageOut(
+        thread_id=thread_id,
+        agent=agent_name,
+        model=model,
+        messages=session_stats.message_counts(history),
+        usage=session_stats.compute_usage(history),
+        context=session_stats.build_context(
+            session_stats.current_context_input_tokens(history), model
+        ),
+        active_run=runs.is_running(thread_id),
+    )

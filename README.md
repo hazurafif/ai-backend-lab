@@ -61,6 +61,40 @@ Health check: `curl http://127.0.0.1:8000/health`
 OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 (langchain-openai reads them) — e.g. the opencode.ai zen gateway.
 
+**Stored provider connections (no `.env` keys):** admin-managed connections
+(`base URL` + `api token`) live in the DB and drive the agent's chat model and
+KB embeddings instead of `OPENAI_BASE_URL`/`OPENAI_API_KEY`:
+
+```bash
+# admin: create the default `llm` connection (used by the builtin agent)
+curl -X POST http://127.0.0.1:8000/connections \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "zen", "kind": "llm", "base_url": "https://opencode.ai/zen/go/v1", \
+       "api_token": "...", "is_default": true}'
+```
+
+- `GET|POST /connections` + `GET|PUT|DELETE /connections/{name}` — CRUD
+  (admin only; `api_token` is write-only — masked on output, PUT without a
+  token keeps the stored one)
+- Kinds: `llm`, `embeddings`, `mcp`, `weaviate`, `searxng`; one connection
+  per kind is the resolved default (`is_default`)
+- The agent LLM and KB embeddings resolve the default `llm` / `embeddings`
+  connection at startup and after every mutation; without one, env-based
+  behavior stays. Connections target OpenAI-compatible endpoints
+  (langchain-openai).
+
+**Thinking / reasoning effort:** agent configs accept a `thinking` level that
+is passed to the model as `reasoning_effort` (OpenAI-compatible endpoints,
+stored connections included). Levels follow the standard reasoning-effort
+set — `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (extra high),
+`max`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/agents \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "coder", "model": "openai:gpt-5.2", "thinking": "xhigh"}'
+```
+
 ## API
 
 | Endpoint | Auth | Description |
@@ -72,6 +106,7 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`), incl. HITL resume. Optional `agent` field |
 | `GET /threads` | Bearer | Conversations of the current user (newest first, `limit`/`offset` pagination; each thread carries the `agent` it runs on) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
+| `GET /threads/{id}/usage` | Bearer | **Context + usage of a thread**: message count/size, cumulative input/output/total tokens (from `usage_metadata`; `input` is billed input — history is counted per run, `output` is exact), current context = the last run's input tokens vs the model's context window (utilization %, remaining), `active_run` flag |
 | `PATCH /threads/{id}` | Bearer | Rename a thread |
 | `DELETE /threads/{id}` | Bearer | Delete a thread (state + history + metadata) |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
@@ -85,8 +120,9 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET/POST /skills` + `GET/PUT/DELETE /skills/{name}` | Bearer | **User-scoped** "my skills" (private; attachable to your own agent configs) |
 | `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
 | `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
+| `GET/POST /connections` + `GET/PUT/DELETE /connections/{name}` | Bearer (admin) | Manage provider connections (base URL + API token in the DB, used by the agent LLM + KB embeddings instead of `.env` keys; token is write-only, `is_default` per kind selects the resolved default) |
 | `POST /mcp/tools/call` | Bearer | MCP apps tools proxy: invoke a tool on a configured MCP server (`server_hint` or fan-out; `CallToolResult` passthrough — 200 with `isError`, 502 transport, 404 no match) |
-| `GET|POST /agents` | Bearer | List / create agent configs (profile: model + system prompt + skills + tools; `scope: "global"` requires admin) |
+| `GET|POST /agents` | Bearer | List / create agent configs (profile: model + system prompt + skills + tools + temperature + `thinking` reasoning effort; `scope: "global"` requires admin) |
 | `GET/PUT/DELETE /agents/{name}` | Bearer | Read / replace / delete an agent config (owner; global ones: admin) |
 | `POST /agents/{name}/test` | Bearer | Dry-run: build the graph (validates the model string); `400` when it cannot be built |
 | `GET /users/me` | Bearer | Current user |

@@ -61,6 +61,7 @@ class AgentSpec:
     tools: list[str] | None  # None = inherit all tools, [] = none
     temperature: float | None
     interrupt_on: dict[str, bool] | None
+    thinking: str | None  # reasoning-effort level: none..minimal..max
     owner: str = _SYSTEM_OWNER
     builtin: bool = False
     description: str | None = None
@@ -94,6 +95,7 @@ class AgentSpec:
                     self.tools,
                     self.temperature,
                     self.interrupt_on,
+                    self.thinking,
                     self.skills_source,
                 ],
                 sort_keys=True,
@@ -114,6 +116,7 @@ def default_spec() -> AgentSpec:
         tools=None,
         temperature=None,
         interrupt_on=settings.interrupt_on or None,
+        thinking=None,
         owner=_SYSTEM_OWNER,
         builtin=True,
         description="Built-in agent (DEEPAGENTS_MODEL + SYSTEM_PROMPT env settings)",
@@ -135,6 +138,7 @@ def _value(cfg: AgentConfigIn, *, owner: str, created_at: str | None = None) -> 
         "tools": cfg.tools,
         "temperature": cfg.temperature,
         "interrupt_on": cfg.interrupt_on,
+        "thinking": cfg.thinking,
         "scope": cfg.scope,
         "owner": owner,
         "created_at": created_at or updated,
@@ -155,6 +159,7 @@ def _spec_from_value(value: dict[str, Any]) -> AgentSpec:
         tools=value.get("tools"),
         temperature=value.get("temperature"),
         interrupt_on=value.get("interrupt_on"),
+        thinking=value.get("thinking"),
         owner=value.get("owner") or _GLOBAL_OWNER,
         description=value.get("description"),
         created_at=value.get("created_at"),

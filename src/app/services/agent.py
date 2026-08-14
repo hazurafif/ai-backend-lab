@@ -299,11 +299,15 @@ class AgentRegistry:
         # A saved `llm` connection (base URL + API token, see /connections)
         # overrides .env credentials for the provider.
         kwargs = llm_model_kwargs()
-        if spec.temperature is None and not kwargs:
+        if spec.temperature is not None:
+            kwargs["temperature"] = spec.temperature
+        if spec.thinking is not None:
+            kwargs["reasoning_effort"] = spec.thinking
+        if not kwargs:
             return spec.model
         from langchain.chat_models import init_chat_model
 
-        return init_chat_model(spec.model, temperature=spec.temperature, **kwargs)
+        return init_chat_model(spec.model, **kwargs)
 
     def update_mcp_tools(
         self,
