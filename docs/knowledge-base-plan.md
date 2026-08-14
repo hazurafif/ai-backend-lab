@@ -207,7 +207,7 @@ sudah menyimpan konten chunk); re-index cukup dari blob via parse ulang.
 
 ```env
 # --- Knowledge base (RAG) ---
-WEAVIATE_URL=http://localhost:8081        # service baru di compose
+WEAVIATE_URL=http://localhost:8093        # service baru di compose
 # WEAVIATE_API_KEY=...                    # opsional, auth
 EMBEDDINGS_MODEL=text-embedding-3-small   # dipakai via OpenAIEmbeddings
 # EMBEDDINGS_BASE_URL=...                 # custom OpenAI-compatible endpoint

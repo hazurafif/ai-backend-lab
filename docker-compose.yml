@@ -34,7 +34,7 @@ services:
   searxng:
     image: searxng/searxng:latest
     ports:
-      - "8080:8080"
+      - "8092:8080"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     restart: unless-stopped
@@ -50,7 +50,7 @@ services:
       DEFAULT_VECTORIZER_MODULE: "none"
       CLUSTER_HOSTNAME: node1
     ports:
-      - "8081:8080"
+      - "8093:8080"
     volumes:
       - weaviate_data:/var/lib/weaviate
     restart: unless-stopped

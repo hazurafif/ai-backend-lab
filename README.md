@@ -285,9 +285,9 @@ per-query cost — SearXNG aggregates Google/Bing/DDG/... for you). JSON output
 is enabled via the mounted `searxng/settings.yml` (`search.formats: [html, json]`).
 
 ```bash
-docker compose up -d searxng        # http://localhost:8080
+docker compose up -d searxng        # http://localhost:8092
 # .env:
-SEARXNG_URL=http://localhost:8080
+SEARXNG_URL=http://localhost:8092
 SEARXNG_ENABLED=true
 ```
 
