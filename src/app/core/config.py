@@ -46,8 +46,8 @@ class Settings:
     # --- Agent ---
     # Model string, e.g. "openai:gpt-4o-mini", "anthropic:claude-sonnet-4-5", "google_genai:gemini-2.5-flash".
     # Optional: when unset, the default `llm` connection's `extra.model` is
-    # used; when neither exists the app refuses to start (no silent default
-    # model). For a custom OpenAI-compatible endpoint (e.g.
+    # used; when neither exists chats return 503 with setup instructions
+    # (the app always starts; the model is configured in-app later). For a custom OpenAI-compatible endpoint (e.g.
     # opencode.ai/zen/go/v1), the connection carries the base URL + key and
     # langchain-openai reads them.
     model: str | None = field(default_factory=lambda: os.environ.get("DEEPAGENTS_MODEL") or None)

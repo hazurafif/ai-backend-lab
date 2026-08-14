@@ -44,6 +44,11 @@ class BadGateway(DetailedHTTPException):
     DETAIL = "Upstream error"
 
 
+class ServiceUnavailable(DetailedHTTPException):
+    STATUS_CODE = status.HTTP_503_SERVICE_UNAVAILABLE
+    DETAIL = "Service unavailable"
+
+
 class NotAuthenticated(DetailedHTTPException):
     STATUS_CODE = status.HTTP_401_UNAUTHORIZED
     DETAIL = "User not authenticated"

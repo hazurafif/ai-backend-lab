@@ -189,15 +189,28 @@ def create_app(
             store=persistence.store,
         )
         app.state.backend = app.state.agents.backend
-        app.state.agent = await app.state.agents.resolve("default", "anonymous")
-        logger.info(
-            "Agent ready: model=%s persistence=%s mcp=%s searxng=%s execute=%s",
-            settings.model or llm_model_name(),
-            persistence.backend_name,
-            mcp_servers.names or "none",
-            "enabled" if search_tool else "not configured",
-            "enabled" if runtime_settings.execute_enabled() else "disabled",
-        )
+        # Startup never fails on a missing model: the agent graph is built
+        # lazily on the first chat (and after every /connections or /settings
+        # mutation), so the admin can configure the default llm connection at
+        # runtime. Requests hit a clear 503 until then.
+        try:
+            app.state.agent = await app.state.agents.resolve("default", "anonymous")
+            logger.info(
+                "Agent ready: model=%s persistence=%s mcp=%s searxng=%s execute=%s",
+                settings.model or llm_model_name(),
+                persistence.backend_name,
+                mcp_servers.names or "none",
+                "enabled" if search_tool else "not configured",
+                "enabled" if runtime_settings.execute_enabled() else "disabled",
+            )
+        except ValueError as exc:
+            app.state.agent = None
+            logger.warning(
+                "Agent not configured yet (%s) — the app is up; chats return 503 "
+                "until a default llm connection (POST /connections) or "
+                "DEEPAGENTS_MODEL is set.",
+                exc,
+            )
         yield
         await mcp_servers.close()
         await persistence.stop()

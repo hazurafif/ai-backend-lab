@@ -11,7 +11,7 @@ from starlette.datastructures import UploadFile
 from ....core.constants import thread_metadata_ns
 from ....core.database import persistence
 from ....core.dependencies import get_current_user
-from ....core.exceptions import NotFound
+from ....core.exceptions import NotFound, ServiceUnavailable
 from ....core.notification_hub import hub
 from ....core.run_registry import runs
 from ....core.security import decode_access_token
@@ -75,6 +75,8 @@ async def _resolve_agent(request: Request, name: str | None, username: str) -> C
 
     The built-in 'default' agent is served by `app.state.agent` (lifespan-
     built, and overridable in tests); named agents come from the registry.
+    An unconfigured model (no DEEPAGENTS_MODEL, no default llm connection)
+    is a 503, not a 500.
     """
     name = name or "default"
     if name == "default" and request.app.state.agent is not None:
@@ -83,6 +85,8 @@ async def _resolve_agent(request: Request, name: str | None, username: str) -> C
         return await request.app.state.agents.resolve(name, username)
     except KeyError:
         raise NotFound(detail=f"Agent '{name}' not found") from None
+    except ValueError as exc:
+        raise ServiceUnavailable(str(exc)) from None
 
 
 async def _thread_agent(request: Request, thread_id: str, username: str) -> CompiledStateGraph:
@@ -177,7 +181,6 @@ async def ai_sdk_chat_endpoint(
     scopes thread metadata to that user, otherwise a "guest" namespace is
     used (starter mode, matching the frontend which has no login yet).
     """
-    agent: CompiledStateGraph = request.app.state.agent
     is_multipart = request.headers.get("content-type", "").startswith("multipart/form-data")
     if not is_multipart:
         body = AiSdkChatRequest.model_validate(await request.json())
@@ -400,6 +403,8 @@ async def _title_payload(request: Request, thread_id: str, username: str) -> tup
         model = await request.app.state.agents.model_for(agent_name, username)
     except KeyError:
         raise NotFound(detail=f"Agent '{agent_name}' not found") from None
+    except ValueError as exc:
+        raise ServiceUnavailable(str(exc)) from None
     return messages, value, agent_name, model
 
 
@@ -571,7 +576,12 @@ async def _thread_history(request: Request, thread_id: str) -> list[dict]:
 
     # DeepAgentState stores messages via a DeltaChannel, so raw checkpoint
     # values don't contain the full list — rehydrate through the graph.
-    agent: CompiledStateGraph = request.app.state.agent
+    agent = request.app.state.agent
+    if agent is None:
+        raise ServiceUnavailable(
+            "Agent not configured — save a default llm connection "
+            "(POST /connections) or set DEEPAGENTS_MODEL"
+        )
     snapshot = await agent.aget_state({"configurable": {"thread_id": thread_id}})
     if snapshot is None or not snapshot.values.get("messages"):
         raise HTTPException(status_code=404, detail="Thread not found")

@@ -324,3 +324,52 @@ async def test_resolve_model_requires_model_when_unconfigured(persistence, monke
     )
     with pytest.raises(ValueError, match="No model configured"):
         _registry(persistence)._resolve_model(spec)
+
+
+async def test_app_starts_without_model_then_configures_at_runtime(persistence, monkeypatch):
+    """No model configured: the app still starts; chats 503 with instructions.
+
+    Saving a default llm connection (extra.model) afterwards makes the agent
+    buildable on the next request — no restart needed.
+    """
+    monkeypatch.setattr(config.settings, "model", None)
+    monkeypatch.setattr(config.settings, "connection_fallback_env", True)
+    app = create_app()
+    cm = app.router.lifespan_context(app)
+    await cm.__aenter__()
+    try:
+        assert app.state.agent is None  # started fine, graph built lazily
+
+        await database.persistence.users.create_user(
+            username="boss", hashed_password="x", role="admin"
+        )
+        token = create_access_token(data={"sub": "boss"})
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            r = await client.post("/chat", json={"message": "hi"})
+            assert r.status_code == 503, r.text
+            assert "No model configured" in r.json()["detail"]
+
+        # Configure the default llm connection in-app (no restart): the next
+        # resolve builds a working graph.
+        await database.persistence.connections.create(
+            {
+                "name": "zen",
+                "kind": "llm",
+                "base_url": "https://api.example.com/v1",
+                "api_token": "sk-db-token",
+                "extra": {"model": "openai:deepseek-v4-flash"},
+                "is_default": True,
+            }
+        )
+        from app.services import connections as connection_service
+
+        await connection_service.refresh_resolved_connections()
+        app.state.agents.invalidate()
+        graph = await app.state.agents.resolve("default", "anonymous")
+        assert graph is not None
+    finally:
+        await cm.__aexit__(None, None, None)

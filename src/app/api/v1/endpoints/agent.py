@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ....core.database import persistence
 from ....core.dependencies import get_admin_user, get_current_user
-from ....core.exceptions import Conflict, NotFound
+from ....core.exceptions import Conflict, NotFound, ServiceUnavailable
 from ....schema.agent_schema import SkillIn, SkillOut, ToolServerIn, ToolServerOut
 from ....services import resources
 from ....services.agent import AgentRegistry, build_extra_tools
@@ -134,6 +134,12 @@ async def reconnect_tools(request: Request, _: dict = Depends(get_admin_user)):
     registry: AgentRegistry = request.app.state.agents
     registry.update_mcp_tools(mcp_servers.tools, mcp_servers.tools_by_server)
     registry.update_extra_tools(build_extra_tools() or None)
-    request.app.state.agent = await registry.resolve("default", "anonymous")
+    try:
+        request.app.state.agent = await registry.resolve("default", "anonymous")
+    except ValueError as exc:
+        # Reconnect succeeded but no model is configured yet — keep the
+        # server usable (chats 503 until a connection exists).
+        request.app.state.agent = None
+        raise ServiceUnavailable(str(exc)) from None
     request.app.state.backend = registry.backend
     return {"connected": mcp_servers.names, "tools": len(mcp_servers.tools)}

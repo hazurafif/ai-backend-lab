@@ -17,7 +17,8 @@ Namespaces:
 The built-in `default` agent is synthesized from `DEEPAGENTS_MODEL` (or the
 default `llm` connection's `extra.model` when unset) + `SYSTEM_PROMPT` env
 settings and cannot be created or deleted through the API. When neither model
-source exists, agent builds fail loudly — there is no default model.
+source exists, chats return 503 with setup instructions — the app always
+starts and the model is configured in-app later.
 """
 
 from __future__ import annotations

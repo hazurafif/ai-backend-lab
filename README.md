@@ -67,8 +67,10 @@ and KB embeddings resolve the default connection at startup; env keys are only
 used when `CONNECTION_FALLBACK_ENV=true` (default: missing connection is a loud
 error, never a silent `.env` read). **There is no default model**: the agent's
 model comes from `DEEPAGENTS_MODEL`, or from the default `llm` connection's
-`extra.model` (e.g. `"extra": {"model": "openai:deepseek-v4-flash"}`) —
-without either, agent builds fail loudly. Runtime overrides: `GET|PUT /settings`.
+`extra.model` (e.g. `"extra": {"model": "openai:deepseek-v4-flash"}`). The
+app always starts — chats return a clear 503 until a model is configured
+in-app (POST /connections or PUT /settings), no restart needed. Runtime
+overrides: `GET|PUT /settings`.
 
 ## API
 
