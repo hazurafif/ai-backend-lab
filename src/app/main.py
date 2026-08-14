@@ -10,6 +10,11 @@ Endpoints:
                                      supports HITL resume via `decision`/`decisions`)
   GET  /threads                   -> conversations for the current user (limit/offset)
   GET  /threads/{id}/messages     -> full message history of a thread
+  GET  /threads/{id}/usage        -> context + token usage of a thread (session):
+                                    message count/size, cumulative input/output/
+                                    total tokens from usage_metadata, current
+                                    context vs the model's window (utilization +
+                                    remaining), active-run flag
   PATCH /threads/{id}             -> rename a thread
   DELETE /threads/{id}            -> delete a thread
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run

@@ -93,6 +93,7 @@ curl -X POST http://127.0.0.1:8000/agent/connections \
 | `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`), incl. HITL resume. Optional `agent` field |
 | `GET /threads` | Bearer | Conversations of the current user (newest first, `limit`/`offset` pagination; each thread carries the `agent` it runs on) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |
+| `GET /threads/{id}/usage` | Bearer | **Context + usage of a thread**: message count/size, cumulative input/output/total tokens (from `usage_metadata`; `input` is billed input — history is counted per run, `output` is exact), current context = the last run's input tokens vs the model's context window (utilization %, remaining), `active_run` flag |
 | `PATCH /threads/{id}` | Bearer | Rename a thread |
 | `DELETE /threads/{id}` | Bearer | Delete a thread (state + history + metadata) |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
