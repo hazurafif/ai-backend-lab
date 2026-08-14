@@ -90,8 +90,12 @@ def build_backend(
     The default backend is a durable StoreBackend over the LangGraph store
     (Postgres in production), so every user's workspace persists across
     threads. With `EXECUTE_ENABLED=true` the default is LocalShellBackend
-    (host shell) instead. `/memories/` (per user) and `/skills/` (global) are
-    always routed to the durable store.
+    (host shell) instead. `/memories/` (per user), `/skills/` (global),
+    `/tmp/` (per user) and `/uploads/` (per user) are always routed to the
+    durable store — so even in execute mode, filesystem-middleware writes
+    under those paths persist to the database, not the host filesystem.
+    (Shell commands via the `execute` tool bypass backend routing and always
+    see the real host filesystem.)
 
     `agent_skill_routes` maps skills source paths (e.g. `/skills/alice/research/`)
     to store namespaces for named agents; longer prefixes win, so these
@@ -106,6 +110,10 @@ def build_backend(
     routes: dict[str, StoreBackend] = {
         "/memories/": user_store,
         "/skills/": StoreBackend(store=store, namespace=_global_namespace_factory),
+        # Scratch + uploads stay durable even when the default is the host
+        # shell: agent file-tool writes under these paths land in the store.
+        "/tmp/": user_store,
+        "/uploads/": user_store,
     }
     for source, ns in (agent_skill_routes or {}).items():
         routes[source] = StoreBackend(store=store, namespace=lambda rt, ns=ns: ns)

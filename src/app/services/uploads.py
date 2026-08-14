@@ -1,11 +1,16 @@
-"""User file uploads for chat: saved to disk, manipulated by the agent's tools.
+"""User file uploads for chat: saved to the store + disk, read by the agent.
 
 Files posted to /chat and /api/chat (multipart) land under
-``<UPLOADS_DIR>/<username>/`` — the agent's filesystem root is the server cwd
-when ``EXECUTE_ENABLED=true``, so the agent can read and manipulate them with
-its own tools (``read_file``, ``execute`` with e.g. ``pdftotext`` for PDFs)
-instead of the API trying to parse arbitrary formats. The endpoint appends the
-exact paths to the user message so the agent knows what it can work with.
+``<UPLOADS_DIR>/<username>/`` on the host (the agent's filesystem root when
+``EXECUTE_ENABLED=true``) **and** in the LangGraph store at the key the
+agent's file tools resolve for ``/uploads/<username>/<name>``. The dual write
+keeps both access paths working: file tools (``read_file``/``write_file``)
+are routed by the composite backend to the durable store (persists across
+threads, works in no-execute mode too), while the host copy stays available
+for the ``execute`` tool (shell commands bypass backend routing and always
+see the real filesystem, e.g. ``pdftotext uploads/alice/report.pdf``). The
+endpoint appends the exact paths to the user message so the agent knows what
+it can work with.
 
 File names are sanitized (basename only), files are size-capped, and
 oversized uploads are skipped with a note instead of failing the whole chat.
@@ -17,9 +22,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from deepagents.backends.store import StoreBackend
 from fastapi import UploadFile
 
 from ..core.config import settings
+from ..core.database import persistence
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._ -]")
 
@@ -43,8 +50,24 @@ def upload_dir(username: str) -> Path:
     return Path(settings.uploads_dir) / username
 
 
+def _persist_to_store(username: str, name: str, data: bytes) -> None:
+    """Mirror the upload into the shared store at the routed /uploads/ key.
+
+    The composite backend routes ``/uploads/`` to a per-user StoreBackend, so
+    the agent's file tools read ``/uploads/<username>/<name>`` as the store
+    key ``/<username>/<name>`` in the ``(username,)`` namespace — write it
+    there so reads resolve in both execute and no-execute mode. No-op when
+    the store is unavailable (e.g. persistence not started).
+    """
+    store = persistence.store
+    if store is None:
+        return
+    backend = StoreBackend(store=store, namespace=lambda _rt, u=username: (u,))
+    backend.upload_files([(f"/{username}/{name}", data)])
+
+
 async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
-    """Stream one upload to disk, size-capped.
+    """Stream one upload to the host disk and the store, size-capped.
 
     Returns metadata (``name``, ``path``, ``size``, ``content_type``) or
     ``{"error": ...}`` when the file was skipped (oversized). Colliding names
@@ -62,26 +85,25 @@ async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
             if not candidate.exists():
                 dest = candidate
                 break
-    size = 0
+    data = bytearray()
     try:
-        with dest.open("wb") as fh:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_bytes:
-                    dest.unlink(missing_ok=True)
-                    return {
-                        "error": f"{name} (skipped: exceeds {settings.max_upload_size_mb} MB cap)"
-                    }
-                fh.write(chunk)
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > max_bytes:
+                return {"error": f"{name} (skipped: exceeds {settings.max_upload_size_mb} MB cap)"}
     finally:
         await upload.close()
+    content = bytes(data)
+    with dest.open("wb") as fh:
+        fh.write(content)
+    _persist_to_store(username, dest.name, content)
     return {
         "name": dest.name,
         "path": agent_path(dest),
-        "size": size,
+        "size": len(content),
         "content_type": upload.content_type or "",
     }
 

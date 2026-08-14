@@ -198,6 +198,35 @@ async def test_skill_file_visible_to_backend(persistence):
     assert any(e == "done" for e, _ in events), events
 
 
+async def test_backend_routes_tmp_and_uploads_to_store(persistence, monkeypatch):
+    """/tmp/ and /uploads/ stay store-backed when execute mode is on.
+
+    With EXECUTE_ENABLED=true the default backend is the host shell, but
+    file-tool writes under these routes must still land in the durable store
+    (per user), not on the host filesystem.
+    """
+    import app.services.settings as runtime_settings
+
+    monkeypatch.setattr(runtime_settings, "execute_enabled", lambda: True)
+    monkeypatch.setattr(runtime_settings, "execute_inherit_env", lambda: False)
+    backend = build_backend(store=persistence.store)
+
+    for path, body in (
+        ("/tmp/scratch.txt", "scratch"),
+        ("/uploads/alice/report.txt", "uploaded"),
+    ):
+        result = await backend.awrite(path, body)
+        assert result.error is None, result.error
+        files = await backend.adownload_files([path])
+        assert files[0] is not None
+        assert files[0].content.decode() == body
+
+    # No leaks onto the real host filesystem.
+    from anyio import Path as AnyioPath
+
+    assert not await AnyioPath("/tmp/scratch.txt").exists()
+
+
 async def test_skill_bundled_files_crud(persistence):
     """Skills support the skill-creator layout: scripts/, references/, assets/..."""
     app = create_app(

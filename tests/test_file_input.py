@@ -145,6 +145,62 @@ async def test_save_upload_writes_file_and_dedupes(memory_persistence, tmp_path)
     assert (uploads_dir / "alice" / "report (1).pdf").exists()
 
 
+async def test_upload_mirrored_to_store(memory_persistence):
+    """Uploads are readable via the /uploads/ backend route (store-backed).
+
+    The composite backend routes /uploads/ to the durable store, so the
+    agent's file tools resolve the upload at /uploads/<username>/<name> in
+    both execute and no-execute modes.
+    """
+
+    class FakeUpload:
+        filename = "data.csv"
+        content_type = "text/csv"
+        _done = False
+
+        async def read(self, n: int) -> bytes:
+            if self._done:
+                return b""
+            self._done = True
+            return b"a,b\n1,2\n"
+
+        async def close(self) -> None:
+            pass
+
+    r = await uploads.save_upload("alice", FakeUpload())
+    assert "error" not in r
+
+    # The mirror write lands at the routed store key: /uploads/<user>/<name>
+    # -> key /<user>/<name> in the (user,) namespace, which is exactly what
+    # the agent's file tools resolve during a chat run (runtime context
+    # carries the user_id).
+    item = await memory_persistence.store.aget(("alice",), "/alice/data.csv")
+    assert item is not None
+    assert item.value["content"] == "a,b\n1,2\n"
+
+    # Oversized uploads never reach the store.
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(config.settings, "max_upload_size_mb", 0)
+
+    class BigUpload:
+        filename = "big.bin"
+        content_type = "application/octet-stream"
+
+        async def read(self, n: int) -> bytes:
+            return b"x" * n
+
+        async def close(self) -> None:
+            pass
+
+    try:
+        r = await uploads.save_upload("bob", BigUpload())
+    finally:
+        monkeypatch.undo()
+    assert "error" in r
+    item = await memory_persistence.store.aget(("bob",), "/bob/big.bin")
+    assert item is None
+
+
 async def test_upload_over_cap_is_skipped_with_note(memory_persistence, monkeypatch):
     monkeypatch.setattr(config.settings, "max_upload_size_mb", 0)  # anything > 0 bytes fails
 
