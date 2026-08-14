@@ -323,7 +323,20 @@ class AgentRegistry:
             return spec.model
         from langchain.chat_models import init_chat_model
 
-        return init_chat_model(spec.model, **kwargs)
+        model = init_chat_model(spec.model, **kwargs)
+        # Models without a langchain model profile (e.g. deepseek-v4-flash via
+        # the Console Go gateway) come back with profile=None, and deepagents'
+        # FilesystemMiddleware treats missing profile fields as "supported" —
+        # so read_file media blocks are forwarded to the provider, which 400s
+        # ("unknown variant `image_url`, expected `text`"). Declare the
+        # text-only capabilities the gateway actually supports so unsupported
+        # media is scrubbed to a placeholder note. Known vision models keep
+        # their declared capabilities (only missing fields are filled).
+        profile = dict(model.profile or {})
+        for field in ("image_inputs", "audio_inputs", "video_inputs", "pdf_inputs"):
+            profile.setdefault(field, False)
+        model.profile = profile
+        return model
 
     async def model_for(self, name: str, username: str) -> str | BaseChatModel:
         """The chat model of an agent config (spec resolution + model build).

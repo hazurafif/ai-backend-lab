@@ -203,6 +203,45 @@ async def test_resolve_model_thinking_with_connection(persistence):
     assert model.openai_api_key.get_secret_value() == API_KEY  # type: ignore[attr-defined]
 
 
+async def test_resolve_model_declares_text_only_profile(persistence):
+    """Unknown models get a text-only profile so deepagents scrubs media blocks.
+
+    deepseek-v4-flash via the Console Go gateway has no langchain model
+    profile (profile=None), and deepagents' FilesystemMiddleware treats
+    missing profile fields as "supported" — so read_file image blocks get
+    forwarded to the provider, which 400s ("unknown variant `image_url`,
+    expected `text`"). Declaring text-only capabilities makes the middleware
+    scrub unsupported media to a placeholder note instead. Known vision
+    models keep their declared capabilities.
+    """
+    await database.persistence.connections.create(
+        {
+            "name": "zen",
+            "kind": "llm",
+            "base_url": BASE_URL,
+            "api_token": API_KEY,
+            "extra": {},
+            "is_default": True,
+        }
+    )
+    await connections.refresh_resolved_connections()
+    registry = AgentRegistry(
+        checkpointer=persistence.checkpointer,
+        store=persistence.store,
+        backend=build_backend(store=persistence.store),
+    )
+
+    model = registry._resolve_model(_spec(None, model="openai:deepseek-v4-flash"))
+    assert isinstance(model, BaseChatModel)
+    assert model.profile is not None
+    for field in ("image_inputs", "audio_inputs", "video_inputs", "pdf_inputs"):
+        assert model.profile[field] is False
+
+    vision = registry._resolve_model(_spec(None, model="openai:gpt-4o"))
+    assert vision.profile is not None
+    assert vision.profile["image_inputs"] is True
+
+
 async def test_thinking_changes_fingerprint(persistence):
     """Different thinking levels produce different graph cache keys."""
     plain = _spec(None)
