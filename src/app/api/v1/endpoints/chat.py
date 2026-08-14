@@ -30,7 +30,7 @@ from ....services import agent_configs, ai_sdk_chat, session_stats
 from ....services import share as share_service
 from ....services.chat import _serialize_message, agent_stream, sse_response
 from ....services.searxng import set_search_enabled
-from ....services.title_generator import generate_title
+from ....services.title_generator import generate_followups, generate_title
 from ....services.uploads import file_notes, save_uploads
 from ....util.date import now_iso
 
@@ -400,13 +400,13 @@ async def thread_followup(
     body: FollowUpIn | None = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """Post-run follow-up for the frontend: auto-title the thread.
+    """Post-run follow-up for the frontend: auto-title + suggested questions.
 
     Call this after a chat run's `done` event. It generates an LLM title only
     when the thread has no title yet or it is still the raw first-message
-    truncation (`force: true` always regenerates); otherwise it returns the
-    existing title without spending tokens. Response: {thread_id, title,
-    generated}.
+    truncation (`force: true` always regenerates), and always generates up to
+    3 suggested follow-up questions the user can click to continue the
+    conversation. Response: {thread_id, title, generated, followups}.
     """
     force = bool(body.force) if body is not None else False
     username = current_user["username"]
@@ -414,13 +414,17 @@ async def thread_followup(
 
     current = value.get("title")
     needs_title = force or not current or current == _default_title(messages)
-    if not needs_title:
-        return FollowUpOut(thread_id=thread_id, title=current, generated=False)
+    if needs_title:
+        title = await generate_title(model, messages)
+        value["title"] = title
+        await _upsert_title(thread_id, username, value, agent_name)
+        generated = True
+    else:
+        title = current
+        generated = False
 
-    title = await generate_title(model, messages)
-    value["title"] = title
-    await _upsert_title(thread_id, username, value, agent_name)
-    return FollowUpOut(thread_id=thread_id, title=title, generated=True)
+    followups = await generate_followups(model, messages)
+    return FollowUpOut(thread_id=thread_id, title=title, generated=generated, followups=followups)
 
 
 @router.post("/threads/{thread_id}/share", response_model=ShareOut, status_code=201)

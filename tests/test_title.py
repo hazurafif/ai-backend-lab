@@ -33,15 +33,19 @@ pytestmark = pytest.mark.filterwarnings(
 
 
 class TitleModel(BaseChatModel):
-    """Scripted model: chat turns and title-generation calls get separate queues."""
+    """Scripted model: chat turns, title calls and followup calls get separate queues."""
 
     responses: list[AIMessage] = Field(default_factory=lambda: [AIMessage(content="ok")])
     title_responses: list[AIMessage] = Field(
         default_factory=lambda: [AIMessage(content="generated title")]
     )
+    followup_responses: list[AIMessage] = Field(
+        default_factory=lambda: [AIMessage(content="question one\nquestion two\nquestion three")]
+    )
     prompts: list[list[Any]] = Field(default_factory=list)
     _chat_idx: int = 0
     _title_idx: int = 0
+    _followup_idx: int = 0
     tools: Sequence[dict | type] = ()
 
     @property
@@ -56,14 +60,17 @@ class TitleModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         self.prompts.append(list(messages))
-        is_title = any(
-            getattr(m, "type", "") == "system" and "title generator" in str(m.content)
-            for m in messages
+        joined = " ".join(
+            str(getattr(m, "content", "")) for m in messages if getattr(m, "type", "") == "system"
         )
-        if is_title:
+        if "title generator" in joined:
             seq = self.title_responses
             i = min(self._title_idx, len(seq) - 1)
             self._title_idx += 1
+        elif "follow-up questions" in joined:
+            seq = self.followup_responses
+            i = min(self._followup_idx, len(seq) - 1)
+            self._followup_idx += 1
         else:
             seq = self.responses
             i = min(self._chat_idx, len(seq) - 1)
@@ -170,6 +177,29 @@ async def test_generate_title_uses_template():
     assert "user: conn refused" in system
 
 
+async def test_generate_followups_parses_output():
+    model = TitleModel(
+        followup_responses=[
+            AIMessage(content="1. how does it scale?\n- what about cost?\n3) any alternatives?")
+        ]
+    )
+    questions = await title_generator.generate_followups(
+        model, [HumanMessage(content="deploying fastapi")]
+    )
+    assert questions == ["how does it scale?", "what about cost?", "any alternatives?"]
+
+    # The followup prompt carries the conversation.
+    system = model.prompts[-1][0].content
+    assert "follow-up questions" in system
+    assert "user: deploying fastapi" in system
+
+
+async def test_generate_followups_empty_when_unavailable():
+    assert await title_generator.generate_followups("openai:gpt-4o-mini", []) == []
+    model = TitleModel(followup_responses=[AIMessage(content="")])
+    assert await title_generator.generate_followups(model, [HumanMessage(content="hi")]) == []
+
+
 # ---------------------------------------------------------------------------
 # endpoint
 # ---------------------------------------------------------------------------
@@ -254,7 +284,10 @@ async def test_followup_generates_when_title_is_default_truncation(memory_persis
         r = await client.post(f"/threads/{thread_id}/followup")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body == {"thread_id": thread_id, "title": "deploy fastapi", "generated": True}
+        assert body["thread_id"] == thread_id
+        assert body["title"] == "deploy fastapi"
+        assert body["generated"] is True
+        assert body["followups"] == ["question one", "question two", "question three"]
 
 
 async def test_followup_keeps_intentional_title_without_llm_call(memory_persistence):
@@ -273,11 +306,14 @@ async def test_followup_keeps_intentional_title_without_llm_call(memory_persiste
         assert r.json()["generated"] is True
         calls_after = len(model.prompts)
 
-        # Intentional title now -> no regeneration, no model call.
+        # Intentional title now -> no title regeneration (followups still run).
         r = await client.post(f"/threads/{thread_id}/followup")
         body = r.json()
-        assert body == {"thread_id": thread_id, "title": "deploy fastapi", "generated": False}
-        assert len(model.prompts) == calls_after, "LLM called despite an intentional title"
+        assert body["thread_id"] == thread_id
+        assert body["title"] == "deploy fastapi"
+        assert body["generated"] is False
+        assert body["followups"] == ["question one", "question two", "question three"]
+        assert len(model.prompts) == calls_after + 1, "only the followup prompt ran"
 
         # force: true regenerates.
         r = await client.post(f"/threads/{thread_id}/followup", json={"force": True})
@@ -294,11 +330,10 @@ async def test_followup_creates_metadata_and_404s(memory_persistence):
 
         # No metadata row -> generated (row created).
         r = await client.post(f"/threads/{thread_id}/followup")
-        assert r.json() == {
-            "thread_id": thread_id,
-            "title": "legacy thread",
-            "generated": True,
-        }
+        body = r.json()
+        assert body["thread_id"] == thread_id
+        assert body["title"] == "legacy thread"
+        assert body["generated"] is True
         assert (
             await database.persistence.store.aget(thread_metadata_ns("alice"), thread_id)
             is not None

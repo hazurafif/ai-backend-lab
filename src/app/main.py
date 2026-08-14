@@ -22,8 +22,9 @@ Endpoints:
                                     on the thread metadata (create or update)
   POST /threads/{id}/followup     -> post-run follow-up (frontend): auto-title the
                                     thread unless an intentional title exists
-                                    ({"force": true} regenerates); returns
-                                    {thread_id, title, generated}
+                                    ({"force": true} regenerates) + up to 3
+                                    suggested follow-up questions; returns
+                                    {thread_id, title, generated, followups}
   PATCH /threads/{id}             -> rename a thread
   DELETE /threads/{id}            -> delete a thread
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run

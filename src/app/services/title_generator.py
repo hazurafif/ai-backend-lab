@@ -36,6 +36,20 @@ Conversation:
 {conversation}
 """
 
+FOLLOWUP_SYSTEM_PROMPT = """\
+You are a helpful assistant suggesting follow-up questions for the user.
+Read the conversation and propose what the user would naturally ask next.
+
+Rules:
+- exactly 3 questions
+- short (at most 12 words each), diverse angles (deeper dive, alternatives,
+  practical next steps)
+- one per line: plain text, no numbering, no bullets, no quotes
+
+Conversation:
+{conversation}
+"""
+
 
 def _message_text(m: Any) -> str | None:
     """Plain-text content of a message (skips tool calls / reasoning)."""
@@ -124,3 +138,46 @@ async def generate_title(model: str | BaseChatModel, messages: list[Any]) -> str
         return clean_title(raw) or _fallback_title(messages)
     except Exception:
         return _fallback_title(messages)
+
+
+def _split_question_lines(raw: str) -> list[str]:
+    """Parse the model's line-per-question output into clean questions."""
+    questions: list[str] = []
+    for line in raw.splitlines():
+        line = re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", line).strip()
+        line = re.sub(r"^[\s\"'.]+|[\s\"'.]+$", "", line)
+        line = re.sub(r"\s+", " ", line)
+        if 3 <= len(line) <= 100 and not line.endswith(":"):
+            questions.append(line)
+    return questions[:3]
+
+
+async def generate_followups(model: str | BaseChatModel, messages: list[Any]) -> list[str]:
+    """Suggest up to 3 follow-up questions for the conversation ([] when unavailable)."""
+    if not isinstance(model, BaseChatModel):
+        return []
+    conversation = format_conversation(messages)
+    try:
+        response = await model.ainvoke(
+            [
+                SystemMessage(content=FOLLOWUP_SYSTEM_PROMPT.format(conversation=conversation)),
+                HumanMessage(content="Suggest follow-up questions for this conversation."),
+            ]
+        )
+        content = getattr(response, "content", None)
+        raw = (
+            content
+            if isinstance(content, str)
+            else (
+                "\n".join(
+                    b.get("text", "")
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+                if isinstance(content, list)
+                else ""
+            )
+        )
+        return _split_question_lines(raw)
+    except Exception:
+        return []

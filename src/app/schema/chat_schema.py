@@ -61,6 +61,13 @@ class FollowUpOut(BaseModel):
     generated: bool = Field(
         description="True when the LLM generated a new title, False when the existing one was kept."
     )
+    followups: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Suggested follow-up questions (up to 3) the user can click to continue "
+            "the conversation. Empty when generation is unavailable."
+        ),
+    )
 
 
 class ShareOut(BaseModel):
