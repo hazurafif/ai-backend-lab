@@ -108,6 +108,7 @@ from .services import settings as runtime_settings
 from .services.agent import AgentRegistry, build_backend, build_extra_tools
 from .services.connections import refresh_resolved_connections
 from .services.mcp import mcp_servers
+from .services.reasoning_bridge import install as install_reasoning_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,10 @@ def create_app(
     agent: CompiledStateGraph | None = None,
     agent_registry: AgentRegistry | None = None,
 ) -> FastAPI:
+    # Lift `reasoning_content` deltas (DeepSeek-style providers) into reasoning
+    # content blocks so thinking streams through ms.reasoning -> reasoning_delta.
+    install_reasoning_bridge()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await persistence.start()
