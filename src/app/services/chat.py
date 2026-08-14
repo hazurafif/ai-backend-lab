@@ -179,11 +179,20 @@ async def agent_stream(
             async for ms in run.messages:
                 counter += 1
                 ms_id = _field(ms, "message_id", "id", default=f"llm-{counter}")
-                try:
-                    async for delta in ms.text:
-                        await put("message_delta", {"id": ms_id, "delta": delta})
-                except Exception as exc:
-                    await put("error", {"source": "messages", "message": str(exc)})
+
+                async def pipe(projection, event: str, ms_id: str) -> None:
+                    try:
+                        async for delta in projection:
+                            await put(event, {"id": ms_id, "delta": delta})
+                    except Exception as exc:
+                        await put("error", {"source": "messages", "message": str(exc)})
+
+                # Text + reasoning (thinking) deltas stream concurrently; the
+                # finalized message event is emitted only after both finish.
+                await asyncio.gather(
+                    pipe(ms.text, "message_delta", ms_id),
+                    pipe(ms.reasoning, "reasoning_delta", ms_id),
+                )
                 try:
                     out_attr = ms.output  # awaitable property (async) / property (sync)
                     out = await out_attr() if callable(out_attr) else await out_attr

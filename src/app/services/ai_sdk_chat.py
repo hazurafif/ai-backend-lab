@@ -2,7 +2,8 @@
 
 The frontend (Vercel AI SDK ``useChat``) talks to backends over the
 "data stream protocol": an SSE stream whose ``data:`` lines carry typed JSON
-chunks (``start``, ``text-start``/``text-delta``/``text-end``, ``custom``,
+chunks (``start``, ``text-start``/``text-delta``/``text-end``,
+``reasoning-start``/``reasoning-delta``/``reasoning-end``, ``custom``,
 ``error``, ``finish``), terminated by ``data: [DONE]``.
 
 This module bridges that protocol to the agent's normalized SSE events
@@ -71,6 +72,7 @@ async def sdk_stream(
     """
     response_id = f"resp-{uuid.uuid4().hex[:12]}"
     started_text: set[str] = set()
+    started_reasoning: set[str] = set()
     emitted_error = False
     finished = False
     interrupt_seen = False
@@ -85,8 +87,16 @@ async def sdk_stream(
                 started_text.add(ms_id)
                 yield _chunk({"type": "text-start", "id": ms_id})
             yield _chunk({"type": "text-delta", "id": ms_id, "delta": data.get("delta", "")})
+        elif name == "reasoning_delta":
+            ms_id = data.get("id") or response_id
+            if ms_id not in started_reasoning:
+                started_reasoning.add(ms_id)
+                yield _chunk({"type": "reasoning-start", "id": ms_id})
+            yield _chunk({"type": "reasoning-delta", "id": ms_id, "delta": data.get("delta", "")})
         elif name == "message":
             ms_id = data.get("id") or response_id
+            if ms_id in started_reasoning:
+                yield _chunk({"type": "reasoning-end", "id": ms_id})
             if ms_id in started_text:
                 yield _chunk({"type": "text-end", "id": ms_id})
         elif name == "tool_start":

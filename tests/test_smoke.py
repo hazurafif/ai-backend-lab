@@ -111,6 +111,27 @@ def build_scripted_agent(checkpointer, store, *, interrupt_on: dict | None = Non
     )
 
 
+def build_reasoning_agent(checkpointer, store, *, reasoning: str, answer: str):
+    """Agent whose model emits a reasoning block followed by the answer text."""
+    model = Scripted(
+        responses=[
+            AIMessage(
+                content=[
+                    {"type": "reasoning", "reasoning": reasoning},
+                    {"type": "text", "text": answer},
+                ]
+            )
+        ]
+    )
+    return build_agent(
+        checkpointer=checkpointer,
+        store=store,
+        mcp_tools=[],
+        model=model,
+        system_prompt="test",
+    )
+
+
 def parse_sse_chunk(chunk: str) -> tuple[str, dict]:
     ev, _, rest = chunk.partition("\n")
     return ev.removeprefix("event: "), json.loads(rest.removeprefix("data: ").strip())
@@ -159,6 +180,42 @@ async def test_direct_streaming_pipeline(memory_persistence):
     tool_end = next(d for e, d in events if e == "tool_end")
     assert tool_end["name"] == "echo"
     assert tool_end["output"]["content"] == "echo:hello", tool_end
+
+
+async def test_reasoning_streaming_pipeline(memory_persistence):
+    """Thinking content is streamed live as reasoning_delta events."""
+    agent = build_reasoning_agent(
+        memory_persistence.checkpointer,
+        memory_persistence.store,
+        reasoning="Let me reason step by step: the answer is 42.",
+        answer="The answer is 42.",
+    )
+    events = await collect_stream(agent, "tester", message="think hard")
+
+    names = [e for e, _ in events]
+    assert "reasoning_delta" in names, "missing reasoning_delta events"
+    assert "message_delta" in names, "missing message_delta events"
+
+    # Reasoning text is delivered as deltas (single replay chunk here) and
+    # arrives before the finalized message event.
+    reasoning = "".join(d["delta"] for e, d in events if e == "reasoning_delta")
+    assert reasoning == "Let me reason step by step: the answer is 42."
+    text = "".join(d["delta"] for e, d in events if e == "message_delta")
+    assert text == "The answer is 42."
+    msg_idx = names.index("message")
+    assert names.index("reasoning_delta") < msg_idx
+
+    # The finalized message keeps the reasoning block (langchain schema).
+    msg = next(d for e, d in events if e == "message")
+    content = msg["message"]["content"]
+    assert content[0]["type"] == "reasoning"
+    assert content[0]["reasoning"] == "Let me reason step by step: the answer is 42."
+    assert content[1]["type"] == "text"
+
+    # The stored thread history preserves the reasoning block too.
+    done = [d for e, d in events if e == "done"]
+    stored = await memory_persistence.chat_history.list_messages(done[-1]["thread_id"])
+    assert stored and stored[-1]["content"][0]["type"] == "reasoning"
 
 
 async def test_interrupt_and_resume(memory_persistence):

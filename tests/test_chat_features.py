@@ -19,7 +19,14 @@ from langchain_core.messages import AIMessage, ToolCall
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
-from test_smoke import Scripted, build_scripted_agent, echo, parse_sdk_data_lines, parse_sse_chunk
+from test_smoke import (
+    Scripted,
+    build_reasoning_agent,
+    build_scripted_agent,
+    echo,
+    parse_sdk_data_lines,
+    parse_sse_chunk,
+)
 
 from app.core import config
 from app.core.database import persistence
@@ -171,6 +178,46 @@ async def test_ai_sdk_resume_via_decision(memory_persistence):
                 "/api/chat", json={"decision": {"type": "approve"}, "messages": []}
             )
             assert r.status_code == 422, r.text
+
+
+async def test_ai_sdk_reasoning_chunks(memory_persistence):
+    """Thinking content surfaces as reasoning-start/delta/end data-stream chunks."""
+    agent = build_reasoning_agent(
+        memory_persistence.checkpointer,
+        memory_persistence.store,
+        reasoning="internal deliberation...",
+        answer="Final text.",
+    )
+    app = create_app(agent=agent)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        r = await client.post(
+            "/api/chat",
+            json={
+                "id": "chat-reasoning",
+                "messages": [
+                    {"id": "m1", "role": "user", "parts": [{"type": "text", "text": "think"}]}
+                ],
+            },
+        )
+        assert r.status_code == 200, r.text
+        chunks = parse_sdk_data_lines(r.text)
+
+        reasoning = [c for c in chunks if c.get("type") == "reasoning-delta"]
+        assert reasoning, "missing reasoning-delta chunks"
+        assert "".join(c["delta"] for c in reasoning) == "internal deliberation..."
+
+        # Bracketed by reasoning-start/end with a stable id.
+        starts = [c for c in chunks if c.get("type") == "reasoning-start"]
+        ends = [c for c in chunks if c.get("type") == "reasoning-end"]
+        assert starts and ends
+        assert starts[0]["id"] == ends[0]["id"]
+
+        # Text still streams normally alongside reasoning.
+        text = [c for c in chunks if c.get("type") == "text-delta"]
+        assert "".join(c["delta"] for c in text) == "Final text."
 
 
 # ---------------------------------------------------------------------------
