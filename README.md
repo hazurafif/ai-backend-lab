@@ -475,21 +475,21 @@ chat; the tool only ever sees the current user's KBs (the run context carries
 export AUTH="Authorization: Bearer $(curl -s -X POST http://127.0.0.1:8000/login -d 'username=admin&password=admin' | jq -r .access_token)"
 
 # create a KB + upload a folder (file + relative path pairs)
-KB=$(curl -s -X POST http://127.0.0.1:8000/kb -H "$AUTH" -H 'Content-Type: application/json' \
+KB=$(curl -s -X POST http://127.0.0.1:8000/knowledge -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"name":"runbook","description":"Ops docs"}' | jq -r .id)
-curl -X POST "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH" \
+curl -X POST "http://127.0.0.1:8000/knowledge/$KB/files" -H "$AUTH" \
   -F "file=@guides/deploy.md;type=text/markdown" -F "paths=guides/deploy.md" \
   -F "file=@guides/backup.md;type=text/markdown" -F "paths=guides/backup.md"
 
 # ...or one zip for a whole folder tree
-curl -X POST "http://127.0.0.1:8000/kb/$KB/zip" -H "$AUTH" -F "file=@docs.zip"
+curl -X POST "http://127.0.0.1:8000/knowledge/$KB/zip" -H "$AUTH" -F "file=@docs.zip"
 
-curl "http://127.0.0.1:8000/kb/$KB/files" -H "$AUTH"                       # status per file
-curl "http://127.0.0.1:8000/kb/$KB/search?q=kubectl%20deployment" -H "$AUTH"  # hybrid search
-curl "http://127.0.0.1:8000/kb/search?q=deployment" -H "$AUTH"             # search all my KBs
-curl -o deploy.md "http://127.0.0.1:8000/kb/$KB/files/<doc_id>/content" -H "$AUTH"  # raw file
-curl -X POST "http://127.0.0.1:8000/kb/$KB/reindex" -H "$AUTH"             # re-embed everything
-curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # delete KB + vectors
+curl "http://127.0.0.1:8000/knowledge/$KB/files" -H "$AUTH"                       # status per file
+curl "http://127.0.0.1:8000/knowledge/$KB/search?q=kubectl%20deployment" -H "$AUTH"  # hybrid search
+curl "http://127.0.0.1:8000/knowledge/search?q=deployment" -H "$AUTH"             # search all my KBs
+curl -o deploy.md "http://127.0.0.1:8000/knowledge/$KB/files/<doc_id>/content" -H "$AUTH"  # raw file
+curl -X POST "http://127.0.0.1:8000/knowledge/$KB/reindex" -H "$AUTH"             # re-embed everything
+curl -X DELETE "http://127.0.0.1:8000/knowledge/$KB" -H "$AUTH"                   # delete KB + vectors
 ```
 
 - Supported extensions: `.md .txt .pdf .docx .csv .html .json` + common code
@@ -506,7 +506,7 @@ curl -X DELETE "http://127.0.0.1:8000/kb/$KB" -H "$AUTH"                   # del
   `KB_BM25_PROPERTY_WEIGHTS` (default `{"path": 2.0}`) boosts titles/paths in
   the BM25F stage. Embedding dimensions via `EMBEDDINGS_DIMENSIONS`
   (Matryoshka truncation); switching embedding models requires a
-  `POST /kb/{id}/reindex`.
+  `POST /knowledge/{id}/reindex`.
 - Reranking (retrieve broad → rerank fine): set `KB_RERANK_MODEL` to a
   flashrank model name (e.g. `ms-marco-MiniLM-L-12-v2`, a tiny CPU
   cross-encoder, ~30ms for 20 candidates; model downloads on first use).

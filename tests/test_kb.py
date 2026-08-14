@@ -145,43 +145,52 @@ async def test_kb_crud_and_isolation(kb_env):
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
         # create
-        r = await http.post("/kb", json={"name": "Engineering Docs", "description": "Runbook"})
+        r = await http.post(
+            "/knowledge", json={"name": "Engineering Docs", "description": "Runbook"}
+        )
         assert r.status_code == 201, r.text
         kb = r.json()
         assert kb["name"] == "Engineering Docs"
         assert kb["document_count"] == 0
 
+        # legacy /kb alias answers identically
+        r_alias = await http.post("/kb", json={"name": "Alias KB"})
+        assert r_alias.status_code == 201, r_alias.text
+        r_alias_get = await http.get(f"/kb/{r_alias.json()['id']}")
+        assert r_alias_get.status_code == 200, r_alias_get.text
+
         # duplicate name -> 409
-        r = await http.post("/kb", json={"name": "Engineering Docs"})
+        r = await http.post("/knowledge", json={"name": "Engineering Docs"})
         assert r.status_code == 409, r.text
 
         # invalid name -> 422
-        r = await http.post("/kb", json={"name": "../evil"})
+        r = await http.post("/knowledge", json={"name": "../evil"})
         assert r.status_code == 422, r.text
 
-        # list + get
-        r = await http.get("/kb")
-        assert r.status_code == 200 and [k["id"] for k in r.json()] == [kb["id"]]
-        r = await http.get(f"/kb/{kb['id']}")
+        # list + get (both the /knowledge and legacy /kb KBs appear)
+        r = await http.get("/knowledge")
+        ids = [k["id"] for k in r.json()]
+        assert r.status_code == 200 and kb["id"] in ids and r_alias.json()["id"] in ids
+        r = await http.get(f"/knowledge/{kb['id']}")
         assert r.status_code == 200 and r.json()["name"] == "Engineering Docs"
 
         # patch
-        r = await http.patch(f"/kb/{kb['id']}", json={"name": "Docs", "description": None})
+        r = await http.patch(f"/knowledge/{kb['id']}", json={"name": "Docs", "description": None})
         assert r.status_code == 200 and r.json()["name"] == "Docs"
 
         # isolation: another user sees nothing and cannot touch it
         async with await _client_for(app, username="other") as other:
-            r = await other.get("/kb")
+            r = await other.get("/knowledge")
             assert r.status_code == 200 and r.json() == []
-            r = await other.get(f"/kb/{kb['id']}")
+            r = await other.get(f"/knowledge/{kb['id']}")
             assert r.status_code == 404, r.text
-            r = await other.delete(f"/kb/{kb['id']}")
+            r = await other.delete(f"/knowledge/{kb['id']}")
             assert r.status_code == 404, r.text
 
         # delete
-        r = await http.delete(f"/kb/{kb['id']}")
+        r = await http.delete(f"/knowledge/{kb['id']}")
         assert r.status_code == 204
-        r = await http.get(f"/kb/{kb['id']}")
+        r = await http.get(f"/knowledge/{kb['id']}")
         assert r.status_code == 404
 
 
@@ -200,7 +209,7 @@ async def test_upload_folder_and_search(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "runbook"})).json()
+        kb = (await http.post("/knowledge", json={"name": "runbook"})).json()
         kb_id = kb["id"]
 
         # folder upload: two files with relative paths + a markdown with headers
@@ -216,7 +225,7 @@ async def test_upload_folder_and_search(kb_env):
             ("files", ("guides/backup.md", b"Backups run every night to S3.", "text/markdown")),
         ]
         paths = {"paths": ["guides/deploy.md", "guides/backup.md"]}
-        r = await http.post(f"/kb/{kb_id}/files", files=files, data=paths)
+        r = await http.post(f"/knowledge/{kb_id}/files", files=files, data=paths)
         assert r.status_code == 200, r.text
         body = r.json()
         assert all(res["ok"] for res in body["results"]), body
@@ -226,7 +235,7 @@ async def test_upload_folder_and_search(kb_env):
         }
 
         # documents listed with status ready
-        r = await http.get(f"/kb/{kb_id}/files")
+        r = await http.get(f"/knowledge/{kb_id}/files")
         docs = r.json()
         assert len(docs) == 2
         assert {d["path"] for d in docs} == {"guides/deploy.md", "guides/backup.md"}
@@ -234,12 +243,14 @@ async def test_upload_folder_and_search(kb_env):
         assert all(d["chunk_count"] >= 1 for d in docs)
 
         # KB stats reflect documents + chunks
-        r = await http.get(f"/kb/{kb_id}")
+        r = await http.get(f"/knowledge/{kb_id}")
         assert r.json()["document_count"] == 2
         assert r.json()["chunk_count"] >= 2
 
         # hybrid search finds the deployment passage
-        r = await http.get(f"/kb/{kb_id}/search", params={"q": "kubectl deployment", "limit": 5})
+        r = await http.get(
+            f"/knowledge/{kb_id}/search", params={"q": "kubectl deployment", "limit": 5}
+        )
         assert r.status_code == 200, r.text
         hits = r.json()["hits"]
         assert hits, "expected search hits"
@@ -248,7 +259,7 @@ async def test_upload_folder_and_search(kb_env):
 
         # duplicate path -> per-file error result
         r = await http.post(
-            f"/kb/{kb_id}/files",
+            f"/knowledge/{kb_id}/files",
             files=[("files", ("guides/deploy.md", b"dup", "text/markdown"))],
             data={"paths": "guides/deploy.md"},
         )
@@ -266,11 +277,11 @@ async def test_upload_validation(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "v"})).json()
+        kb = (await http.post("/knowledge", json={"name": "v"})).json()
 
         # unsupported extension
         r = await http.post(
-            f"/kb/{kb['id']}/files",
+            f"/knowledge/{kb['id']}/files",
             files=[("files", ("evil.exe", b"MZ", "application/octet-stream"))],
         )
         body = r.json()
@@ -279,7 +290,7 @@ async def test_upload_validation(kb_env):
 
         # path traversal rejected
         r = await http.post(
-            f"/kb/{kb['id']}/files",
+            f"/knowledge/{kb['id']}/files",
             files=[("files", ("x.md", b"# hi", "text/markdown"))],
             data={"paths": "../../etc/passwd"},
         )
@@ -290,7 +301,7 @@ async def test_upload_validation(kb_env):
         config.settings.kb_max_file_size_mb = 0
         try:
             r = await http.post(
-                f"/kb/{kb['id']}/files",
+                f"/knowledge/{kb['id']}/files",
                 files=[("files", ("big.md", b"x" * 100, "text/markdown"))],
             )
         finally:
@@ -301,13 +312,13 @@ async def test_upload_validation(kb_env):
 
         # unparseable content -> document stored with status failed
         r = await http.post(
-            f"/kb/{kb['id']}/files",
+            f"/knowledge/{kb['id']}/files",
             files=[("files", ("broken.md", b"   \n \n  ", "text/markdown"))],
         )
         body = r.json()
         assert r.status_code == 200 and body["results"][0]["ok"] is False
         assert "No extractable text" in body["results"][0]["error"]
-        docs = (await http.get(f"/kb/{kb['id']}/files")).json()
+        docs = (await http.get(f"/knowledge/{kb['id']}/files")).json()
         failed = next(d for d in docs if d["path"] == "broken.md")
         assert failed["status"] == "failed" and failed["error"]
 
@@ -322,10 +333,10 @@ async def test_delete_cleans_vectors_and_reindex(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "kb"})).json()
+        kb = (await http.post("/knowledge", json={"name": "kb"})).json()
         kb_id = kb["id"]
         r = await http.post(
-            f"/kb/{kb_id}/files",
+            f"/knowledge/{kb_id}/files",
             files=[
                 (
                     "files",
@@ -335,29 +346,29 @@ async def test_delete_cleans_vectors_and_reindex(kb_env):
         )
         doc_id = r.json()["results"][0]["doc_id"]
 
-        r = await http.get(f"/kb/{kb_id}/search", params={"q": "alpha"})
+        r = await http.get(f"/knowledge/{kb_id}/search", params={"q": "alpha"})
         assert r.json()["hits"], "expected a hit before deletion"
 
         # delete the document -> vectors gone
-        r = await http.delete(f"/kb/{kb_id}/files/{doc_id}")
+        r = await http.delete(f"/knowledge/{kb_id}/files/{doc_id}")
         assert r.status_code == 204
-        r = await http.get(f"/kb/{kb_id}/search", params={"q": "alpha"})
+        r = await http.get(f"/knowledge/{kb_id}/search", params={"q": "alpha"})
         assert r.json()["hits"] == []
 
         # reindex a second document
         r = await http.post(
-            f"/kb/{kb_id}/files",
+            f"/knowledge/{kb_id}/files",
             files=[
                 ("files", ("b.md", b"# Beta\n\nBeta content about beta things.", "text/markdown"))
             ],
         )
-        r = await http.post(f"/kb/{kb_id}/reindex")
+        r = await http.post(f"/knowledge/{kb_id}/reindex")
         assert r.status_code == 200 and r.json()["processed"] == 1, r.text
-        r = await http.get(f"/kb/{kb_id}/search", params={"q": "beta"})
+        r = await http.get(f"/knowledge/{kb_id}/search", params={"q": "beta"})
         assert r.json()["hits"], "expected a hit after reindex"
 
         # deleting the KB also cleans the vector store
-        r = await http.delete(f"/kb/{kb_id}")
+        r = await http.delete(f"/knowledge/{kb_id}")
         assert r.status_code == 204
         assert kb_env._chunks == []
 
@@ -373,10 +384,10 @@ async def test_search_requires_vector_store(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "x"})).json()
+        kb = (await http.post("/knowledge", json={"name": "x"})).json()
         reset_vector_store()  # simulate WEAVIATE_URL unset
         try:
-            r = await http.get(f"/kb/{kb['id']}/search", params={"q": "anything"})
+            r = await http.get(f"/knowledge/{kb['id']}/search", params={"q": "anything"})
         finally:
             set_vector_store(kb_env)
         assert r.status_code == 503, r.text
@@ -405,7 +416,7 @@ async def test_zip_upload(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "zipped"})).json()
+        kb = (await http.post("/knowledge", json={"name": "zipped"})).json()
         archive = _zip_bytes(
             [
                 ("docs/intro.md", b"# Intro\n\nIntro about the zipped docs."),
@@ -413,7 +424,7 @@ async def test_zip_upload(kb_env):
             ]
         )
         r = await http.post(
-            f"/kb/{kb['id']}/zip",
+            f"/knowledge/{kb['id']}/zip",
             files=[("file", ("docs.zip", archive, "application/zip"))],
         )
         assert r.status_code == 200, r.text
@@ -424,10 +435,10 @@ async def test_zip_upload(kb_env):
             "docs/notes.txt",
         }
 
-        docs = (await http.get(f"/kb/{kb['id']}/files")).json()
+        docs = (await http.get(f"/knowledge/{kb['id']}/files")).json()
         assert {d["path"] for d in docs} == {"docs/intro.md", "docs/notes.txt"}
         assert all(d["status"] == "ready" for d in docs)
-        r = await http.get(f"/kb/{kb['id']}/search", params={"q": "packaging"})
+        r = await http.get(f"/knowledge/{kb['id']}/search", params={"q": "packaging"})
         assert r.json()["hits"][0]["path"] == "docs/notes.txt"
 
 
@@ -441,11 +452,11 @@ async def test_zip_upload_guards(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "guarded"})).json()
+        kb = (await http.post("/knowledge", json={"name": "guarded"})).json()
 
         # path traversal entry aborts the whole archive
         r = await http.post(
-            f"/kb/{kb['id']}/zip",
+            f"/knowledge/{kb['id']}/zip",
             files=[("file", ("evil.zip", _zip_bytes([("../evil.md", b"# x")]), "application/zip"))],
         )
         body = r.json()
@@ -454,7 +465,7 @@ async def test_zip_upload_guards(kb_env):
 
         # not a zip
         r = await http.post(
-            f"/kb/{kb['id']}/zip",
+            f"/knowledge/{kb['id']}/zip",
             files=[("file", ("fake.zip", b"not a zip at all", "application/zip"))],
         )
         assert "Not a valid zip" in r.json()["results"][0]["error"]
@@ -464,7 +475,7 @@ async def test_zip_upload_guards(kb_env):
         config.settings.kb_zip_max_total_mb = 0
         try:
             r = await http.post(
-                f"/kb/{kb['id']}/zip",
+                f"/knowledge/{kb['id']}/zip",
                 files=[("file", ("big.zip", _zip_bytes([("a.md", b"# hi")]), "application/zip"))],
             )
         finally:
@@ -473,7 +484,7 @@ async def test_zip_upload_guards(kb_env):
 
         # per-entry extension check (soft: other entries still processed)
         r = await http.post(
-            f"/kb/{kb['id']}/zip",
+            f"/knowledge/{kb['id']}/zip",
             files=[
                 (
                     "file",
@@ -491,7 +502,7 @@ async def test_zip_upload_guards(kb_env):
         assert "Unsupported file type" in results["bad.exe"]["error"]
 
         # nothing was stored from the rejected archives
-        docs = (await http.get(f"/kb/{kb['id']}/files")).json()
+        docs = (await http.get(f"/knowledge/{kb['id']}/files")).json()
         assert {d["path"] for d in docs} == {"ok.md"}
 
 
@@ -505,15 +516,15 @@ async def test_download_document_content(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "dl"})).json()
+        kb = (await http.post("/knowledge", json={"name": "dl"})).json()
         payload = b"# Hello\n\nDownload me."
         r = await http.post(
-            f"/kb/{kb['id']}/files",
+            f"/knowledge/{kb['id']}/files",
             files=[("files", ("hello.md", payload, "text/markdown"))],
         )
         doc_id = r.json()["results"][0]["doc_id"]
 
-        r = await http.get(f"/kb/{kb['id']}/files/{doc_id}/content")
+        r = await http.get(f"/knowledge/{kb['id']}/files/{doc_id}/content")
         assert r.status_code == 200
         assert r.content == payload
         assert r.headers["content-type"].startswith("text/markdown")
@@ -522,7 +533,7 @@ async def test_download_document_content(kb_env):
 
         # owner isolation
         async with await _client_for(app, username="other") as other:
-            r = await other.get(f"/kb/{kb['id']}/files/{doc_id}/content")
+            r = await other.get(f"/knowledge/{kb['id']}/files/{doc_id}/content")
             assert r.status_code == 404
 
 
@@ -536,23 +547,23 @@ async def test_quota_enforced(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb = (await http.post("/kb", json={"name": "quota"})).json()
+        kb = (await http.post("/knowledge", json={"name": "quota"})).json()
         old = config.settings.kb_quota_mb
         config.settings.kb_quota_mb = 0  # no free space at all
         try:
             r = await http.post(
-                f"/kb/{kb['id']}/files",
+                f"/knowledge/{kb['id']}/files",
                 files=[("files", ("a.md", b"# hi", "text/markdown"))],
             )
             r2 = await http.post(
-                f"/kb/{kb['id']}/zip",
+                f"/knowledge/{kb['id']}/zip",
                 files=[("file", ("a.zip", _zip_bytes([("b.md", b"# yo")]), "application/zip"))],
             )
         finally:
             config.settings.kb_quota_mb = old
         assert r.json()["results"][0]["error"] == "Storage quota exceeded"
         assert r2.json()["results"][0]["error"] == "Storage quota exceeded"
-        assert (await http.get(f"/kb/{kb['id']}/files")).json() == []
+        assert (await http.get(f"/knowledge/{kb['id']}/files")).json() == []
 
 
 async def test_global_search_across_kbs(kb_env):
@@ -565,17 +576,17 @@ async def test_global_search_across_kbs(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _client_for(app) as http:
-        kb1 = (await http.post("/kb", json={"name": "one"})).json()
-        kb2 = (await http.post("/kb", json={"name": "two"})).json()
+        kb1 = (await http.post("/knowledge", json={"name": "one"})).json()
+        kb2 = (await http.post("/knowledge", json={"name": "two"})).json()
         await http.post(
-            f"/kb/{kb1['id']}/files",
+            f"/knowledge/{kb1['id']}/files",
             files=[("files", ("a.md", b"# Alpha\n\nAlpha documentation.", "text/markdown"))],
         )
         await http.post(
-            f"/kb/{kb2['id']}/files",
+            f"/knowledge/{kb2['id']}/files",
             files=[("files", ("b.md", b"# Beta\n\nBeta documentation.", "text/markdown"))],
         )
-        r = await http.get("/kb/search", params={"q": "documentation", "limit": 10})
+        r = await http.get("/knowledge/search", params={"q": "documentation", "limit": 10})
         assert r.status_code == 200, r.text
         paths = {hit["path"] for hit in r.json()["hits"]}
         assert paths == {"a.md", "b.md"}, paths
@@ -711,9 +722,9 @@ async def test_search_alpha_param(kb_env):
         )
     )
     async with app.router.lifespan_context(app), await _api_client(app) as http:
-        kb = (await http.post("/kb", json={"name": "alpha-test"})).json()
+        kb = (await http.post("/knowledge", json={"name": "alpha-test"})).json()
         await http.post(
-            f"/kb/{kb['id']}/files",
+            f"/knowledge/{kb['id']}/files",
             files=[
                 (
                     "files",
@@ -723,14 +734,18 @@ async def test_search_alpha_param(kb_env):
         )
         # alpha=0 -> keyword-only; alpha=1 -> vector-only; both must still work
         for alpha in (0.0, 1.0):
-            r = await http.get(f"/kb/{kb['id']}/search", params={"q": "deployment", "alpha": alpha})
+            r = await http.get(
+                f"/knowledge/{kb['id']}/search", params={"q": "deployment", "alpha": alpha}
+            )
             assert r.status_code == 200, r.text
             assert r.json()["hits"], f"expected hits at alpha={alpha}"
         # out-of-range alpha rejected
-        r = await http.get(f"/kb/{kb['id']}/search", params={"q": "deployment", "alpha": 1.5})
+        r = await http.get(
+            f"/knowledge/{kb['id']}/search", params={"q": "deployment", "alpha": 1.5}
+        )
         assert r.status_code == 422
         # global search also accepts alpha
-        r = await http.get("/kb/search", params={"q": "deployment", "alpha": 0.5})
+        r = await http.get("/knowledge/search", params={"q": "deployment", "alpha": 0.5})
         assert r.status_code == 200 and r.json()["hits"]
 
 

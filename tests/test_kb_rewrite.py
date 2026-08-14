@@ -198,7 +198,7 @@ async def test_search_endpoints_rewrite(rewrite_env):
         )
     )
     async with app.router.lifespan_context(app), await _client(app) as http:
-        kb = (await http.post("/kb", json={"name": "rw"})).json()
+        kb = (await http.post("/knowledge", json={"name": "rw"})).json()
         for path, chunk in (
             ("x.md", "backups run nightly to s3"),
             ("deploy.md", "kubectl deployment rollout"),
@@ -206,14 +206,14 @@ async def test_search_endpoints_rewrite(rewrite_env):
             store.upsert(kb_id=kb["id"], doc_id=path, owner="tester", path=path, chunks=[chunk])
 
         # per-KB search rewrites; the response keeps the original query
-        r = await http.get(f"/kb/{kb['id']}/search", params={"q": "zzz", "limit": 1})
+        r = await http.get(f"/knowledge/{kb['id']}/search", params={"q": "zzz", "limit": 1})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["query"] == "zzz"
         assert [h["path"] for h in body["hits"]] == ["deploy.md"]
 
         # global search rewrites too
-        r = await http.get("/kb/search", params={"q": "zzz", "limit": 1})
+        r = await http.get("/knowledge/search", params={"q": "zzz", "limit": 1})
         assert r.status_code == 200
         assert [h["path"] for h in r.json()["hits"]] == ["deploy.md"]
         assert fake.calls >= 2

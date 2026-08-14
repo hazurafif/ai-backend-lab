@@ -158,6 +158,11 @@ async def test_thread_usage_report(persistence):
         assert r.status_code == 200, r.text
         body = r.json()
 
+        # The AI SDK alias path (/api/chat/threads/...) returns the same payload.
+        r_alias = await client.get("/api/chat/threads/t1/usage")
+        assert r_alias.status_code == 200, r_alias.text
+        assert r_alias.json() == body
+
         # the thread's agent + its model resolve from the agent config
         assert body["thread_id"] == "t1"
         assert body["agent"] == "research"

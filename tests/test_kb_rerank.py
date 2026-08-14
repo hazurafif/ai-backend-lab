@@ -204,7 +204,7 @@ async def test_search_endpoints_rerank(rerank_env):
         )
     )
     async with app.router.lifespan_context(app), await _client(app) as http:
-        kb = (await http.post("/kb", json={"name": "rr"})).json()
+        kb = (await http.post("/knowledge", json={"name": "rr"})).json()
         # seed the vector store under the API-created KB id
         for path, chunk in (
             ("a.md", "kubectl deployment rollout"),
@@ -213,11 +213,11 @@ async def test_search_endpoints_rerank(rerank_env):
         ):
             store.upsert(kb_id=kb["id"], doc_id=path, owner="tester", path=path, chunks=[chunk])
         # per-KB search reranks
-        r = await http.get(f"/kb/{kb['id']}/search", params={"q": "deployment", "limit": 2})
+        r = await http.get(f"/knowledge/{kb['id']}/search", params={"q": "deployment", "limit": 2})
         assert r.status_code == 200, r.text
         assert [h["path"] for h in r.json()["hits"]] == ["preferred.md", "a.md"]
         # global search reranks too
-        r = await http.get("/kb/search", params={"q": "deployment", "limit": 1})
+        r = await http.get("/knowledge/search", params={"q": "deployment", "limit": 1})
         assert r.status_code == 200
         assert [h["path"] for h in r.json()["hits"]] == ["preferred.md"]
         assert fake.calls >= 2

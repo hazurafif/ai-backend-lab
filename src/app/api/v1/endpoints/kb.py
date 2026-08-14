@@ -37,7 +37,7 @@ from ....services.kb.rewrite import get_rewriter
 from ....services.kb.vectorstore import KbUnavailableError, KbVectorStore, get_vector_store
 from ....services.kb.zip_upload import ZipValidationError, extract_zip_entries
 
-router = APIRouter(prefix="/kb", tags=["knowledge base"])
+router = APIRouter(tags=["knowledge base"])
 
 
 def _vector_store_or_503() -> KbVectorStore:

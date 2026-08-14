@@ -528,6 +528,7 @@ async def _thread_history(request: Request, thread_id: str) -> list[dict]:
 
 
 @router.get("/threads/{thread_id}/usage", response_model=ThreadUsageOut)
+@router.get("/api/chat/threads/{thread_id}/usage", response_model=ThreadUsageOut)
 async def thread_usage(
     request: Request,
     thread_id: str,

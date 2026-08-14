@@ -54,22 +54,23 @@ Endpoints:
                                     xhigh..max); scope=global requires admin)
   GET|PUT|DELETE /agents/{name}   -> read / replace / delete an agent config
   POST /agents/{name}/test        -> dry-run: build the graph (validates model)
-  POST /kb                         -> create a knowledge base (per-user)
-  GET  /kb                         -> list the user's knowledge bases
-  GET|PATCH|DELETE /kb/{id}        -> detail / rename / delete a KB (vectors too)
-  POST /kb/{id}/files              -> multipart upload (file + relative path per
+  POST /knowledge                -> create a knowledge base (per-user)
+  GET  /knowledge                -> list the user's knowledge bases
+  GET|PATCH|DELETE /knowledge/{id}-> detail / rename / delete a KB (vectors too)
+  POST /knowledge/{id}/files     -> multipart upload (file + relative path per
                                     file; folder upload = many pairs). Each file
                                     is ingested: parse -> chunk -> embed -> Weaviate
-  POST /kb/{id}/zip                -> upload a .zip of documents (safe extraction:
+  POST /knowledge/{id}/zip       -> upload a .zip of documents (safe extraction:
                                     traversal + zip-bomb guards, per-entry results)
-  GET  /kb/{id}/files              -> documents with ingest status
-  GET|DELETE /kb/{id}/files/{doc}  -> document detail / delete (vectors too)
-  GET  /kb/{id}/files/{doc}/content-> raw file bytes (inline preview)
-  POST /kb/{id}/reindex            -> re-parse + re-embed all documents
-  GET  /kb/{id}/search             -> hybrid (vector + keyword) search over a KB
+  GET  /knowledge/{id}/files     -> documents with ingest status
+  GET|DELETE /knowledge/{id}/files/{doc}-> document detail / delete (vectors too)
+  GET  /knowledge/{id}/files/{doc}/content-> raw file bytes (inline preview)
+  POST /knowledge/{id}/reindex   -> re-parse + re-embed all documents
+  GET  /knowledge/{id}/search    -> hybrid (vector + keyword) search over a KB
                                     (optional ?alpha= 0..1 per request)
-  GET  /kb/search                  -> hybrid search across all the user's KBs
+  GET  /knowledge/search         -> hybrid search across all the user's KBs
                                     (optional ?alpha= 0..1 per request)
+                                    (the legacy /kb/* paths still answer too)
   POST /mcp/tools/call             -> prefab app tools proxy: invoke a tool on a
                                     configured MCP server (server_hint or fan-out;
                                     CallToolResult passthrough: 200 with isError,
