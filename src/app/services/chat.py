@@ -1,8 +1,9 @@
 """Chat service: runs the agent and normalizes the v3 stream to SSE events.
 
-`agent_stream` is the single entry point used by the `/chat` and `/api/chat`
-routers (and the AI SDK bridge). The SSE event contract below is normative —
-keep it in sync with the frontend consumers.
+`agent_stream` starts a background run (decoupled from the HTTP stream) and
+returns a live SSE subscription to it; it is the single entry point used by
+the `/chat` and `/api/chat` routers (and the AI SDK bridge). The SSE event
+contract below is normative — keep it in sync with the frontend consumers.
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ from langgraph.types import Command
 
 from ..core.constants import SSE_HEADERS, thread_metadata_ns
 from ..core.database import persistence
+from ..core.exceptions import Conflict
+from ..core.notification_hub import hub
+from ..core.run_manager import ActiveRun, run_manager
 from ..core.run_registry import runs
 from ..util.date import now_iso
 
@@ -94,10 +98,21 @@ def _sse(event: str, data: dict) -> str:
 
 
 async def _record_thread_metadata(
-    thread_id: str, username: str, message: str | None, agent_name: str = "default"
-) -> None:
-    """Upsert thread metadata in the store: title on first message, `updated_at` on every run."""
+    thread_id: str,
+    username: str,
+    message: str | None,
+    agent_name: str = "default",
+    *,
+    status: str = "running",
+) -> dict:
+    """Upsert thread metadata: title on first message, `status` + `updated_at` on every call.
+
+    Called at run start (so the thread shows up in GET /threads immediately,
+    marked `running`) and at every terminal transition. Returns the stored
+    value dict (used for notification payloads).
+    """
     now = now_iso()
+    value: dict = {}
     try:
         ns = thread_metadata_ns(username)
         existing = await persistence.store.aget(ns, thread_id)
@@ -107,9 +122,11 @@ async def _record_thread_metadata(
             value.setdefault("created_at", now)
         value["updated_at"] = now
         value["agent"] = agent_name
+        value["status"] = status
         await persistence.store.aput(ns, thread_id, value)
     except Exception:
         logger.exception("failed to record thread metadata for %s", thread_id)
+    return value
 
 
 async def _save_history(thread_id: str, username: str, messages: list[dict]) -> None:
@@ -145,7 +162,24 @@ def sse_response(gen: AsyncIterator[str]) -> StreamingResponse:
     return StreamingResponse(gen, media_type="text/event-stream", headers=SSE_HEADERS)
 
 
-async def agent_stream(
+# ---------------------------------------------------------------------------
+# background runs: the run outlives its HTTP stream
+# ---------------------------------------------------------------------------
+
+
+def _run_event(status: str, thread_id: str, metadata: dict | None, agent_name: str) -> dict:
+    """Lifecycle event payload for the per-user notification hub."""
+    return {
+        "type": f"run_{status}",
+        "thread_id": thread_id,
+        "title": (metadata or {}).get("title"),
+        "agent": agent_name,
+        "status": status,
+        "at": now_iso(),
+    }
+
+
+def agent_stream(
     agent: CompiledStateGraph,
     username: str,
     *,
@@ -154,21 +188,133 @@ async def agent_stream(
     resume: Any = None,
     agent_name: str = "default",
 ) -> AsyncIterator[str]:
-    """Run the agent and forward v3 stream projections as normalized SSE events.
+    """Start a background agent run and return its live SSE stream.
+
+    The run executes in its own asyncio task, decoupled from the HTTP
+    response: closing the stream (client disconnect, "new chat") leaves the
+    run running — messages keep being persisted to chat history and a
+    lifecycle event lands in the user's notification stream. Only
+    `POST /threads/{id}/cancel` aborts a run; starting a second run on a
+    thread with an active one raises Conflict (HTTP 409).
 
     - `message`: new user message for /chat
     - `resume`: value for `Command(resume=...)` (HITL continuation, /resume)
     - `agent_name`: agent config this thread runs on (recorded in thread metadata)
     """
     thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
+    active = run_manager.start(thread_id, username, agent_name)
+    queue = run_manager.subscribe(active)
+    active.task = asyncio.create_task(
+        _run_agent(
+            active,
+            agent,
+            username,
+            message=message,
+            thread_id=thread_id,
+            resume=resume,
+            agent_name=agent_name,
+        )
+    )
+    return _stream_subscription(active, queue)
+
+
+def attach_stream(thread_id: str) -> AsyncIterator[str]:
+    """Attach a live SSE stream to an already-running thread.
+
+    Raises Conflict when the thread has no active run (or it just finished) —
+    the frontend falls back to GET /threads/{id}/messages in that case.
+    """
+    active = run_manager.get(thread_id)
+    if active is None or active.done.is_set():
+        raise Conflict(detail=f"Thread '{thread_id}' has no active run")
+    queue = run_manager.subscribe(active)
+    return _stream_subscription(active, queue)
+
+
+async def _stream_subscription(active: ActiveRun, queue: asyncio.Queue) -> AsyncIterator[str]:
+    """Drain one subscriber queue into SSE chunks until the run finishes.
+
+    Detaching (generator close, client disconnect) only unsubscribes — the
+    run keeps going in the background.
+    """
+    try:
+        while True:
+            get_task = asyncio.create_task(queue.get())
+            done_task = asyncio.create_task(active.done.wait())
+            done_tasks, pending = await asyncio.wait(
+                {get_task, done_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            if done_task not in done_tasks:
+                item = get_task.result()
+                yield _sse(item["event"], item["data"])
+                continue
+            # Run finished: drain the terminal events queued before `done` set.
+            if get_task in done_tasks:
+                item = get_task.result()
+                yield _sse(item["event"], item["data"])
+            while True:
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                yield _sse(item["event"], item["data"])
+    finally:
+        run_manager.unsubscribe(active, queue)
+
+
+async def notification_stream(username: str, since: int | None = None) -> AsyncIterator[str]:
+    """Per-user run lifecycle events as SSE (`run_started` ... `run_failed`).
+
+    One long-lived connection per client. The hub replays recent events on
+    connect; `since` (an event seq) skips already-seen ones. A comment line is
+    emitted every 15s to keep the connection alive.
+    """
+    queue = hub.subscribe(username, since=since)
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except TimeoutError:
+                yield ": ping\n\n"
+                continue
+            yield _sse(event["type"], event)
+    finally:
+        hub.unsubscribe(username, queue)
+
+
+async def _run_agent(
+    active: ActiveRun,
+    agent: CompiledStateGraph,
+    username: str,
+    *,
+    message: str | None,
+    thread_id: str,
+    resume: Any,
+    agent_name: str,
+) -> None:
+    """Background run body: stream the agent, persist, notify. Never raises."""
     config = {"configurable": {"thread_id": thread_id}}
+
+    # Show the thread in history immediately, marked as running.
+    metadata = await _record_thread_metadata(
+        thread_id, username, message, agent_name, status="running"
+    )
+    hub.publish(username, _run_event("started", thread_id, metadata, agent_name))
 
     if resume is not None:
         run_input: Any = Command(resume=resume)
     else:
-        run_input = {"messages": [HumanMessage(content=message)]}
+        human_message = HumanMessage(content=message, id=f"human-{uuid.uuid4().hex}")
+        run_input = {"messages": [human_message]}
+        # Seed history with the user message so rows land in conversation
+        # order: every later row appends after it, and the final save dedupes
+        # by message id (langgraph preserves the id on the stored message).
+        await _save_history(thread_id, username, [_serialize_message(human_message)])
 
     queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=256)
+    finalized: list[dict] = []
 
     async def put(event: str, data: dict) -> None:
         await queue.put({"event": event, "data": data})
@@ -199,7 +345,13 @@ async def agent_stream(
                 except Exception:
                     out = None
                 if out is not None:
-                    await put("message", {"id": ms_id, "message": _serialize_message(out)})
+                    serialized = _serialize_message(out)
+                    finalized.append(serialized)
+                    # Durability: persist each finalized message as it lands
+                    # (deduped by message id), so cancelled or interrupted runs
+                    # still leave readable history behind.
+                    await _save_history(thread_id, username, [serialized])
+                    await put("message", {"id": ms_id, "message": serialized})
         except Exception as exc:
             await put("error", {"source": "messages", "message": str(exc)})
 
@@ -267,90 +419,126 @@ async def agent_stream(
                 pass
 
     interrupted = {"flag": False}
-
-    # Run with the user's identity in the runtime context: the store-backed
-    # filesystem backend and the knowledge base search tool scope per user.
-    context = {"user_id": username}
-    try:
-        run = await agent.astream_events(run_input, config=config, version="v3", context=context)
-    except Exception as exc:
-        yield _sse("error", {"source": "run", "message": str(exc)})
-        yield _sse("done", {"thread_id": thread_id, "messages": []})
-        return
-
-    async def drain() -> None:
-        results = await asyncio.gather(
-            consume_messages(run),
-            consume_tool_calls(run),
-            consume_subagents(run),
-            consume_values(run),
-            return_exceptions=True,
-        )
-        for r in results:
-            if isinstance(r, GraphInterrupt):
-                interrupted["flag"] = True
-            elif isinstance(r, Exception):
-                logger.error("stream consumer failed: %r", r)
-        await queue.put(None)
-
-    producer = asyncio.create_task(drain())
     stop_event = runs.register(thread_id)
-    cancelled = False
     try:
-        while True:
-            get_task = asyncio.create_task(queue.get())
-            stop_task = asyncio.create_task(stop_event.wait())
-            done_tasks, pending = await asyncio.wait(
-                {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+        # Run with the user's identity in the runtime context: the store-backed
+        # filesystem backend and the knowledge base search tool scope per user.
+        context = {"user_id": username}
+        try:
+            run = await agent.astream_events(
+                run_input, config=config, version="v3", context=context
             )
-            for task in pending:
-                task.cancel()
-            if stop_task in done_tasks:
-                # POST /threads/{id}/cancel fired: abort the run and close
-                # the stream with a terminal done event.
-                cancelled = True
-                break
-            item = get_task.result()
-            if item is None:
-                break
-            yield _sse(item["event"], item["data"])
+        except Exception as exc:
+            await _save_history(thread_id, username, finalized)
+            metadata = await _record_thread_metadata(
+                thread_id, username, message, agent_name, status="failed"
+            )
+            hub.publish(username, _run_event("failed", thread_id, metadata, agent_name))
+            run_manager.publish(active, "error", {"source": "run", "message": str(exc)})
+            run_manager.publish(active, "done", {"thread_id": thread_id, "messages": []})
+            return
+
+        async def drain() -> None:
+            results = await asyncio.gather(
+                consume_messages(run),
+                consume_tool_calls(run),
+                consume_subagents(run),
+                consume_values(run),
+                return_exceptions=True,
+            )
+            for r in results:
+                if isinstance(r, GraphInterrupt):
+                    interrupted["flag"] = True
+                elif isinstance(r, Exception):
+                    logger.error("stream consumer failed: %r", r)
+            await queue.put(None)
+
+        producer = asyncio.create_task(drain())
+        cancelled = False
+        try:
+            while True:
+                get_task = asyncio.create_task(queue.get())
+                stop_task = asyncio.create_task(stop_event.wait())
+                done_tasks, pending = await asyncio.wait(
+                    {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                if stop_task in done_tasks:
+                    # POST /threads/{id}/cancel fired: abort the run and let
+                    # the stream close with a terminal done event.
+                    cancelled = True
+                    break
+                item = get_task.result()
+                if item is None:
+                    break
+                run_manager.publish(active, item["event"], item["data"])
+        finally:
+            producer.cancel()
+
+        if cancelled:
+            # Persist whatever finalized before the abort (the incremental
+            # writes above already captured it; this is the belt-and-braces
+            # full save — deduped by message id).
+            await _save_history(thread_id, username, finalized)
+            metadata = await _record_thread_metadata(
+                thread_id, username, message, agent_name, status="cancelled"
+            )
+            hub.publish(username, _run_event("cancelled", thread_id, metadata, agent_name))
+            run_manager.publish(
+                active, "done", {"thread_id": thread_id, "messages": [], "cancelled": True}
+            )
+            return
+
+        try:
+            # Final state. With v3 streaming a HITL interrupt does not raise —
+            # the run ends normally, so we detect it from the persisted state's
+            # pending tasks instead.
+            messages: list[dict] = finalized if finalized else []
+            try:
+                final = await run.output()
+                if final:
+                    messages = [_serialize_message(m) for m in final.get("messages", [])]
+            except GraphInterrupt:
+                pass  # older runtimes raise; detected via snapshot below
+
+            snapshot = await agent.aget_state(config)
+            interrupts = _collect_interrupts(snapshot)
+            usage = _aggregate_usage(messages)
+            status = "interrupted" if interrupts else "completed"
+            # Persist history + refresh thread metadata before the terminal
+            # events, so GET /threads and GET /threads/{id}/messages see the
+            # finished run. The rewrite fixes stream-order rows (instant tool
+            # calls) back to conversation order.
+            await persistence.chat_history.replace_messages(thread_id, username, messages)
+            metadata = await _record_thread_metadata(
+                thread_id, username, message, agent_name, status=status
+            )
+            hub.publish(username, _run_event(status, thread_id, metadata, agent_name))
+            if interrupts:
+                # Run paused for human input: surface the HITL requests.
+                run_manager.publish(
+                    active, "interrupt", {"thread_id": thread_id, "interrupts": interrupts}
+                )
+                done_data: dict = {
+                    "thread_id": thread_id,
+                    "messages": messages,
+                    "interrupted": True,
+                }
+            else:
+                done_data = {"thread_id": thread_id, "messages": messages}
+            if usage:
+                done_data["usage"] = usage
+            run_manager.publish(active, "done", done_data)
+        except Exception as exc:
+            logger.exception("failed to finalize run %s", thread_id)
+            await _save_history(thread_id, username, finalized)
+            metadata = await _record_thread_metadata(
+                thread_id, username, message, agent_name, status="failed"
+            )
+            hub.publish(username, _run_event("failed", thread_id, metadata, agent_name))
+            run_manager.publish(active, "error", {"source": "final", "message": str(exc)})
+            run_manager.publish(active, "done", {"thread_id": thread_id, "messages": finalized})
     finally:
-        producer.cancel()
         runs.unregister(thread_id)
-
-    if cancelled:
-        # No history/metadata writes for aborted runs (partial state).
-        yield _sse("done", {"thread_id": thread_id, "messages": [], "cancelled": True})
-        return
-
-    # Final state. With v3 streaming a HITL interrupt does not raise — the
-    # run ends normally, so we detect it from the persisted state's pending
-    # tasks instead.
-    messages: list[dict] = []
-    try:
-        final = await run.output()
-        if final:
-            messages = [_serialize_message(m) for m in final.get("messages", [])]
-    except GraphInterrupt:
-        pass  # older runtimes raise; handled via snapshot below
-    except Exception as exc:
-        yield _sse("error", {"source": "final", "message": str(exc)})
-        yield _sse("done", {"thread_id": thread_id, "messages": messages})
-        return
-
-    snapshot = await agent.aget_state(config)
-    interrupts = _collect_interrupts(snapshot)
-    usage = _aggregate_usage(messages)
-    # Persist history + refresh thread metadata before the terminal events, so
-    # GET /threads and GET /threads/{id}/messages see the finished run.
-    await _save_history(thread_id, username, messages)
-    await _record_thread_metadata(thread_id, username, message, agent_name)
-    if interrupts:
-        # Run paused for human input: surface the HITL requests.
-        yield _sse("interrupt", {"thread_id": thread_id, "interrupts": interrupts})
-        done_data: dict = {"thread_id": thread_id, "messages": messages, "interrupted": True}
-    else:
-        done_data = {"thread_id": thread_id, "messages": messages}
-    if usage:
-        done_data["usage"] = usage
-    yield _sse("done", done_data)
+        run_manager.finish(thread_id)

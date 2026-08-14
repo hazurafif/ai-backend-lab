@@ -42,6 +42,31 @@ class ThreadOut(BaseModel):
         default=None,
         description="Public share token when the thread has been shared",
     )
+    status: str | None = Field(
+        default=None,
+        description=(
+            "Run status: running | completed | interrupted | cancelled | failed "
+            "(null for threads created before status tracking)"
+        ),
+    )
+
+
+class NotificationOut(BaseModel):
+    """A run lifecycle event (notifications stream + recent list).
+
+    `type` is one of run_started | run_completed | run_interrupted |
+    run_cancelled | run_failed; `seq` is a per-user monotonic counter used as
+    the `since` cursor for reconnecting the notifications stream.
+    """
+
+    event_id: str
+    seq: int
+    type: str
+    thread_id: str
+    title: str | None = None
+    agent: str | None = None
+    status: str | None = None
+    at: str | None = None
 
 
 class FollowUpIn(BaseModel):

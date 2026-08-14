@@ -29,6 +29,12 @@ Endpoints:
   DELETE /threads/{id}            -> delete a thread
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run
   POST /threads/{id}/cancel       -> abort the active run of a thread
+  GET  /threads/{id}/stream       -> attach a live SSE stream to an active run
+  GET  /notifications/stream      -> per-user run lifecycle events as SSE
+                                    (run_started/completed/interrupted/
+                                    cancelled/failed; recent events replayed on
+                                    connect, ?since=<seq> skips seen ones)
+  GET  /notifications             -> the user's recent run lifecycle events
   POST /threads/{id}/share        -> create a public share link (owner; idempotent)
   GET  /threads/{id}/share        -> current share link of a thread (owner)
   DELETE /threads/{id}/share      -> revoke the share link (owner)
@@ -99,6 +105,17 @@ SSE events (event: <name>, data: <json>):
   done            {"thread_id", "messages"[], "interrupted"?,
                    "cancelled"?, "usage"?}                  final state (usage = summed
                                                              token counts when reported)
+
+Run lifecycle: runs are decoupled from the HTTP stream — a client disconnect
+("new chat") never aborts the run; it keeps processing in the background,
+persists history + thread metadata, and emits a lifecycle event on the user's
+notification stream. Only POST /threads/{id}/cancel aborts a run. Thread
+metadata carries a `status` (running | completed | interrupted | cancelled |
+failed) so GET /threads reflects in-flight runs.
+
+Lifecycle events (notifications stream; data: {event_id, seq, thread_id,
+title, agent, status, at}):
+  run_started / run_completed / run_interrupted / run_cancelled / run_failed
 """
 
 from __future__ import annotations

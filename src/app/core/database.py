@@ -318,6 +318,17 @@ class ChatHistoryStore:
             added += 1
         return added
 
+    async def replace_messages(self, thread_id: str, username: str, messages: list[dict]) -> int:
+        """Rewrite the thread's rows as the full conversation, in order.
+
+        Incremental writes (`add_messages` during streaming) land in stream
+        order, which can differ from conversation order around instant tool
+        calls — a completed run rewrites the thread so the table is always
+        readable in conversation order. Deduped by message id.
+        """
+        await self.delete_thread(thread_id)
+        return await self.add_messages(thread_id, username, messages)
+
     async def delete_thread(self, thread_id: str) -> int:
         """Remove all message rows of a thread; returns the number of rows deleted."""
         if self._pool is not None:

@@ -12,6 +12,7 @@ from ....core.constants import thread_metadata_ns
 from ....core.database import persistence
 from ....core.dependencies import get_current_user
 from ....core.exceptions import NotFound
+from ....core.notification_hub import hub
 from ....core.run_registry import runs
 from ....core.security import decode_access_token
 from ....schema.chat_schema import (
@@ -19,6 +20,7 @@ from ....schema.chat_schema import (
     ChatRequest,
     FollowUpIn,
     FollowUpOut,
+    NotificationOut,
     ResumeRequest,
     SharedChatOut,
     ShareOut,
@@ -28,7 +30,13 @@ from ....schema.chat_schema import (
 )
 from ....services import agent_configs, ai_sdk_chat, session_stats
 from ....services import share as share_service
-from ....services.chat import _serialize_message, agent_stream, sse_response
+from ....services.chat import (
+    _serialize_message,
+    agent_stream,
+    attach_stream,
+    notification_stream,
+    sse_response,
+)
 from ....services.searxng import set_search_enabled
 from ....services.title_generator import generate_followups, generate_title
 from ....services.uploads import file_notes, save_uploads
@@ -288,6 +296,48 @@ async def cancel_thread(
     if not runs.cancel(thread_id):
         raise HTTPException(status_code=409, detail="Thread has no active run")
     return {"status": "cancelled", "thread_id": thread_id}
+
+
+@router.get("/threads/{thread_id}/stream")
+async def thread_stream(
+    request: Request,
+    thread_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Attach a live SSE stream to an active run of the thread.
+
+    Same event contract as POST /chat (message_delta ... done). 409 when the
+    thread has no active run — the frontend falls back to
+    GET /threads/{id}/messages in that case (history is written incrementally
+    while the run streams).
+    """
+    await _assert_thread_owner(thread_id, current_user["username"])
+    return sse_response(attach_stream(thread_id))
+
+
+@router.get("/notifications/stream")
+async def notifications_stream(
+    current_user: dict = Depends(get_current_user),
+    since: int | None = Query(default=None, ge=0),
+):
+    """Per-user run lifecycle events as SSE (one long-lived connection).
+
+    Events: run_started / run_completed / run_interrupted / run_cancelled /
+    run_failed, each carrying {event_id, seq, thread_id, title, agent, status,
+    at}. Recent events are replayed on connect; pass `since` (an event seq) to
+    skip already-seen ones. The frontend keeps one such stream open per user
+    to notify when a background chat finishes while another chat is focused.
+    """
+    return sse_response(notification_stream(current_user["username"], since=since))
+
+
+@router.get("/notifications", response_model=list[NotificationOut])
+async def recent_notifications(
+    current_user: dict = Depends(get_current_user),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """The user's most recent run lifecycle events, newest first."""
+    return hub.recent(current_user["username"], limit=limit)
 
 
 @router.delete("/threads/{thread_id}", status_code=204)
