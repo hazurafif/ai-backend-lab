@@ -30,6 +30,14 @@ Endpoints:
                                     include bundled files, e.g. scripts/;
                                     listing is readable by any user, mutations
                                     are admin-only)
+  GET|POST /agent/connections      -> API connection CRUD (LLM provider base URL
+                                    + API key, stored in the DB and used by the
+                                    agent instead of .env keys; api_key is
+                                    write-only; mutations are admin-only, reads
+                                    are for any user; the connection named
+                                    'default' drives the builtin agent)
+  GET|PUT|DELETE /agent/connections/{name} -> read / update (merge; omitted
+                                    api_key keeps the stored key) / delete
   GET|POST /skills                -> user-scoped "my skills" CRUD (private per
                                     user, attachable to own agent configs)
   GET|POST /agents                -> list / create agent configs (customizable

@@ -61,6 +61,27 @@ Health check: `curl http://127.0.0.1:8000/health`
 OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 (langchain-openai reads them) — e.g. the opencode.ai zen gateway.
 
+**Stored API connections (no `.env` keys):** admin-managed connections
+(`base URL` + `api key`) live in the DB and drive the agent's chat model
+instead of `OPENAI_BASE_URL`/`OPENAI_API_KEY`:
+
+```bash
+# admin: create a connection used by the builtin `default` agent
+curl -X POST http://127.0.0.1:8000/agent/connections \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "default", "base_url": "https://opencode.ai/zen/go/v1", "api_key": "..."}'
+```
+
+- `GET /agent/connections` — list (any user; API keys are never returned)
+- `POST /agent/connections` — create (admin)
+- `GET|PUT|DELETE /agent/connections/{name}` — read / merge-update / delete
+  (admin for writes; omitting `api_key` on update keeps the stored key)
+- Agent configs reference a connection via the `connection` field
+  (`POST /agents`), e.g. `{"model": "openai:gpt-4o-mini", "connection": "openai"}`.
+- The connection named `default` is used by the builtin `default` agent;
+  without it the env-based behavior stays.
+- Connections target OpenAI-compatible endpoints (langchain-openai).
+
 ## API
 
 | Endpoint | Auth | Description |
@@ -85,6 +106,7 @@ OpenAI-compatible gateway set `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `.env`
 | `GET/POST /skills` + `GET/PUT/DELETE /skills/{name}` | Bearer | **User-scoped** "my skills" (private; attachable to your own agent configs) |
 | `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
 | `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
+| `GET/POST /agent/connections` + `GET/PUT/DELETE /agent/connections/{name}` | read: any user; write: Bearer (admin) | Manage API connections (base URL + API key in the DB, used by the agent instead of `.env` keys; key is write-only, updates merge) |
 | `POST /mcp/tools/call` | Bearer | MCP apps tools proxy: invoke a tool on a configured MCP server (`server_hint` or fan-out; `CallToolResult` passthrough — 200 with `isError`, 502 transport, 404 no match) |
 | `GET|POST /agents` | Bearer | List / create agent configs (profile: model + system prompt + skills + tools; `scope: "global"` requires admin) |
 | `GET/PUT/DELETE /agents/{name}` | Bearer | Read / replace / delete an agent config (owner; global ones: admin) |

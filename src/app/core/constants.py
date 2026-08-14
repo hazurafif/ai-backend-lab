@@ -8,6 +8,12 @@ SKILLS_SOURCE = "/skills/"
 # Store namespaces for agent-level (global, shared by all users) resources.
 GLOBAL_SKILLS_NS = ("agent", "skills")
 TOOL_SERVERS_NS = ("agent", "mcp_servers")
+# API connections (LLM provider base URL + API key): managed via the
+# /agent/connections CRUD API, used by the agent instead of .env keys.
+# The connection named DEFAULT_CONNECTION_NAME is used by the builtin
+# `default` agent; named agent configs can reference any connection.
+CONNECTIONS_NS = ("agent", "connections")
+DEFAULT_CONNECTION_NAME = "default"
 
 
 def user_skills_ns(username: str) -> tuple[str, ...]:

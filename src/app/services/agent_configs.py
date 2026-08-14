@@ -43,6 +43,7 @@ from ..core.constants import (
     user_skills_ns,
 )
 from ..schema.agent_config_schema import AgentConfigIn, AgentConfigOut
+from .connections import get_connection, resolve_default_connection
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class AgentSpec:
     tools: list[str] | None  # None = inherit all tools, [] = none
     temperature: float | None
     interrupt_on: dict[str, bool] | None
+    connection: str | None  # API connection name (base URL + key from the store)
     owner: str = _SYSTEM_OWNER
     builtin: bool = False
     description: str | None = None
@@ -94,6 +96,7 @@ class AgentSpec:
                     self.tools,
                     self.temperature,
                     self.interrupt_on,
+                    self.connection,
                     self.skills_source,
                 ],
                 sort_keys=True,
@@ -104,8 +107,12 @@ class AgentSpec:
         return self._fingerprint
 
 
-def default_spec() -> AgentSpec:
-    """The built-in agent, seeded from env settings (never stored)."""
+def default_spec(connection: str | None = None) -> AgentSpec:
+    """The built-in agent, seeded from env settings (never stored).
+
+    `connection` is the name of the stored API connection the builtin agent
+    uses (None = env-based keys). Resolved from the store by `load_spec`.
+    """
     return AgentSpec(
         name=DEFAULT_AGENT_NAME,
         model=settings.model,
@@ -114,6 +121,7 @@ def default_spec() -> AgentSpec:
         tools=None,
         temperature=None,
         interrupt_on=settings.interrupt_on or None,
+        connection=connection,
         owner=_SYSTEM_OWNER,
         builtin=True,
         description="Built-in agent (DEEPAGENTS_MODEL + SYSTEM_PROMPT env settings)",
@@ -135,6 +143,7 @@ def _value(cfg: AgentConfigIn, *, owner: str, created_at: str | None = None) -> 
         "tools": cfg.tools,
         "temperature": cfg.temperature,
         "interrupt_on": cfg.interrupt_on,
+        "connection": cfg.connection,
         "scope": cfg.scope,
         "owner": owner,
         "created_at": created_at or updated,
@@ -155,6 +164,7 @@ def _spec_from_value(value: dict[str, Any]) -> AgentSpec:
         tools=value.get("tools"),
         temperature=value.get("temperature"),
         interrupt_on=value.get("interrupt_on"),
+        connection=value.get("connection"),
         owner=value.get("owner") or _GLOBAL_OWNER,
         description=value.get("description"),
         created_at=value.get("created_at"),
@@ -236,6 +246,17 @@ async def sync_agent_skills(
 # ---------------------------------------------------------------------------
 
 
+async def _default_connection(store: BaseStore) -> str | None:
+    """Connection name for the builtin default agent (None = env-based keys)."""
+    return await resolve_default_connection(store)
+
+
+async def _validate_connection(store: BaseStore, connection: str | None) -> None:
+    """Reject references to unknown API connections."""
+    if connection is not None and await get_connection(store, connection) is None:
+        raise ValueError(f"Unknown API connection '{connection}'")
+
+
 async def get_config(store: BaseStore, name: str, username: str) -> AgentConfigOut | None:
     """Resolve a config: the user's own agent first, then global, then builtin default."""
     if name == DEFAULT_AGENT_NAME:
@@ -248,6 +269,7 @@ async def get_config(store: BaseStore, name: str, username: str) -> AgentConfigO
                 "tools": None,
                 "temperature": None,
                 "interrupt_on": settings.interrupt_on or None,
+                "connection": await _default_connection(store),
                 "scope": "global",
                 "owner": _SYSTEM_OWNER,
             },
@@ -262,7 +284,7 @@ async def get_config(store: BaseStore, name: str, username: str) -> AgentConfigO
 async def load_spec(store: BaseStore, name: str, username: str) -> AgentSpec | None:
     """Resolve a build-ready spec (user agent -> global agent -> builtin default)."""
     if name == DEFAULT_AGENT_NAME:
-        return default_spec()
+        return default_spec(await _default_connection(store))
     item = await store.aget(user_agents_ns(username), name)
     if item is None:
         item = await store.aget(GLOBAL_AGENTS_NS, name)
@@ -306,6 +328,7 @@ async def create_config(
     for skill in cfg.skills or []:
         await _skill_source(store, skill, username, allow_user_skills=allow_user_skills)
     _validate_tools(cfg.tools, known_servers)
+    await _validate_connection(store, cfg.connection)
     await sync_agent_skills(
         store,
         owner,
@@ -339,6 +362,7 @@ async def update_config(
     for skill in cfg.skills or []:
         await _skill_source(store, skill, username, allow_user_skills=allow_user_skills)
     _validate_tools(cfg.tools, known_servers)
+    await _validate_connection(store, cfg.connection)
     owner = existing.value.get("owner") or _GLOBAL_OWNER
     await sync_agent_skills(
         store,

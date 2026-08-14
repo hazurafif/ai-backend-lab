@@ -37,7 +37,7 @@ from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
 from ..core.config import settings
-from ..core.constants import GLOBAL_SKILLS_NS, SKILLS_SOURCE
+from ..core.constants import CONNECTIONS_NS, GLOBAL_SKILLS_NS, SKILLS_SOURCE
 from ..services.kb.tool import build_kb_search_tool
 from ..services.searxng import build_search_tool
 from .agent_configs import AgentSpec, load_spec
@@ -245,7 +245,7 @@ class AgentRegistry:
             return cached
         self._ensure_skill_route(spec)
         tools = self._select_tools(spec)
-        model = self._resolve_model(spec)
+        model = await self._resolve_model(spec)
         graph = build_agent(
             checkpointer=self._checkpointer,
             store=self._store,
@@ -292,13 +292,30 @@ class AgentRegistry:
                     selected.append(by_name[tool_name])
         return selected
 
-    def _resolve_model(self, spec: AgentSpec) -> str | BaseChatModel:
+    async def _resolve_model(self, spec: AgentSpec) -> str | BaseChatModel:
+        """The chat model for a spec.
+
+        With a stored API connection, the model is constructed with the
+        connection's base_url + api_key instead of `.env` keys (OpenAI-compatible
+        endpoints). `model_factory` (tests) short-circuits everything.
+        """
         if self._model_factory is not None:
             return self._model_factory(spec.model, spec.temperature)
-        if spec.temperature is None:
-            return spec.model
         from langchain.chat_models import init_chat_model
 
+        if spec.connection is not None:
+            item = await self._store.aget(CONNECTIONS_NS, spec.connection)
+            if item is None or not item.value.get("api_key"):
+                raise ValueError(f"API connection '{spec.connection}' not found")
+            kwargs: dict[str, Any] = {
+                "api_key": item.value["api_key"],
+                "base_url": item.value["base_url"],
+            }
+            if spec.temperature is not None:
+                kwargs["temperature"] = spec.temperature
+            return init_chat_model(spec.model, **kwargs)
+        if spec.temperature is None:
+            return spec.model
         return init_chat_model(spec.model, temperature=spec.temperature)
 
     def update_mcp_tools(
