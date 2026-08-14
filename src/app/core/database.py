@@ -755,6 +755,252 @@ class KbStore:
         return {"id": doc["id"], "kb_id": doc["kb_id"], "path": doc["path"]}
 
 
+class ConnectionStore:
+    """Provider connections (base URL + API token) in Postgres (`connections` table).
+
+    Global infra config (admin-managed, not owner-scoped): the agent LLM and
+    KB embeddings resolve the default connection of their kind here instead of
+    .env credentials. Rows are plain dicts shaped like `schema/connection_schema`
+    outputs (with the full api_token; masking happens at the API layer).
+    Falls back to in-memory dicts when Postgres is off (dev mode).
+    """
+
+    def __init__(self) -> None:
+        self._pool: AsyncConnectionPool | None = None
+        self._memory: dict[str, dict] = {}  # name -> row
+
+    @property
+    def is_postgres(self) -> bool:
+        return self._pool is not None
+
+    async def start(self, pool: AsyncConnectionPool | None) -> None:
+        self._pool = pool
+        self._memory = {}
+
+    async def stop(self) -> None:
+        self._pool = None
+        self._memory = {}
+
+    @staticmethod
+    def _row(**kw: object) -> dict:
+        return {
+            "id": kw.get("id") or str(uuid.uuid4()),
+            "name": kw.get("name"),
+            "kind": kw.get("kind", "llm"),
+            "base_url": kw.get("base_url"),
+            "api_token": kw.get("api_token"),
+            "extra": kw.get("extra") or {},
+            "is_default": bool(kw.get("is_default", False)),
+            "created_at": kw.get("created_at") or now_iso(),
+            "updated_at": kw.get("updated_at") or now_iso(),
+        }
+
+    async def _clear_default(self, kind: str, keep_name: str) -> None:
+        """Unset is_default for every other connection of the kind."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE connections SET is_default = false, updated_at = now() "
+                    "WHERE kind = %s AND name <> %s AND is_default",
+                    (kind, keep_name),
+                )
+            return
+        for row in self._memory.values():
+            if row["kind"] == kind and row["name"] != keep_name:
+                row["is_default"] = False
+
+    async def create(self, connection: dict) -> dict | None:
+        """Insert a connection; returns the row, or None when the name is taken.
+
+        `connection` is the raw payload dict (name, kind, base_url, api_token,
+        extra, is_default); when `is_default` is true it becomes the only
+        default of its kind.
+        """
+        now = now_iso()
+        if connection.get("is_default"):
+            await self._clear_default(connection["kind"], connection["name"])
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO connections (name, kind, base_url, api_token, extra, is_default) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO NOTHING "
+                    "RETURNING id, created_at, updated_at",
+                    (
+                        connection["name"],
+                        connection["kind"],
+                        connection.get("base_url"),
+                        connection.get("api_token"),
+                        Jsonb(connection.get("extra") or {}),
+                        connection.get("is_default", False),
+                    ),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                out = self._row(
+                    id=str(row[0]),
+                    created_at=row[1].isoformat(),
+                    updated_at=row[2].isoformat(),
+                    **connection,
+                )
+                self._memory[connection["name"]] = out
+                return out
+        if connection["name"] in self._memory:
+            return None
+        out = self._row(**connection, id=str(uuid.uuid4()), created_at=now, updated_at=now)
+        self._memory[out["name"]] = out
+        return dict(out)
+
+    async def get(self, name: str) -> dict | None:
+        """Connection by name, or None when unknown."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, name, kind, base_url, api_token, extra, is_default, "
+                    "created_at, updated_at FROM connections WHERE name = %s",
+                    (name,),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {
+                    "id": str(row[0]),
+                    "name": row[1],
+                    "kind": row[2],
+                    "base_url": row[3],
+                    "api_token": row[4],
+                    "extra": row[5] or {},
+                    "is_default": row[6],
+                    "created_at": row[7].isoformat(),
+                    "updated_at": row[8].isoformat(),
+                }
+        row = self._memory.get(name)
+        return dict(row) if row is not None else None
+
+    async def list(self) -> list[dict]:
+        """All connections, newest first."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, name, kind, base_url, api_token, extra, is_default, "
+                    "created_at, updated_at FROM connections ORDER BY created_at DESC"
+                )
+                return [
+                    {
+                        "id": str(r[0]),
+                        "name": r[1],
+                        "kind": r[2],
+                        "base_url": r[3],
+                        "api_token": r[4],
+                        "extra": r[5] or {},
+                        "is_default": r[6],
+                        "created_at": r[7].isoformat(),
+                        "updated_at": r[8].isoformat(),
+                    }
+                    for r in await cur.fetchall()
+                ]
+        rows = [dict(r) for r in self._memory.values()]
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        return rows
+
+    async def update(self, name: str, patch: dict) -> dict | None:
+        """Update a connection; None when unknown. `patch` may carry any subset
+        of kind/base_url/api_token/extra/is_default. When is_default is set it
+        becomes the only default of its kind.
+        """
+        existing = await self.get(name)
+        if existing is None:
+            return None
+        if patch.get("is_default"):
+            await self._clear_default(patch.get("kind", existing["kind"]), name)
+        if self._pool is not None:
+            sets, params = [], []
+            for key, col in (
+                ("kind", "kind"),
+                ("base_url", "base_url"),
+                ("api_token", "api_token"),
+                ("is_default", "is_default"),
+            ):
+                if key in patch:
+                    sets.append(f"{col} = %s")
+                    params.append(patch[key])
+            if "extra" in patch:
+                sets.append("extra = %s")
+                params.append(Jsonb(patch["extra"] or {}))
+            if not sets:
+                return existing
+            params.append(name)
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    f"UPDATE connections SET {', '.join(sets)}, updated_at = now() "
+                    "WHERE name = %s RETURNING id, name, kind, base_url, api_token, "
+                    "extra, is_default, created_at, updated_at",
+                    tuple(params),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                out = {
+                    "id": str(row[0]),
+                    "name": row[1],
+                    "kind": row[2],
+                    "base_url": row[3],
+                    "api_token": row[4],
+                    "extra": row[5] or {},
+                    "is_default": row[6],
+                    "created_at": row[7].isoformat(),
+                    "updated_at": row[8].isoformat(),
+                }
+                self._memory[name] = out
+                return out
+        for key in ("kind", "base_url", "api_token", "extra", "is_default"):
+            if key in patch:
+                existing[key] = patch[key]
+        existing["updated_at"] = now_iso()
+        return dict(existing)
+
+    async def delete(self, name: str) -> bool:
+        """Remove a connection; returns False when unknown."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("DELETE FROM connections WHERE name = %s", (name,))
+                removed = cur.rowcount > 0
+                if removed:
+                    self._memory.pop(name, None)
+                return removed
+        return self._memory.pop(name, None) is not None
+
+    async def get_default(self, kind: str) -> dict | None:
+        """The default connection of a kind: is_default first, else first created."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, name, kind, base_url, api_token, extra, is_default, "
+                    "created_at, updated_at FROM connections "
+                    "WHERE kind = %s ORDER BY is_default DESC, created_at ASC LIMIT 1",
+                    (kind,),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return {
+                    "id": str(row[0]),
+                    "name": row[1],
+                    "kind": row[2],
+                    "base_url": row[3],
+                    "api_token": row[4],
+                    "extra": row[5] or {},
+                    "is_default": row[6],
+                    "created_at": row[7].isoformat(),
+                    "updated_at": row[8].isoformat(),
+                }
+        candidates = [r for r in self._memory.values() if r["kind"] == kind]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda r: (not r["is_default"], r["created_at"]))
+        return dict(candidates[0])
+
+
 class Persistence:
     """Owns the checkpointer, store, chat history and users; set up at startup and closed at shutdown."""
 
@@ -764,6 +1010,7 @@ class Persistence:
         self.chat_history = ChatHistoryStore()
         self.users = UserStore()
         self.kb = KbStore()
+        self.connections = ConnectionStore()
         self.backend_name = "memory"
         self._pool: AsyncConnectionPool | None = None
         self._saver_cm = None
@@ -814,6 +1061,7 @@ class Persistence:
         await self.users.start(pool, postgres_ready)
         await self.chat_history.start(pool)
         await self.kb.start(pool)
+        await self.connections.start(pool)
         if pool is None:
             self.checkpointer = InMemorySaver()
             self.store = InMemoryStore()
@@ -839,6 +1087,7 @@ class Persistence:
         await self.users.stop()
         await self.chat_history.stop()
         await self.kb.stop()
+        await self.connections.stop()
 
     async def ensure_default_admin(self) -> None:
         """Guarantee an admin account exists; seed the default on a fresh store.

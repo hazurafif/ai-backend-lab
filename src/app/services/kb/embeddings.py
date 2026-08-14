@@ -50,20 +50,31 @@ class LocalEmbeddings(Embeddings):
 
 
 def build_embeddings() -> Embeddings:
-    """Real OpenAI embeddings when a key is configured, else the local one."""
-    if os.environ.get("OPENAI_API_KEY"):
+    """Real OpenAI embeddings when a key is configured, else the local one.
+
+    Credentials resolve in this order: the saved `embeddings` connection
+    (base_url + api_token, see /connections) first, then OPENAI_API_KEY /
+    EMBEDDINGS_BASE_URL from .env.
+    """
+    from ...services.connections import resolved_embeddings
+
+    conn = resolved_embeddings()
+    api_key = (conn or {}).get("api_token") or os.environ.get("OPENAI_API_KEY")
+    if api_key:
         from langchain_openai import OpenAIEmbeddings
 
         kwargs: dict = {
             "model": settings.embeddings_model,
-            "base_url": settings.embeddings_base_url or None,
+            "api_key": api_key,
+            "base_url": (conn or {}).get("base_url") or settings.embeddings_base_url or None,
             "check_embedding_ctx_length": False,
         }
         if settings.embeddings_dimensions is not None:
             kwargs["dimensions"] = settings.embeddings_dimensions
         return OpenAIEmbeddings(**kwargs)
     logger.warning(
-        "OPENAI_API_KEY not set: using the deterministic local embedder for the "
-        "knowledge base (dev/tests only). Set OPENAI_API_KEY for real retrieval."
+        "No embeddings connection or OPENAI_API_KEY set: using the deterministic "
+        "local embedder for the knowledge base (dev/tests only). Save an "
+        "'embeddings' connection via POST /connections for real retrieval."
     )
     return LocalEmbeddings()

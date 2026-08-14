@@ -38,6 +38,7 @@ from langgraph.types import Checkpointer
 
 from ..core.config import settings
 from ..core.constants import GLOBAL_SKILLS_NS, SKILLS_SOURCE
+from ..services.connections import llm_model_kwargs
 from ..services.kb.tool import build_kb_search_tool
 from ..services.searxng import build_search_tool
 from .agent_configs import AgentSpec, load_spec
@@ -295,11 +296,14 @@ class AgentRegistry:
     def _resolve_model(self, spec: AgentSpec) -> str | BaseChatModel:
         if self._model_factory is not None:
             return self._model_factory(spec.model, spec.temperature)
-        if spec.temperature is None:
+        # A saved `llm` connection (base URL + API token, see /connections)
+        # overrides .env credentials for the provider.
+        kwargs = llm_model_kwargs()
+        if spec.temperature is None and not kwargs:
             return spec.model
         from langchain.chat_models import init_chat_model
 
-        return init_chat_model(spec.model, temperature=spec.temperature)
+        return init_chat_model(spec.model, temperature=spec.temperature, **kwargs)
 
     def update_mcp_tools(
         self,

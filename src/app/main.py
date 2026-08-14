@@ -57,6 +57,11 @@ Endpoints:
                                     configured MCP server (server_hint or fan-out;
                                     CallToolResult passthrough: 200 with isError,
                                     502 transport, 404 no match)
+  GET|POST /connections            -> provider connections CRUD (admin; base URL +
+                                    API token saved instead of .env; the agent LLM
+                                    and KB embeddings resolve the default `llm` /
+                                    `embeddings` connection)
+  GET|PUT|DELETE /connections/{name}-> connection detail / replace / delete
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):
@@ -87,6 +92,7 @@ from .api.v1.routes import api_router
 from .core.config import settings
 from .core.database import persistence
 from .services.agent import AgentRegistry, build_backend, build_extra_tools
+from .services.connections import refresh_resolved_connections
 from .services.mcp import mcp_servers
 
 logger = logging.getLogger(__name__)
@@ -100,6 +106,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await persistence.start()
+        # Resolve saved provider connections (default llm/embeddings) so the
+        # agent model + KB embeddings use them instead of .env credentials.
+        await refresh_resolved_connections()
         # Shared durable filesystem backend: agent and /agent/* CRUD API write
         # to the same store (Postgres in production), so skills added via the
         # API are visible to the agent on the next run.
