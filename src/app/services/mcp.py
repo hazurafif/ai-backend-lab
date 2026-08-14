@@ -190,6 +190,10 @@ class MCPServers:
                 if _is_tool_not_found(str(e)):
                     not_found.append(f"{server}: {e}")
                     continue
+                # Protocol-level failure (dead session, invalid params, ...):
+                # drop the cached session so the next call reconnects, then
+                # surface the upstream error as a 502.
+                await self._close_session(server)
                 logger.warning("MCP tool call failed: server=%s tool=%s error=%s", server, name, e)
                 raise McpTransportError(f"{server}: {e}") from e
             except Exception as e:

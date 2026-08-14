@@ -376,6 +376,7 @@ async def test_mcp_error_transport_failure_502():
     with pytest.raises(McpTransportError):
         await servers.call_tool("x")
     assert beta.calls == 0  # aborted on the first real failure
+    assert "alpha" not in servers._sessions  # dead session evicted for reconnect
 
 
 async def test_transport_exception_evicts_session():
