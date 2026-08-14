@@ -204,6 +204,50 @@ async def call(
 
 
 # ---------------------------------------------------------------------------
+# connect() failure isolation
+# ---------------------------------------------------------------------------
+
+
+async def test_connect_isolates_unreachable_server(tmp_path, monkeypatch):
+    """One unreachable server must not prevent the healthy ones from loading.
+
+    Regression test: `fastmcp` pointed at 127.0.0.1 from inside the app
+    container used to abort connect() entirely (httpx.ConnectError), so
+    context7/grep tools never loaded and reconnect returned a raw 500.
+    """
+    script_dir = tmp_path / "servers"
+    script_dir.mkdir()
+    script = script_dir / "test_server.py"
+    script.write_text(SERVER_SCRIPT)
+    state_dir = script_dir / "state"
+    state_dir.mkdir()
+
+    monkeypatch.setattr(
+        config.settings,
+        "load_mcp_servers",
+        lambda: {
+            "alpha": {
+                "transport": "stdio",
+                "command": sys.executable,
+                "args": [str(script), "alpha", str(state_dir)],
+            },
+            "dead": {
+                "url": "http://127.0.0.1:1/mcp",
+                "transport": "streamable_http",
+            },
+        },
+    )
+    servers = MCPServers()
+    tools = await servers.connect(store=None)
+
+    assert "alpha" in servers.tools_by_server
+    assert tools, "healthy server's tools must still load"
+    assert "dead" in servers.failed
+    assert servers.tools_by_server.get("dead") is None
+    assert any(t.name == "ping" for t in tools)
+
+
+# ---------------------------------------------------------------------------
 # happy paths
 # ---------------------------------------------------------------------------
 
