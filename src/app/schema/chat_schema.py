@@ -44,6 +44,25 @@ class ThreadOut(BaseModel):
     )
 
 
+class FollowUpIn(BaseModel):
+    """Body for the post-run follow-up endpoint (all fields optional)."""
+
+    force: bool = Field(
+        default=False,
+        description="Regenerate the title even when an intentional one exists.",
+    )
+
+
+class FollowUpOut(BaseModel):
+    """Result of a thread follow-up call."""
+
+    thread_id: str
+    title: str
+    generated: bool = Field(
+        description="True when the LLM generated a new title, False when the existing one was kept."
+    )
+
+
 class ShareOut(BaseModel):
     """Share-link payload: the token plus a URL to view the thread publicly."""
 

@@ -20,6 +20,10 @@ Endpoints:
                                     remaining), active-run flag
   POST /threads/{id}/title        -> LLM-generated title (prompt template) upserted
                                     on the thread metadata (create or update)
+  POST /threads/{id}/followup     -> post-run follow-up (frontend): auto-title the
+                                    thread unless an intentional title exists
+                                    ({"force": true} regenerates); returns
+                                    {thread_id, title, generated}
   PATCH /threads/{id}             -> rename a thread
   DELETE /threads/{id}            -> delete a thread
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run

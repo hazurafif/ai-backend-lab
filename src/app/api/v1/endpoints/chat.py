@@ -17,6 +17,8 @@ from ....core.security import decode_access_token
 from ....schema.chat_schema import (
     AiSdkChatRequest,
     ChatRequest,
+    FollowUpIn,
+    FollowUpOut,
     ResumeRequest,
     SharedChatOut,
     ShareOut,
@@ -328,6 +330,48 @@ async def rename_thread(
     return ThreadOut(thread_id=thread_id, **value)
 
 
+async def _title_payload(request: Request, thread_id: str, username: str) -> tuple:
+    """Shared resolution for title endpoints: (messages, metadata, agent_name, model).
+
+    Raises 404 for unknown/empty threads or unknown agents.
+    """
+    await _assert_thread_owner(thread_id, username)
+    agent = await _thread_agent(request, thread_id, username)
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = await agent.aget_state(config)
+    messages = (snapshot.values or {}).get("messages") if snapshot is not None else None
+    if not messages:
+        raise NotFound(detail=f"Thread '{thread_id}' has no messages yet")
+    metadata = await persistence.store.aget(thread_metadata_ns(username), thread_id)
+    value = dict(metadata.value) if metadata is not None else {}
+    agent_name = value.get("agent") or "default"
+    try:
+        model = await request.app.state.agents.model_for(agent_name, username)
+    except KeyError:
+        raise NotFound(detail=f"Agent '{agent_name}' not found") from None
+    return messages, value, agent_name, model
+
+
+async def _upsert_title(thread_id: str, username: str, value: dict, agent_name: str) -> None:
+    """Store the metadata row (title already set in `value`)."""
+    now = now_iso()
+    value.setdefault("created_at", now)
+    value["updated_at"] = now
+    value["agent"] = agent_name
+    await persistence.store.aput(thread_metadata_ns(username), thread_id, value)
+
+
+def _default_title(messages: list) -> str | None:
+    """The auto title the chat service sets on first message (truncation)."""
+    from ....services.title_generator import _message_text
+
+    for m in messages:
+        text = _message_text(m)
+        if text:
+            return text.strip()[:80]
+    return None
+
+
 @router.post("/threads/{thread_id}/title", response_model=ThreadOut)
 async def generate_thread_title(
     request: Request,
@@ -342,30 +386,41 @@ async def generate_thread_title(
     Fails with 404 when the thread has no messages yet.
     """
     username = current_user["username"]
-    await _assert_thread_owner(thread_id, username)
-    agent = await _thread_agent(request, thread_id, username)
-    config = {"configurable": {"thread_id": thread_id}}
-    snapshot = await agent.aget_state(config)
-    messages = (snapshot.values or {}).get("messages") if snapshot is not None else None
-    if not messages:
-        raise NotFound(detail=f"Thread '{thread_id}' has no messages yet")
+    messages, value, agent_name, model = await _title_payload(request, thread_id, username)
+    title = await generate_title(model, messages)
+    value["title"] = title
+    await _upsert_title(thread_id, username, value, agent_name)
+    return ThreadOut(thread_id=thread_id, **value)
 
-    metadata = await persistence.store.aget(thread_metadata_ns(username), thread_id)
-    value = dict(metadata.value) if metadata is not None else {}
-    agent_name = value.get("agent") or "default"
-    try:
-        model = await request.app.state.agents.model_for(agent_name, username)
-    except KeyError:
-        raise NotFound(detail=f"Agent '{agent_name}' not found") from None
+
+@router.post("/threads/{thread_id}/followup", response_model=FollowUpOut)
+async def thread_followup(
+    request: Request,
+    thread_id: str,
+    body: FollowUpIn | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Post-run follow-up for the frontend: auto-title the thread.
+
+    Call this after a chat run's `done` event. It generates an LLM title only
+    when the thread has no title yet or it is still the raw first-message
+    truncation (`force: true` always regenerates); otherwise it returns the
+    existing title without spending tokens. Response: {thread_id, title,
+    generated}.
+    """
+    force = bool(body.force) if body is not None else False
+    username = current_user["username"]
+    messages, value, agent_name, model = await _title_payload(request, thread_id, username)
+
+    current = value.get("title")
+    needs_title = force or not current or current == _default_title(messages)
+    if not needs_title:
+        return FollowUpOut(thread_id=thread_id, title=current, generated=False)
 
     title = await generate_title(model, messages)
-    now = now_iso()
-    value.setdefault("created_at", now)
     value["title"] = title
-    value["updated_at"] = now
-    value["agent"] = agent_name
-    await persistence.store.aput(thread_metadata_ns(username), thread_id, value)
-    return ThreadOut(thread_id=thread_id, **value)
+    await _upsert_title(thread_id, username, value, agent_name)
+    return FollowUpOut(thread_id=thread_id, title=title, generated=True)
 
 
 @router.post("/threads/{thread_id}/share", response_model=ShareOut, status_code=201)

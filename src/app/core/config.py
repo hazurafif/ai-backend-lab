@@ -63,9 +63,11 @@ class Settings:
     # or URL — NOT the SQLAlchemy-style postgresql+psycopg:// prefix).
     # If unset, the app falls back to in-memory checkpointer/store (dev mode).
     database_uri: str | None = field(
-        default_factory=lambda: os.environ.get("DATABASE_URI")
-        or os.environ.get("DATABASE_URL")  # set by `fly postgres attach`
-        or None
+        default_factory=lambda: (
+            os.environ.get("DATABASE_URI")
+            or os.environ.get("DATABASE_URL")  # set by `fly postgres attach`
+            or None
+        )
     )
 
     # --- MCP servers ---

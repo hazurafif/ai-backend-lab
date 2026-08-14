@@ -234,3 +234,76 @@ async def test_title_endpoint_ownership_and_errors(memory_persistence):
         # Unknown thread -> 404 (no checkpoint messages yet).
         r = await alice.post("/threads/nope/title")
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# follow-up endpoint (frontend: call after each run)
+# ---------------------------------------------------------------------------
+
+
+async def test_followup_generates_when_title_is_default_truncation(memory_persistence):
+    """Fresh threads carry the raw first-message truncation -> LLM title."""
+    model = TitleModel(title_responses=[AIMessage(content="deploy fastapi")])
+    app, model = _make_app(model)
+    async with app.router.lifespan_context(app), await _client(app, "alice") as client:
+        thread_id = await _seed_thread(client)
+        # The chat service set the truncated default title.
+        meta = await database.persistence.store.aget(thread_metadata_ns("alice"), thread_id)
+        assert meta.value["title"] == "how do I deploy fastapi?"
+
+        r = await client.post(f"/threads/{thread_id}/followup")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body == {"thread_id": thread_id, "title": "deploy fastapi", "generated": True}
+
+
+async def test_followup_keeps_intentional_title_without_llm_call(memory_persistence):
+    """A second call (or an already-titled thread) spends no tokens."""
+    model = TitleModel(
+        title_responses=[
+            AIMessage(content="deploy fastapi"),
+            AIMessage(content="regenerated title"),
+        ]
+    )
+    app, model = _make_app(model)
+    async with app.router.lifespan_context(app), await _client(app, "alice") as client:
+        thread_id = await _seed_thread(client)
+
+        r = await client.post(f"/threads/{thread_id}/followup")
+        assert r.json()["generated"] is True
+        calls_after = len(model.prompts)
+
+        # Intentional title now -> no regeneration, no model call.
+        r = await client.post(f"/threads/{thread_id}/followup")
+        body = r.json()
+        assert body == {"thread_id": thread_id, "title": "deploy fastapi", "generated": False}
+        assert len(model.prompts) == calls_after, "LLM called despite an intentional title"
+
+        # force: true regenerates.
+        r = await client.post(f"/threads/{thread_id}/followup", json={"force": True})
+        body = r.json()
+        assert body["title"] == "regenerated title" and body["generated"] is True
+
+
+async def test_followup_creates_metadata_and_404s(memory_persistence):
+    model = TitleModel(title_responses=[AIMessage(content="legacy thread")])
+    app, model = _make_app(model)
+    async with app.router.lifespan_context(app), await _client(app, "alice") as client:
+        thread_id = await _seed_thread(client)
+        await database.persistence.store.adelete(thread_metadata_ns("alice"), thread_id)
+
+        # No metadata row -> generated (row created).
+        r = await client.post(f"/threads/{thread_id}/followup")
+        assert r.json() == {
+            "thread_id": thread_id,
+            "title": "legacy thread",
+            "generated": True,
+        }
+        assert (
+            await database.persistence.store.aget(thread_metadata_ns("alice"), thread_id)
+            is not None
+        )
+
+        # Unknown thread -> 404.
+        r = await client.post("/threads/nope/followup")
+        assert r.status_code == 404
