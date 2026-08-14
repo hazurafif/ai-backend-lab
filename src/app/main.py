@@ -13,11 +13,13 @@ Endpoints:
                                      supports HITL resume via `decision`/`decisions`)
   GET  /threads                   -> conversations for the current user (limit/offset)
   GET  /threads/{id}/messages     -> full message history of a thread
-  GET  /threads/{id}/usage        -> context + token usage of a thread (session):
+  GET  /threads/{id}/usage        -> context + usage report of a thread (session):
                                     message count/size, cumulative input/output/
-                                    total tokens from usage_metadata, current
+                                    total tokens from usage_metadata, estimated
+                                    API cost in USD (per-1M model rates), current
                                     context vs the model's window (utilization +
-                                    remaining), active-run flag
+                                    remaining; utilization is a 0..1 fraction,
+                                    display as a percentage), active-run flag
   POST /threads/{id}/title        -> LLM-generated title (prompt template) upserted
                                     on the thread metadata (create or update)
   POST /threads/{id}/followup     -> post-run follow-up (frontend): auto-title the

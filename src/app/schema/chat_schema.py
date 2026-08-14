@@ -208,6 +208,29 @@ class SessionContextOut(BaseModel):
     )
 
 
+class SessionPricingOut(BaseModel):
+    """Per-1M-token rates used for the cost estimate (USD)."""
+
+    input_per_million: float
+    output_per_million: float
+
+
+class SessionCostOut(BaseModel):
+    """Estimated API cost of the thread's cumulative usage (USD).
+
+    Billed at the model's per-1M-token rates (curated best-effort table;
+    models with provider-dependent pricing report None at the thread level).
+    `input_cost` reflects billed input — each run's input includes the
+    history, so it counts tokens more than once.
+    """
+
+    currency: str = "USD"
+    input_cost: float
+    output_cost: float
+    total_cost: float
+    pricing: SessionPricingOut
+
+
 class ThreadUsageOut(BaseModel):
     """Context + usage report for one thread (the "current session" view)."""
 
@@ -218,9 +241,21 @@ class ThreadUsageOut(BaseModel):
     usage: SessionUsageOut | None = Field(
         default=None, description="Cumulative token usage; null when the provider reports none"
     )
+    cost: SessionCostOut | None = Field(
+        default=None,
+        description=(
+            "Estimated API cost of the cumulative usage (USD); null when the "
+            "model's pricing is unknown or no usage was reported"
+        ),
+    )
     context: SessionContextOut | None = Field(
         default=None,
-        description="Current context vs the model window; null before the first run",
+        description=(
+            "Current context vs the model window; null before the first run. "
+            "`utilization` is a 0..1 fraction of the window in use — display "
+            "as a percentage (e.g. 7.9%) next to `current_input_tokens` / "
+            "`context_window`"
+        ),
     )
     active_run: bool = Field(
         default=False, description="True while a run is in progress on this thread"

@@ -603,12 +603,14 @@ async def thread_usage(
         persistence.store, agent_name or "default", current_user["username"]
     )
     model = spec.model if spec is not None else None
+    usage = session_stats.compute_usage(history)
     return ThreadUsageOut(
         thread_id=thread_id,
         agent=agent_name,
         model=model,
         messages=session_stats.message_counts(history),
-        usage=session_stats.compute_usage(history),
+        usage=usage,
+        cost=session_stats.estimate_cost(usage, model),
         context=session_stats.build_context(
             session_stats.current_context_input_tokens(history), model
         ),

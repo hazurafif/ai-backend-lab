@@ -15,7 +15,8 @@ providers), and the session view distinguishes two numbers:
 
 The context window table is a curated best-effort heuristic keyed by model
 id prefix (first match wins); unknown models report `None` instead of a
-guessed number.
+guessed number. The pricing table follows the same pattern (USD per 1M
+input/output tokens) and powers the thread's estimated API cost.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ _CONTEXT_WINDOW_RULES: list[tuple[str, int]] = [
     ("gpt-4-turbo", 128_000),
     ("gpt-4", 8_192),
     ("o4-mini", 200_000),
+    ("o3-mini", 200_000),
     ("o3", 200_000),
     ("o1", 200_000),
     ("gpt-3.5-turbo", 16_385),
@@ -53,6 +55,35 @@ _CONTEXT_WINDOW_RULES: list[tuple[str, int]] = [
     ("command", 256_000),
     # xAI
     ("grok", 131_072),
+]
+
+# (model id prefix, input USD per 1M tokens, output USD per 1M tokens) —
+# first match wins, specific prefixes before generic ones. Sourced from
+# provider pricing pages (Oct 2025). Models with provider-dependent pricing
+# (llama, mistral, grok, command) are intentionally absent -> cost is None.
+_PRICING_RULES: list[tuple[str, float, float]] = [
+    # OpenAI
+    ("gpt-4o-mini", 0.15, 0.60),
+    ("gpt-4o", 2.50, 10.00),
+    ("gpt-4.1", 2.00, 8.00),
+    ("gpt-4-turbo", 10.00, 30.00),
+    ("gpt-4", 30.00, 60.00),
+    ("o4-mini", 1.10, 4.40),
+    ("o3-mini", 1.10, 4.40),
+    ("o3", 2.00, 8.00),
+    ("o1", 15.00, 60.00),
+    ("gpt-3.5-turbo", 0.50, 1.50),
+    # Anthropic
+    ("claude-opus", 15.00, 75.00),
+    ("claude-sonnet", 3.00, 15.00),
+    ("claude", 3.00, 15.00),
+    # Google
+    ("gemini-2.5-pro", 1.25, 10.00),
+    ("gemini-2.5-flash", 0.30, 2.50),
+    ("gemini", 1.25, 10.00),
+    # DeepSeek
+    ("deepseek-chat", 0.27, 1.10),
+    ("deepseek-reasoner", 0.55, 2.19),
 ]
 
 _USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
@@ -102,13 +133,62 @@ def current_context_input_tokens(messages: list[dict]) -> int | None:
 
 def context_window_for(model: str | None) -> int | None:
     """Best-effort context window for a `provider:model` string (None = unknown)."""
-    if not model:
+    model_id = _model_id(model)
+    if model_id is None:
         return None
-    model_id = (model.partition(":")[2] or model).lower()
     for prefix, window in _CONTEXT_WINDOW_RULES:
         if model_id.startswith(prefix):
             return window
     return None
+
+
+def _model_id(model: str | None) -> str | None:
+    """Lowercased model id from a `provider:model` string, or None."""
+    if not model:
+        return None
+    return (model.partition(":")[2] or model).lower()
+
+
+def pricing_for(model: str | None) -> dict | None:
+    """Best-effort per-1M-token rates for a `provider:model` string (USD).
+
+    Returns {"input_per_million", "output_per_million"} or None when the
+    model's pricing is unknown (provider-dependent models are absent from
+    the curated table).
+    """
+    model_id = _model_id(model)
+    if model_id is None:
+        return None
+    for prefix, input_price, output_price in _PRICING_RULES:
+        if model_id.startswith(prefix):
+            return {"input_per_million": input_price, "output_per_million": output_price}
+    return None
+
+
+def estimate_cost(usage: dict | None, model: str | None) -> dict | None:
+    """Estimated API cost (USD) of the thread's cumulative `usage`.
+
+    Billed at the model's per-1M-token rates; None when the model's pricing
+    is unknown or no usage was reported. Note `input_tokens` is billed input
+    (history counted per run), so the estimate matches what the provider
+    would charge for the conversation so far.
+    """
+    if not usage:
+        return None
+    pricing = pricing_for(model)
+    if pricing is None:
+        return None
+    input_tokens = usage.get("input_tokens") or 0
+    output_tokens = usage.get("output_tokens") or 0
+    input_cost = round(input_tokens / 1_000_000 * pricing["input_per_million"], 8)
+    output_cost = round(output_tokens / 1_000_000 * pricing["output_per_million"], 8)
+    return {
+        "currency": "USD",
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_cost": round(input_cost + output_cost, 8),
+        "pricing": pricing,
+    }
 
 
 def message_counts(messages: list[dict]) -> dict:
@@ -137,5 +217,7 @@ __all__ = [
     "compute_usage",
     "context_window_for",
     "current_context_input_tokens",
+    "estimate_cost",
     "message_counts",
+    "pricing_for",
 ]

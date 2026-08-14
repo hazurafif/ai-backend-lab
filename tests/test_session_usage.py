@@ -187,6 +187,14 @@ async def test_thread_usage_report(persistence):
         assert ctx["utilization"] == round(250 / 128_000, 4)
         assert ctx["remaining_tokens"] == 128_000 - 250
 
+        # estimated API cost at gpt-4o-mini rates ($0.15 / $0.60 per 1M)
+        cost = body["cost"]
+        assert cost["currency"] == "USD"
+        assert cost["pricing"] == {"input_per_million": 0.15, "output_per_million": 0.60}
+        assert cost["input_cost"] == pytest.approx(350 / 1_000_000 * 0.15)
+        assert cost["output_cost"] == pytest.approx(60 / 1_000_000 * 0.60)
+        assert cost["total_cost"] == pytest.approx(cost["input_cost"] + cost["output_cost"])
+
         assert body["active_run"] is False
 
 
@@ -204,6 +212,7 @@ async def test_thread_usage_no_usage_metadata(persistence):
         r = await client.get("/threads/t2/usage")
         body = r.json()
         assert body["usage"] is None
+        assert body["cost"] is None
         assert body["context"] is None
         # builtin default agent -> model still resolves
         assert body["model"] == config.settings.model
@@ -226,6 +235,7 @@ async def test_thread_usage_unknown_model_window(persistence):
         assert body["context"]["context_window"] is None
         assert body["context"]["utilization"] is None
         assert body["context"]["remaining_tokens"] is None
+        assert body["cost"] is None  # unknown model -> unknown pricing
         assert body["usage"] == {
             "input_tokens": 10,
             "output_tokens": 5,
