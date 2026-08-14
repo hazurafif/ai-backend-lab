@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .agent_schema import SKILL_NAME_PATTERN
+from .connection_schema import CONNECTION_NAME_PATTERN
 
 MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
 """Light provider:model validation; full resolution happens at agent build time."""
@@ -69,6 +70,17 @@ class AgentConfigIn(BaseModel):
         default=None,
         description='e.g. {"edit_file": true} -> pause for human approval before edits',
     )
+    connection: str | None = Field(
+        default=None,
+        pattern=CONNECTION_NAME_PATTERN,
+        min_length=1,
+        max_length=64,
+        description=(
+            "API connection name (base URL + API key from /agent/connections) "
+            "used to build the chat model instead of .env keys. None = env-based. "
+            "OpenAI-compatible endpoints only."
+        ),
+    )
     scope: Literal["user", "global"] = Field(
         default="user",
         description="'global' agents are shared by all users (admin only)",
@@ -86,6 +98,7 @@ class AgentConfigOut(BaseModel):
     tools: list[str] | None = None
     temperature: float | None = None
     interrupt_on: dict[str, bool] | None = None
+    connection: str | None = None
     scope: Literal["user", "global"] = "user"
     owner: str = "system"
     builtin: bool = False
