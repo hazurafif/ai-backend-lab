@@ -134,6 +134,12 @@ class Settings:
     max_upload_size_mb: int = field(
         default_factory=lambda: int(os.environ.get("MAX_UPLOAD_SIZE_MB", "25"))
     )
+    # Root of the per-user shell workspace (execute mode): real files under
+    # <WORKSPACE_ROOT>/<user_id>/, mounted as a named volume in compose — the
+    # repo stays clean and every user gets an isolated, shell-visible dir.
+    workspace_root: str = field(
+        default_factory=lambda: os.environ.get("WORKSPACE_ROOT", "/workspaces")
+    )
 
     # --- Knowledge base (RAG) ---
     # WEAVIATE_URL unset -> no vector store: KB uploads are rejected with 503

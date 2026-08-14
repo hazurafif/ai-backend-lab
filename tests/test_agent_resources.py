@@ -22,9 +22,11 @@ import pytest
 import pytest_asyncio
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolCall
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
 from pydantic import Field
 
 from app.core import config, database
@@ -198,7 +200,7 @@ async def test_skill_file_visible_to_backend(persistence):
     assert any(e == "done" for e, _ in events), events
 
 
-async def test_backend_routes_tmp_and_uploads_to_store(persistence, monkeypatch):
+async def test_backend_routes_tmp_and_uploads_to_store(persistence, monkeypatch, tmp_path):
     """/tmp/ and /uploads/ stay store-backed when execute mode is on.
 
     With EXECUTE_ENABLED=true the default backend is the host shell, but
@@ -209,6 +211,7 @@ async def test_backend_routes_tmp_and_uploads_to_store(persistence, monkeypatch)
 
     monkeypatch.setattr(runtime_settings, "execute_enabled", lambda: True)
     monkeypatch.setattr(runtime_settings, "execute_inherit_env", lambda: False)
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
     backend = build_backend(store=persistence.store)
 
     for path, body in (
@@ -225,6 +228,120 @@ async def test_backend_routes_tmp_and_uploads_to_store(persistence, monkeypatch)
     from anyio import Path as AnyioPath
 
     assert not await AnyioPath("/tmp/scratch.txt").exists()
+
+
+async def test_backend_routes_workspaces_to_user_shell_backend(persistence, monkeypatch, tmp_path):
+    """Execute mode: /workspaces/ resolves to a per-user UserShellBackend."""
+    import app.services.settings as runtime_settings
+    from app.services.agent import UserShellBackend
+
+    monkeypatch.setattr(runtime_settings, "execute_enabled", lambda: True)
+    monkeypatch.setattr(runtime_settings, "execute_inherit_env", lambda: False)
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
+
+    backend = build_backend(store=persistence.store)
+    ws = backend.routes["/workspaces/"]
+    assert isinstance(ws, UserShellBackend)
+
+    # Outside a graph run the runtime user falls back to "anonymous".
+    result = ws.write("/notes.txt", "hi")
+    assert result.error is None, result.error
+    assert (tmp_path / "workspaces" / "anonymous" / "notes.txt").exists()
+
+    # No-execute mode: /workspaces/ is the durable per-user store instead.
+    monkeypatch.setattr(runtime_settings, "execute_enabled", lambda: False)
+    backend = build_backend(store=persistence.store)
+    files = await backend.adownload_files(["/workspaces/a.txt"])
+    assert files[0].error == "file_not_found"  # store-backed (empty), not on disk
+
+
+async def test_workspace_isolates_users_and_is_shell_visible(tmp_path, monkeypatch):
+    """End-to-end: write_file + execute agree on /workspaces/<user>/ files.
+
+    The file written through the file tool lands in the runtime user's dir
+    and the execute tool's shell (cwd = that dir) can see it — the store
+    routes' "virtual mount" split does not apply to the workspace.
+    """
+    import app.services.settings as runtime_settings
+    from app.services.agent import build_agent
+    from app.services.chat import agent_stream as chat_agent_stream
+
+    monkeypatch.setattr(runtime_settings, "execute_enabled", lambda: True)
+    monkeypatch.setattr(runtime_settings, "execute_inherit_env", lambda: False)
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
+
+    class ScriptedWriteThenRun(BaseChatModel):
+        """write_file /workspaces/script.py, then run `test -f` via execute."""
+
+        responses: list[AIMessage] = Field(
+            default_factory=lambda: [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="write_file",
+                            args={
+                                "file_path": "/workspaces/script.py",
+                                "content": "print('hello from workspace')",
+                            },
+                        )
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-2",
+                            name="execute",
+                            args={"command": "test -f script.py && echo FOUND_IT"},
+                        )
+                    ],
+                ),
+                AIMessage(content="done"),
+            ]
+        )
+
+        @property
+        def _llm_type(self) -> str:
+            return "scripted"
+
+        def _generate(
+            self,
+            messages: LanguageModelInput,
+            stop: list[str] | None = None,
+            run_manager: CallbackManagerForLLMRun | None = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            return ChatResult(generations=[ChatGeneration(message=self.responses.pop(0))])
+
+        def bind_tools(
+            self,
+            tools: Sequence[dict | type | BaseChatModel],
+            *,
+            tool_choice: str | None = None,
+            **kwargs: Any,
+        ) -> Runnable[LanguageModelInput, AIMessage]:
+            return self
+
+    agent = build_agent(
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        model=ScriptedWriteThenRun(),
+        system_prompt="test",
+    )
+    events: list[tuple[str, dict]] = []
+    async for chunk in chat_agent_stream(agent, "alice", message="go"):
+        ev, _, rest = chunk.partition("\n")
+        events.append((ev.removeprefix("event: "), json.loads(rest.removeprefix("data: ").strip())))
+
+    # The file landed in ALICE's dir, not a shared one.
+    script = tmp_path / "workspaces" / "alice" / "script.py"
+    assert script.exists()
+    assert "hello from workspace" in script.read_text()
+    # execute ran with cwd = her dir and saw the file via the shell.
+    tool_outputs = [d for e, d in events if e == "tool_end"]
+    assert any("FOUND_IT" in str(d.get("output", {})) for d in tool_outputs)
 
 
 async def test_skill_bundled_files_crud(persistence):

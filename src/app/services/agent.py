@@ -21,18 +21,22 @@ Plus:
 from __future__ import annotations
 
 import logging
+import subprocess
 from collections import OrderedDict
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.local_shell import LocalShellBackend
+from deepagents.backends.protocol import BackendProtocol, ExecuteResponse, GlobResult
 from deepagents.backends.store import StoreBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.runtime import get_runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
@@ -75,6 +79,115 @@ def _user_namespace_factory(rt: Any) -> tuple[str, ...]:
     return (str(user),)
 
 
+def _runtime_user_id() -> str:
+    """The current run's user_id (runtime context), or 'anonymous'."""
+    try:
+        rt = get_runtime()
+    except Exception:
+        return "anonymous"
+    ctx = getattr(rt, "context", None) or {}
+    if isinstance(ctx, dict):
+        return str(ctx.get("user_id") or "anonymous")
+    return str(getattr(ctx, "user_id", None) or "anonymous")
+
+
+class UserShellBackend(LocalShellBackend):
+    """LocalShellBackend whose file-tool root and shell cwd resolve per user.
+
+    Multi-tenant execute mode: the composite backend routes `/workspaces/`
+    here, and every file-tool path and shell command resolves to
+    ``WORKSPACE_ROOT/<user_id>/`` — real files on a named volume (the repo
+    stays clean), isolated per user, and visible to **both** the file tools
+    and the `execute` tool (unlike the store-backed virtual mounts).
+
+    The runtime user comes from the graph execution context (same mechanism
+    as `StoreBackend`'s namespace factory); outside a run it is
+    "anonymous". `virtual_mode` guards traversal within the user's dir.
+    """
+
+    def __init__(self, root: str | Path, *, inherit_env: bool = False) -> None:
+        super().__init__(virtual_mode=True, inherit_env=inherit_env)
+        self._root = Path(root).resolve()
+        # The root is created lazily in _user_dir (never at construction):
+        # startup must not fail on an unwritable/missing volume.
+        # FilesystemBackend resolves virtual paths under self.cwd; point it
+        # at the volume root so per-user dirs stay inside the virtual root
+        # (ls displays paths like /alice/... under the workspace route).
+        self.cwd = self._root
+
+    def _user_dir(self) -> Path:
+        d = self._root / _runtime_user_id()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _resolve_path(self, key: str) -> Path:
+        """Resolve a virtual path under the current user's workspace dir."""
+        vpath = key if key.startswith("/") else "/" + key
+        if ".." in vpath or vpath.startswith("~"):
+            raise ValueError("Path traversal not allowed")
+        base = self._user_dir()
+        full = (base / vpath.lstrip("/")).resolve()
+        try:
+            full.relative_to(base)
+        except ValueError:
+            raise ValueError(f"Path:{full} outside root directory: {base}") from None
+        return full
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """FilesystemBackend.glob treats None/\"/\" as self.cwd (the volume
+        root); the user's dir is the virtual root instead."""
+        if path is None or path == "/":
+            path = ""
+        return super().glob(pattern, path=path)
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """Run the shell command in the current user's workspace dir."""
+        if not command or not isinstance(command, str):
+            return ExecuteResponse(
+                output="Error: Command must be a non-empty string.",
+                exit_code=1,
+                truncated=False,
+            )
+        cwd = self._user_dir()
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        if effective_timeout <= 0:
+            msg = f"timeout must be positive, got {effective_timeout}"
+            raise ValueError(msg)
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                shell=True,  # Intentional: LLM-controlled shell execution
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                timeout=effective_timeout,
+                env=self._env,
+                cwd=str(cwd),
+            )
+        except subprocess.TimeoutExpired:
+            return ExecuteResponse(
+                output=f"Error: Command timed out after {effective_timeout} seconds",
+                exit_code=124,
+                truncated=False,
+            )
+        output_parts = []
+        if result.stdout:
+            output_parts.append(result.stdout)
+        if result.stderr:
+            stderr_lines = result.stderr.strip().split("\n")
+            output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
+        output = "\n".join(output_parts) if output_parts else "<no output>"
+        truncated = False
+        if len(output) > self._max_output_bytes:
+            output = output[: self._max_output_bytes]
+            output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+            truncated = True
+        if result.returncode != 0:
+            output = f"{output.rstrip()}\n\nExit code: {result.returncode}"
+        return ExecuteResponse(output=output, exit_code=result.returncode, truncated=truncated)
+
+
 def _global_namespace_factory(_rt: Any) -> tuple[str, ...]:
     """Global namespace shared by all users (agent-level resources)."""
     return GLOBAL_SKILLS_NS
@@ -89,25 +202,36 @@ def build_backend(
 
     The default backend is a durable StoreBackend over the LangGraph store
     (Postgres in production), so every user's workspace persists across
-    threads. With `EXECUTE_ENABLED=true` the default is LocalShellBackend
-    (host shell) instead. `/memories/` (per user), `/skills/` (global),
-    `/tmp/` (per user) and `/uploads/` (per user) are always routed to the
-    durable store — so even in execute mode, filesystem-middleware writes
-    under those paths persist to the database, not the host filesystem.
-    (Shell commands via the `execute` tool bypass backend routing and always
-    see the real host filesystem.)
+    threads. With `EXECUTE_ENABLED=true` the default is a UserShellBackend
+    rooted at `WORKSPACE_ROOT/<user_id>/` instead — real files on a named
+    volume (no repo pollution), isolated per user, and visible to **both**
+    the file tools and the `execute` tool (whose commands always run on the
+    default backend, so per-user isolation needs a per-user default).
+    `/memories/` (per user), `/skills/` (global), `/tmp/` (per user) and
+    `/uploads/` (per user) are always routed to the durable store — so even
+    in execute mode, filesystem-middleware writes under those paths persist
+    to the database, not the host filesystem.
+
+    `/workspaces/` aliases the execute-mode default (and the per-user store
+    without execute), so canonical workspace paths stay stable across modes.
 
     `agent_skill_routes` maps skills source paths (e.g. `/skills/alice/research/`)
     to store namespaces for named agents; longer prefixes win, so these
     shadow `/skills/` for their own paths only.
     """
     user_store = StoreBackend(store=store, namespace=_user_namespace_factory)
-    default = (
-        LocalShellBackend(inherit_env=runtime_settings.execute_inherit_env())
-        if runtime_settings.execute_enabled()
-        else user_store
-    )
-    routes: dict[str, StoreBackend] = {
+    if runtime_settings.execute_enabled():
+        # Per-user shell workspace: file tools AND execute agree on real
+        # files under WORKSPACE_ROOT/<user_id>/ (named volume, no repo
+        # pollution). Being the DEFAULT matters: CompositeBackend.execute
+        # is not path-routable and always runs on the default backend.
+        workspace = UserShellBackend(
+            root=settings.workspace_root, inherit_env=runtime_settings.execute_inherit_env()
+        )
+        default: BackendProtocol = workspace
+    else:
+        default = user_store
+    routes: dict[str, BackendProtocol] = {
         "/memories/": user_store,
         "/skills/": StoreBackend(store=store, namespace=_global_namespace_factory),
         # Scratch + uploads stay durable even when the default is the host
@@ -115,6 +239,12 @@ def build_backend(
         "/tmp/": user_store,
         "/uploads/": user_store,
     }
+    if runtime_settings.execute_enabled():
+        # /workspaces/ aliases the per-user default so canonical paths stay
+        # stable across modes (without execute it is the durable user store).
+        routes["/workspaces/"] = default
+    else:
+        routes["/workspaces/"] = user_store
     for source, ns in (agent_skill_routes or {}).items():
         routes[source] = StoreBackend(store=store, namespace=lambda rt, ns=ns: ns)
     return CompositeBackend(default=default, routes=routes)

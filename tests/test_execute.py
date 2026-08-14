@@ -33,6 +33,12 @@ pytestmark = pytest.mark.filterwarnings(
 )
 
 
+@pytest.fixture(autouse=True)
+def _workspace_root(tmp_path, monkeypatch):
+    """Execute-mode tests write under a temp workspace, never /workspaces."""
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
+
+
 class Scripted(BaseChatModel):
     """Returns a scripted sequence of AIMessages, clamping at the last."""
 

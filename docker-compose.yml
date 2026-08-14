@@ -24,6 +24,9 @@ services:
       # Store-backed routes (/skills/, /memories/, /tmp/, /uploads/) live in
       # Postgres and need no volume.
       - uploads:/app/uploads
+      # Shell-visible per-user workspaces (execute mode): the agent's file
+      # tools and execute tool agree on real files under /workspaces/<user>.
+      - workspaces:/workspaces
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,4 +89,5 @@ services:
 volumes:
   pgdata:
   uploads:
+  workspaces:
   weaviate_data:

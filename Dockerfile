@@ -29,8 +29,8 @@ RUN uv sync --frozen --no-dev
 #    /app/uploads (mounted as a named volume in compose so they survive
 #    app container recreates).
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /app/uploads \
-    && chown -R appuser:appuser /app
+    && mkdir -p /app/uploads /workspaces \
+    && chown -R appuser:appuser /app /workspaces
 
 USER appuser
 
