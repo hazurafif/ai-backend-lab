@@ -75,6 +75,10 @@ class Settings:
     mcp_servers_file: str = field(
         default_factory=lambda: os.environ.get("MCP_SERVERS_FILE", "mcp_servers.json")
     )
+    # Per-call timeout (seconds) for the MCP tools proxy (POST /mcp/tools/call).
+    mcp_tool_call_timeout: float = field(
+        default_factory=lambda: float(os.environ.get("MCP_TOOL_CALL_TIMEOUT", "60"))
+    )
 
     # --- Web search (SearXNG, self-hosted) ---
     # SEARXNG_URL unset -> the web_search tool is not registered at all.
