@@ -29,6 +29,9 @@ services:
         condition: service_healthy
     # The agent's execute tool runs inside this container (cwd /app, as
     # appuser) — the container is the boundary, not the host.
+    # MCP servers running on the host (e.g. gofastmcp on :8090) must be
+    # configured in /agent/tools with `host.containers.internal` as the host:
+    # `127.0.0.1` inside this container is the container itself and is refused.
     mem_limit: 1g
     pids_limit: 512
     restart: unless-stopped
