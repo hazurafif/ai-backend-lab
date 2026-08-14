@@ -20,13 +20,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Host copies of uploads + agent workspace files (non-routed writes).
-      # Store-backed routes (/skills/, /memories/, /tmp/, /uploads/) live in
-      # Postgres and need no volume.
-      - uploads:/app/uploads
-      # Shell-visible per-user workspaces (execute mode): the agent's file
-      # tools and execute tool agree on real files under /workspaces/<user>.
-      - workspaces:/workspaces
+      # Per-user agent workspaces (real files, one dir per user). The store
+      # mirrors them via the workspace sync (services/workspace.py).
+      - workspaces:/app/.workspace
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,6 +84,5 @@ services:
 
 volumes:
   pgdata:
-  uploads:
   workspaces:
   weaviate_data:

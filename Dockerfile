@@ -25,12 +25,11 @@ COPY src ./src
 COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
-# 3) Non-root runtime user; uploads + agent workspace files land under
-#    /app/uploads (mounted as a named volume in compose so they survive
-#    app container recreates).
+# 3) Non-root runtime user; per-user workspaces live under /app/.workspace
+#    (mounted as a named volume in compose so they survive app recreates).
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /app/uploads /workspaces \
-    && chown -R appuser:appuser /app /workspaces
+    && mkdir -p /app/.workspace \
+    && chown -R appuser:appuser /app
 
 USER appuser
 

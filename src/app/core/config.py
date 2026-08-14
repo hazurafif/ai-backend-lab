@@ -125,20 +125,17 @@ class Settings:
     )
 
     # --- Chat file uploads ---
-    # Files posted to /chat and /api/chat (multipart) are saved under
-    # UPLOADS_DIR (relative to the server cwd, which is the agent's
-    # filesystem root when EXECUTE_ENABLED=true) and the agent is told their
-    # paths, so it can inspect/manipulate them with its own tools (e.g.
-    # `pdftotext` for PDFs) instead of the API parsing arbitrary formats.
-    uploads_dir: str = field(default_factory=lambda: os.environ.get("UPLOADS_DIR", "./uploads"))
+    # Uploads are stored in Postgres (store) and materialized into the user's
+    # workspace dir (uploads/) by the workspace sync — no host-disk copy.
     max_upload_size_mb: int = field(
         default_factory=lambda: int(os.environ.get("MAX_UPLOAD_SIZE_MB", "25"))
     )
-    # Root of the per-user shell workspace (execute mode): real files under
-    # <WORKSPACE_ROOT>/<user_id>/, mounted as a named volume in compose — the
-    # repo stays clean and every user gets an isolated, shell-visible dir.
+    # Root of the per-user workspace (the agent's only filesystem): real
+    # files under <WORKSPACE_ROOT>/<user_id>/, mounted as a named volume in
+    # compose (default ./ .workspace = container /app/.workspace). The repo
+    # stays clean; the store mirrors it via the workspace sync.
     workspace_root: str = field(
-        default_factory=lambda: os.environ.get("WORKSPACE_ROOT", "/workspaces")
+        default_factory=lambda: os.environ.get("WORKSPACE_ROOT", ".workspace")
     )
 
     # --- Knowledge base (RAG) ---

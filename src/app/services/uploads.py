@@ -1,16 +1,10 @@
-"""User file uploads for chat: saved to the store + disk, read by the agent.
+"""User file uploads for chat: saved to the store, read from the workspace.
 
-Files posted to /chat and /api/chat (multipart) land under
-``<UPLOADS_DIR>/<username>/`` on the host (the agent's filesystem root when
-``EXECUTE_ENABLED=true``) **and** in the LangGraph store at the key the
-agent's file tools resolve for ``/uploads/<username>/<name>``. The dual write
-keeps both access paths working: file tools (``read_file``/``write_file``)
-are routed by the composite backend to the durable store (persists across
-threads, works in no-execute mode too), while the host copy stays available
-for the ``execute`` tool (shell commands bypass backend routing and always
-see the real filesystem, e.g. ``pdftotext uploads/alice/report.pdf``). The
-endpoint appends the exact paths to the user message so the agent knows what
-it can work with.
+Files posted to /chat and /api/chat (multipart) are written to the LangGraph
+store (Postgres in production) at the key the workspace sync maps to disk:
+``uploads/<name>`` under the user's workspace dir on the next run. The agent
+is told the virtual path (``/uploads/<name>``), which its file tools resolve
+into the real workspace file — no host-disk copy, no repo pollution.
 
 File names are sanitized (basename only), files are size-capped, and
 oversized uploads are skipped with a note instead of failing the whole chat.
@@ -37,27 +31,13 @@ def sanitize_filename(name: str | None) -> str:
     return clean[:120] or "upload"
 
 
-def agent_path(dest: Path) -> str:
-    """Path as the agent's tools see it (relative to the server cwd)."""
-    try:
-        return dest.resolve().relative_to(Path.cwd().resolve()).as_posix()
-    except ValueError:
-        return str(dest)
-
-
-def upload_dir(username: str) -> Path:
-    """Per-user upload directory (created on demand)."""
-    return Path(settings.uploads_dir) / username
-
-
 def _persist_to_store(username: str, name: str, data: bytes) -> None:
-    """Mirror the upload into the shared store at the routed /uploads/ key.
+    """Write the upload into the store at the workspace-mapped key.
 
-    The composite backend routes ``/uploads/`` to a per-user StoreBackend, so
-    the agent's file tools read ``/uploads/<username>/<name>`` as the store
-    key ``/<username>/<name>`` in the ``(username,)`` namespace — write it
-    there so reads resolve in both execute and no-execute mode. No-op when
-    the store is unavailable (e.g. persistence not started).
+    The workspace sync copies keys ``/<username>/<name>`` in the
+    ``(username,)`` namespace to ``uploads/<name>`` in the user's workspace
+    dir at run start, so the agent reads ``/uploads/<name>``. No-op when the
+    store is unavailable (e.g. persistence not started).
     """
     store = persistence.store
     if store is None:
@@ -67,7 +47,7 @@ def _persist_to_store(username: str, name: str, data: bytes) -> None:
 
 
 async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
-    """Stream one upload to the host disk and the store, size-capped.
+    """Buffer one upload (size-capped) and persist it to the store.
 
     Returns metadata (``name``, ``path``, ``size``, ``content_type``) or
     ``{"error": ...}`` when the file was skipped (oversized). Colliding names
@@ -75,15 +55,20 @@ async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
     """
     name = sanitize_filename(upload.filename)
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    dest_dir = upload_dir(username)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / name
-    if dest.exists():
+    # Colliding names get a numeric suffix so re-uploads never clobber
+    # earlier files (dedupe against the store's upload keys).
+    upload_prefix = f"/{username}/"
+    existing = {
+        (it.key or "")[len(upload_prefix) :]
+        for it in await persistence.store.asearch((username,))
+        if (it.key or "").startswith(upload_prefix)
+    }
+    if name in existing:
         stem, suffix = name.rsplit(".", 1) if "." in name else (name, "")
         for i in range(1, 1000):
-            candidate = dest_dir / f"{stem} ({i}){('.' + suffix) if suffix else ''}"
-            if not candidate.exists():
-                dest = candidate
+            candidate = f"{stem} ({i}){('.' + suffix) if suffix else ''}"
+            if candidate not in existing:
+                name = candidate
                 break
     data = bytearray()
     try:
@@ -97,12 +82,10 @@ async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
     finally:
         await upload.close()
     content = bytes(data)
-    with dest.open("wb") as fh:
-        fh.write(content)
-    _persist_to_store(username, dest.name, content)
+    _persist_to_store(username, name, content)
     return {
-        "name": dest.name,
-        "path": agent_path(dest),
+        "name": name,
+        "path": f"/uploads/{name}",
         "size": len(content),
         "content_type": upload.content_type or "",
     }

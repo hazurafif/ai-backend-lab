@@ -10,13 +10,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
-from anyio import Path as AnyioPath
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import AIMessage
@@ -69,9 +67,9 @@ class Scripted(BaseChatModel):
 
 @pytest_asyncio.fixture
 async def memory_persistence(tmp_path, monkeypatch):
-    """In-memory backend + uploads dir redirected to a temp dir."""
+    """In-memory backend + workspace root redirected to a temp dir."""
     config.settings.database_uri = None
-    monkeypatch.setattr(config.settings, "uploads_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspace"))
     await database.persistence.start()
     yield database.persistence
     await database.persistence.stop()
@@ -116,9 +114,7 @@ def test_sanitize_filename():
     assert uploads.sanitize_filename("../../etc/passwd") == "passwd"
 
 
-async def test_save_upload_writes_file_and_dedupes(memory_persistence, tmp_path):
-    uploads_dir = Path(config.settings.uploads_dir)
-
+async def test_save_upload_writes_file_and_dedupes(memory_persistence):
     class FakeUpload:
         filename = "report.pdf"
         content_type = "application/pdf"
@@ -136,13 +132,18 @@ async def test_save_upload_writes_file_and_dedupes(memory_persistence, tmp_path)
     r1 = await uploads.save_upload("alice", FakeUpload())
     assert r1["name"] == "report.pdf"
     assert r1["size"] == len(b"%PDF-1.4 fake")
-    assert r1["path"].endswith("report.pdf")
-    assert (uploads_dir / "alice" / "report.pdf").read_bytes() == b"%PDF-1.4 fake"
+    assert r1["path"] == "/uploads/report.pdf"
+    # Stored, not on any host disk.
+    item = await memory_persistence.store.aget(("alice",), "/alice/report.pdf")
+    assert item is not None
+    assert item.value["content"] == "%PDF-1.4 fake"
 
-    # Same name again -> numeric suffix, both files kept.
+    # Same name again -> numeric suffix, both kept in the store.
     r2 = await uploads.save_upload("alice", FakeUpload())
     assert r2["name"] == "report (1).pdf"
-    assert (uploads_dir / "alice" / "report (1).pdf").exists()
+    assert r2["path"] == "/uploads/report (1).pdf"
+    item2 = await memory_persistence.store.aget(("alice",), "/alice/report (1).pdf")
+    assert item2 is not None
 
 
 async def test_upload_mirrored_to_store(memory_persistence):
@@ -216,7 +217,8 @@ async def test_upload_over_cap_is_skipped_with_note(memory_persistence, monkeypa
 
     result = await uploads.save_upload("alice", BigUpload())
     assert "error" in result and "skipped" in result["error"]
-    assert not await AnyioPath(config.settings.uploads_dir, "alice", "big.bin").exists()
+    item = await memory_persistence.store.aget(("alice",), "/alice/big.bin")
+    assert item is None
 
 
 # ---------------------------------------------------------------------------

@@ -48,28 +48,34 @@ runs the app capped at 1 GB RAM.
 
 ## Storage model (what the agent sees)
 
-File tools and the `execute` tool resolve paths through a composite backend;
-`execute` always runs on the default backend (not path-routable), so the
-default itself is per-user in execute mode.
+There is **one** filesystem: the per-user workspace. Every file-tool path and
+`execute` command resolves to real files under `WORKSPACE_ROOT/<user_id>/`
+(default `.workspace/` — a named volume in compose, so the repo stays clean
+and users stay isolated). No virtual mounts.
 
-| Path | Backend | File tools | `execute` | Multi-user | Durability |
-|---|---|---|---|---|---|
-| `/workspaces/…` + everything non-routed | `UserShellBackend` → `WORKSPACE_ROOT/<user_id>/` | ✅ | ✅ (cwd = user dir) | ✅ enforced in code | named volume (`workspaces`) |
-| `/memories/`, `/tmp/`, `/uploads/` | `StoreBackend` (per-user) | ✅ | ❌ | ✅ | Postgres |
-| `/skills/` | `StoreBackend` (global) | ✅ | ❌ | ✅ | Postgres |
+Durability comes from the **workspace sync** (`services/workspace.py`):
+before each run the user's store files (Postgres) are materialized into the
+workspace dir; after the run the agent's changes are synced back.
+
+| Workspace subdir | Store side | Sync policy |
+|---|---|---|
+| `memories/` | ns `(user,)` keys `/<name>` | down if missing on disk, always up |
+| `uploads/` | ns `(user,)` keys `/<user>/<name>` | always down, always up |
+| `skills/` | global ns / agent snapshots | always down, **never** up (read-only) |
+| root files (e.g. `/script.py`) | ns `(user,)` keys `/<name>` | up only (materialize as memories/) |
 
 Rules of thumb:
 
-- **`/workspaces/` is where real work happens**: `write_file` and `execute`
-  agree on real files under `WORKSPACE_ROOT/<user_id>/` (no repo pollution,
-  isolation enforced in code, survives container restarts).
-- **Store mounts are durable but shell-invisible**: to *run* a skill script,
-  copy it into `/workspaces/` first (`read_file /skills/…` → `write_file`).
-- **Not a sandbox**: `execute` can still reach absolute paths; per-user
+- **Everything is executable**: skills are real files under `skills/` — copy
+  one out (or read it) and run it directly; file tools and `execute` agree.
+- **`memories/` and `uploads/` persist** via sync-up after every run (even
+  on error/cancel). `skills/` is admin-owned — agent edits to it are
+  discarded on the next run.
+- **Not a sandbox**: `execute` can reach any absolute path; per-user
   isolation is the *default* (cwd + file-tool roots), not a boundary — keep
   HITL (`INTERRUPT_ON_JSON='{"execute": true}'`) in trusted environments.
-- Without `EXECUTE_ENABLED`, `/workspaces/` falls back to the per-user store:
-  same paths, different durability.
+- `EXECUTE_ENABLED=false` keeps the same backend but refuses every execute
+  command (tool stays registered, returns "Execution not available").
 
 ## Configuration
 

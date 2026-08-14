@@ -30,8 +30,7 @@ from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.local_shell import LocalShellBackend
-from deepagents.backends.protocol import BackendProtocol, ExecuteResponse, GlobResult
-from deepagents.backends.store import StoreBackend
+from deepagents.backends.protocol import ExecuteResponse, GlobResult
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -94,19 +93,31 @@ def _runtime_user_id() -> str:
 class UserShellBackend(LocalShellBackend):
     """LocalShellBackend whose file-tool root and shell cwd resolve per user.
 
-    Multi-tenant execute mode: the composite backend routes `/workspaces/`
-    here, and every file-tool path and shell command resolves to
-    ``WORKSPACE_ROOT/<user_id>/`` — real files on a named volume (the repo
-    stays clean), isolated per user, and visible to **both** the file tools
-    and the `execute` tool (unlike the store-backed virtual mounts).
+    The single backend of the simplified model: every file-tool path and
+    shell command resolves to ``WORKSPACE_ROOT/<user_id>/`` — real files on
+    a named volume (the repo stays clean), isolated per user, and visible to
+    **both** the file tools and the `execute` tool. The durable store is
+    mirrored in/out by `services/workspace` (sync_down before a run,
+    sync_up after), so the agent never sees virtual mounts.
 
     The runtime user comes from the graph execution context (same mechanism
     as `StoreBackend`'s namespace factory); outside a run it is
     "anonymous". `virtual_mode` guards traversal within the user's dir.
+
+    `execution_enabled=False` keeps the `EXECUTE_ENABLED` opt-in: the tool
+    stays registered but every command is refused with the standard
+    "Execution not available" error.
     """
 
-    def __init__(self, root: str | Path, *, inherit_env: bool = False) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        inherit_env: bool = False,
+        execution_enabled: bool = True,
+    ) -> None:
         super().__init__(virtual_mode=True, inherit_env=inherit_env)
+        self._execution_enabled = execution_enabled
         self._root = Path(root).resolve()
         # The root is created lazily in _user_dir (never at construction):
         # startup must not fail on an unwritable/missing volume.
@@ -133,6 +144,15 @@ class UserShellBackend(LocalShellBackend):
             raise ValueError(f"Path:{full} outside root directory: {base}") from None
         return full
 
+    def _to_virtual_path(self, path: Path) -> str:
+        """Display paths relative to the USER dir, not the base root.
+
+        The middleware lists a source (e.g. /skills/...) and re-reads the
+        returned entry paths; if entries displayed as /<user>/... the
+        re-read would resolve under the user dir again and miss.
+        """
+        return "/" + path.resolve().relative_to(self._user_dir()).as_posix()
+
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         """FilesystemBackend.glob treats None/\"/\" as self.cwd (the volume
         root); the user's dir is the virtual root instead."""
@@ -141,7 +161,20 @@ class UserShellBackend(LocalShellBackend):
         return super().glob(pattern, path=path)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        """Run the shell command in the current user's workspace dir."""
+        """Run the shell command in the current user's workspace dir.
+
+        Refused (standard "Execution not available" error) when the
+        `EXECUTE_ENABLED` opt-in is off.
+        """
+        if not self._execution_enabled:
+            return ExecuteResponse(
+                output=(
+                    "Error: Execution not available. The execute tool is "
+                    "disabled (EXECUTE_ENABLED)."
+                ),
+                exit_code=1,
+                truncated=False,
+            )
         if not command or not isinstance(command, str):
             return ExecuteResponse(
                 output="Error: Command must be a non-empty string.",
@@ -193,61 +226,29 @@ def _global_namespace_factory(_rt: Any) -> tuple[str, ...]:
     return GLOBAL_SKILLS_NS
 
 
-def build_backend(
-    *,
-    store: BaseStore,
-    agent_skill_routes: dict[str, tuple[str, ...]] | None = None,
-) -> CompositeBackend:
-    """Build the shared filesystem backend for the agent and the resources API.
+def build_backend(*, store: BaseStore) -> CompositeBackend:
+    """Build the agent's filesystem backend: one per-user real workspace.
 
-    The default backend is a durable StoreBackend over the LangGraph store
-    (Postgres in production), so every user's workspace persists across
-    threads. With `EXECUTE_ENABLED=true` the default is a UserShellBackend
-    rooted at `WORKSPACE_ROOT/<user_id>/` instead — real files on a named
-    volume (no repo pollution), isolated per user, and visible to **both**
-    the file tools and the `execute` tool (whose commands always run on the
-    default backend, so per-user isolation needs a per-user default).
-    `/memories/` (per user), `/skills/` (global), `/tmp/` (per user) and
-    `/uploads/` (per user) are always routed to the durable store — so even
-    in execute mode, filesystem-middleware writes under those paths persist
-    to the database, not the host filesystem.
+    Every path (file tools AND the `execute` tool) resolves to
+    ``WORKSPACE_ROOT/<user_id>/`` via `UserShellBackend` — real files on a
+    named volume, isolated per user, no virtual mounts. Durability comes
+    from `services/workspace`, which mirrors the store (Postgres) into the
+    workspace dir before each run and syncs agent changes back afterwards.
 
-    `/workspaces/` aliases the execute-mode default (and the per-user store
-    without execute), so canonical workspace paths stay stable across modes.
+    The `store` argument is kept for API stability (the resources API and
+    tests pass it); the store itself is not consulted at build time.
 
-    `agent_skill_routes` maps skills source paths (e.g. `/skills/alice/research/`)
-    to store namespaces for named agents; longer prefixes win, so these
-    shadow `/skills/` for their own paths only.
+    `EXECUTE_ENABLED=false` keeps the same backend but refuses every
+    execute command (opt-in shell).
     """
-    user_store = StoreBackend(store=store, namespace=_user_namespace_factory)
-    if runtime_settings.execute_enabled():
-        # Per-user shell workspace: file tools AND execute agree on real
-        # files under WORKSPACE_ROOT/<user_id>/ (named volume, no repo
-        # pollution). Being the DEFAULT matters: CompositeBackend.execute
-        # is not path-routable and always runs on the default backend.
-        workspace = UserShellBackend(
-            root=settings.workspace_root, inherit_env=runtime_settings.execute_inherit_env()
-        )
-        default: BackendProtocol = workspace
-    else:
-        default = user_store
-    routes: dict[str, BackendProtocol] = {
-        "/memories/": user_store,
-        "/skills/": StoreBackend(store=store, namespace=_global_namespace_factory),
-        # Scratch + uploads stay durable even when the default is the host
-        # shell: agent file-tool writes under these paths land in the store.
-        "/tmp/": user_store,
-        "/uploads/": user_store,
-    }
-    if runtime_settings.execute_enabled():
-        # /workspaces/ aliases the per-user default so canonical paths stay
-        # stable across modes (without execute it is the durable user store).
-        routes["/workspaces/"] = default
-    else:
-        routes["/workspaces/"] = user_store
-    for source, ns in (agent_skill_routes or {}).items():
-        routes[source] = StoreBackend(store=store, namespace=lambda rt, ns=ns: ns)
-    return CompositeBackend(default=default, routes=routes)
+    return CompositeBackend(
+        default=UserShellBackend(
+            root=settings.workspace_root,
+            inherit_env=runtime_settings.execute_inherit_env(),
+            execution_enabled=runtime_settings.execute_enabled(),
+        ),
+        routes={},
+    )
 
 
 def build_agent(
@@ -361,11 +362,10 @@ class AgentRegistry:
         self._static_default = static_default
         self._cache: OrderedDict[str, CompiledStateGraph] = OrderedDict()
         self._max_cache = max_cache
-        self._agent_skill_routes: dict[str, tuple[str, ...]] = {}
 
     @property
     def backend(self) -> CompositeBackend:
-        """Current filesystem backend (rebuilt when a new agent route appears)."""
+        """Current filesystem backend (per-user workspace)."""
         return self._backend
 
     async def resolve(
@@ -388,7 +388,6 @@ class AgentRegistry:
         if cached is not None:
             self._cache.move_to_end(key)
             return cached
-        self._ensure_skill_route(spec)
         tools = self._select_tools(spec)
         model = self._resolve_model(spec)
         graph = build_agent(
@@ -408,19 +407,6 @@ class AgentRegistry:
         while len(self._cache) > self._max_cache:
             self._cache.popitem(last=False)
         return graph
-
-    def _ensure_skill_route(self, spec: AgentSpec) -> None:
-        """Add the agent's skills backend route (rebuilding the backend if new)."""
-        source = spec.skills_source
-        ns = spec.skills_ns
-        if source is None or ns is None or source in self._backend.routes:
-            return
-        self._agent_skill_routes[source] = ns
-        self._backend = build_backend(
-            store=self._store, agent_skill_routes=self._agent_skill_routes
-        )
-        self._cache.clear()
-        logger.info("agent skills route added: %s -> %s", source, ns)
 
     def _select_tools(self, spec: AgentSpec) -> list[BaseTool]:
         """Tools for the agent: inherited (all) or the named selection."""
@@ -523,7 +509,7 @@ class AgentRegistry:
         """
         self._checkpointer = checkpointer
         self._store = store
-        self._backend = build_backend(store=store, agent_skill_routes=self._agent_skill_routes)
+        self._backend = build_backend(store=store)
         self._cache.clear()
 
     def invalidate(self) -> None:

@@ -13,6 +13,7 @@ production via the same BaseStore API). Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -172,25 +173,27 @@ async def test_skill_crud(persistence):
     assert item is None  # deleted
 
 
-async def test_skill_file_visible_to_backend(persistence):
-    """Skills written via the API land in the shared backend (/skills/ route)."""
+async def test_skill_file_visible_to_backend(persistence, tmp_path, monkeypatch):
+    """Skills written via the API land in the agent's workspace (sync-down)."""
     from app.schema.agent_schema import SkillIn
     from app.services.resources import create_skill
+    from app.services.workspace import sync_down
 
-    backend = build_backend(store=persistence.store)
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
     await create_skill(
         persistence.store, SkillIn(name="api-skill", description="d", content="body")
     )
-    files = await backend.adownload_files(["/skills/api-skill/SKILL.md"])
-    assert files and files[0] is not None
-    text = files[0].content.decode()
+    await sync_down(persistence.store, "tester")
+    skill_file = tmp_path / "workspaces" / "tester" / "skills" / "api-skill" / "SKILL.md"
+    assert skill_file.exists()
+    text = skill_file.read_text()
     assert "name: api-skill" in text and "body" in text
 
-    # the agent builds and runs fine with the shared backend + skills source
+    # the agent builds and runs fine with the workspace backend + skills source
     agent = build_agent(
         checkpointer=persistence.checkpointer,
         store=persistence.store,
-        backend=backend,
+        backend=build_backend(store=persistence.store),
         model=scripted_model(),
         system_prompt="test",
     )
@@ -200,38 +203,12 @@ async def test_skill_file_visible_to_backend(persistence):
     assert any(e == "done" for e, _ in events), events
 
 
-async def test_backend_routes_tmp_and_uploads_to_store(persistence, monkeypatch, tmp_path):
-    """/tmp/ and /uploads/ stay store-backed when execute mode is on.
+async def test_backend_is_single_per_user_workspace(persistence, monkeypatch, tmp_path):
+    """The backend is one UserShellBackend: everything lands in the user's dir.
 
-    With EXECUTE_ENABLED=true the default backend is the host shell, but
-    file-tool writes under these routes must still land in the durable store
-    (per user), not on the host filesystem.
+    No virtual mounts: file-tool writes under any path (and execute commands)
+    resolve to WORKSPACE_ROOT/<user>/, isolated per user.
     """
-    import app.services.settings as runtime_settings
-
-    monkeypatch.setattr(runtime_settings, "execute_enabled", lambda: True)
-    monkeypatch.setattr(runtime_settings, "execute_inherit_env", lambda: False)
-    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
-    backend = build_backend(store=persistence.store)
-
-    for path, body in (
-        ("/tmp/scratch.txt", "scratch"),
-        ("/uploads/alice/report.txt", "uploaded"),
-    ):
-        result = await backend.awrite(path, body)
-        assert result.error is None, result.error
-        files = await backend.adownload_files([path])
-        assert files[0] is not None
-        assert files[0].content.decode() == body
-
-    # No leaks onto the real host filesystem.
-    from anyio import Path as AnyioPath
-
-    assert not await AnyioPath("/tmp/scratch.txt").exists()
-
-
-async def test_backend_routes_workspaces_to_user_shell_backend(persistence, monkeypatch, tmp_path):
-    """Execute mode: /workspaces/ resolves to a per-user UserShellBackend."""
     import app.services.settings as runtime_settings
     from app.services.agent import UserShellBackend
 
@@ -240,22 +217,23 @@ async def test_backend_routes_workspaces_to_user_shell_backend(persistence, monk
     monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
 
     backend = build_backend(store=persistence.store)
-    ws = backend.routes["/workspaces/"]
-    assert isinstance(ws, UserShellBackend)
+    assert isinstance(backend.default, UserShellBackend)
+    assert backend.routes == {}
 
     # Outside a graph run the runtime user falls back to "anonymous".
-    result = ws.write("/notes.txt", "hi")
+    result = await backend.awrite("/notes.txt", "hi")
     assert result.error is None, result.error
     assert (tmp_path / "workspaces" / "anonymous" / "notes.txt").exists()
 
-    # No-execute mode: /workspaces/ is the durable per-user store instead.
+    # Execute is refused when the opt-in is off (same backend, gated tool).
     monkeypatch.setattr(runtime_settings, "execute_enabled", lambda: False)
     backend = build_backend(store=persistence.store)
-    files = await backend.adownload_files(["/workspaces/a.txt"])
-    assert files[0].error == "file_not_found"  # store-backed (empty), not on disk
+    resp = backend.default.execute("echo hi")  # type: ignore[attr-defined]
+    assert resp.exit_code == 1
+    assert "Execution not available" in resp.output
 
 
-async def test_workspace_isolates_users_and_is_shell_visible(tmp_path, monkeypatch):
+async def test_workspace_isolates_users_and_is_shell_visible(persistence, tmp_path, monkeypatch):
     """End-to-end: write_file + execute agree on /workspaces/<user>/ files.
 
     The file written through the file tool lands in the runtime user's dir
@@ -271,7 +249,7 @@ async def test_workspace_isolates_users_and_is_shell_visible(tmp_path, monkeypat
     monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
 
     class ScriptedWriteThenRun(BaseChatModel):
-        """write_file /workspaces/script.py, then run `test -f` via execute."""
+        """write_file /script.py, then run `test -f` via execute."""
 
         responses: list[AIMessage] = Field(
             default_factory=lambda: [
@@ -282,7 +260,7 @@ async def test_workspace_isolates_users_and_is_shell_visible(tmp_path, monkeypat
                             id="call-1",
                             name="write_file",
                             args={
-                                "file_path": "/workspaces/script.py",
+                                "file_path": "/script.py",
                                 "content": "print('hello from workspace')",
                             },
                         )
@@ -342,6 +320,16 @@ async def test_workspace_isolates_users_and_is_shell_visible(tmp_path, monkeypat
     # execute ran with cwd = her dir and saw the file via the shell.
     tool_outputs = [d for e, d in events if e == "tool_end"]
     assert any("FOUND_IT" in str(d.get("output", {})) for d in tool_outputs)
+    # sync-up ran after the run: the file is in the store, durable. The
+    # stream may close before the background sync finishes — poll briefly.
+    item = None
+    for _ in range(100):
+        item = await persistence.store.aget(("alice",), "/script.py")
+        if item is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert item is not None
+    assert item.value["content"] == "print('hello from workspace')"
 
 
 async def test_skill_bundled_files_crud(persistence):
@@ -432,12 +420,13 @@ async def test_skill_bundled_files_crud(persistence):
         assert await persistence.store.aget(GLOBAL_SKILLS_NS, key) is None
 
 
-async def test_skill_files_visible_to_backend(persistence):
-    """Bundled files land in the shared /skills/ backend the agent reads."""
+async def test_skill_files_visible_to_backend(persistence, tmp_path, monkeypatch):
+    """Bundled files land in the workspace the agent reads (sync-down)."""
     from app.schema.agent_schema import SkillFileIn, SkillIn
     from app.services.resources import create_skill
+    from app.services.workspace import sync_down
 
-    backend = build_backend(store=persistence.store)
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
     await create_skill(
         persistence.store,
         SkillIn(
@@ -447,17 +436,23 @@ async def test_skill_files_visible_to_backend(persistence):
             files=[SkillFileIn(path="scripts/run.py", content="print('hi')")],
         ),
     )
-    # SKILL.md + bundled file are both readable through the backend
-    files = await backend.adownload_files(
-        ["/skills/multi-file/SKILL.md", "/skills/multi-file/scripts/run.py"]
+    await sync_down(persistence.store, "tester")
+    # SKILL.md + bundled file are both real files in the workspace.
+    skill_dir = tmp_path / "workspaces" / "tester" / "skills" / "multi-file"
+    assert (skill_dir / "SKILL.md").exists()
+    assert b"print('hi')" in (skill_dir / "scripts" / "run.py").read_bytes()
+    # A graph run (runtime user = tester) resolves /skills/ into that dir.
+    agent = build_agent(
+        checkpointer=persistence.checkpointer,
+        store=persistence.store,
+        backend=build_backend(store=persistence.store),
+        model=scripted_model(),
+        system_prompt="test",
     )
-    assert len(files) == 2 and all(f is not None for f in files)
-    assert b"print('hi')" in files[1].content
-    # directory listing exposes the skill-creator structure
-    listing = await backend.als("/skills/multi-file")
-    paths = [e["path"] for e in listing.entries]
-    assert "/skills/multi-file/SKILL.md" in paths, paths
-    assert "/skills/multi-file/scripts/" in paths, paths
+    events: list[tuple[str, dict]] = []
+    async for chunk in agent_stream(agent, "tester", message="hi"):
+        events.append(parse_sse_chunk(chunk))
+    assert any(e == "done" for e, _ in events), events
 
 
 # ---------------------------------------------------------------------------

@@ -127,21 +127,25 @@ async def test_put_settings_flips_execute_and_rebuilds(persistence):
         assert body["execute"]["max_timeout"] == 30
         assert body["execute"]["source"] == "db"
 
-        # The filesystem backend was rebuilt: shell backend is now the default
-        # (execute on) and the default agent graph was rebuilt on top of it.
+        # The filesystem backend was rebuilt: the per-user workspace backend
+        # is the default in both modes (execute gated inside it) and the
+        # default agent graph was rebuilt on top of it.
         assert app.state.backend is app.state.agents.backend
-        from deepagents.backends.local_shell import LocalShellBackend
+        from app.services.agent import UserShellBackend
 
-        assert isinstance(app.state.agents.backend.default, LocalShellBackend)
+        assert isinstance(app.state.agents.backend.default, UserShellBackend)
 
         # Partial update keeps unset fields.
         r = await client.put("/settings", json={"execute": {"enabled": False}})
         body = r.json()
         assert body["execute"]["enabled"] is False
         assert body["execute"]["max_timeout"] == 30
-        from deepagents.backends.store import StoreBackend
+        from app.services.agent import UserShellBackend
 
-        assert isinstance(app.state.agents.backend.default, StoreBackend)
+        assert isinstance(app.state.agents.backend.default, UserShellBackend)
+        # Execute is refused while the opt-in is off.
+        resp = app.state.agents.backend.default.execute("echo hi")  # type: ignore[attr-defined]
+        assert "Execution not available" in resp.output
 
         # Health reflects the DB value.
         r = await client.get("/health")
