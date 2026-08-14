@@ -38,6 +38,7 @@ from langgraph.types import Checkpointer
 
 from ..core.config import settings
 from ..core.constants import GLOBAL_SKILLS_NS, SKILLS_SOURCE
+from ..services import settings as runtime_settings
 from ..services.connections import llm_model_kwargs
 from ..services.kb.tool import build_kb_search_tool
 from ..services.searxng import build_search_tool
@@ -98,8 +99,8 @@ def build_backend(
     """
     user_store = StoreBackend(store=store, namespace=_user_namespace_factory)
     default = (
-        LocalShellBackend(inherit_env=settings.execute_inherit_env)
-        if settings.execute_enabled
+        LocalShellBackend(inherit_env=runtime_settings.execute_inherit_env())
+        if runtime_settings.execute_enabled()
         else user_store
     )
     routes: dict[str, StoreBackend] = {
@@ -144,10 +145,15 @@ def build_agent(
     backend = backend or build_backend(store=store)
 
     # Replace the default FilesystemMiddleware only when execution is enabled,
-    # so EXECUTE_MAX_TIMEOUT applies to the execute tool's per-command cap.
+    # so the runtime execute max-timeout applies to the execute tool's
+    # per-command cap.
     middleware = (
-        [FilesystemMiddleware(backend=backend, max_execute_timeout=settings.execute_max_timeout)]
-        if settings.execute_enabled
+        [
+            FilesystemMiddleware(
+                backend=backend, max_execute_timeout=runtime_settings.execute_max_timeout()
+            )
+        ]
+        if runtime_settings.execute_enabled()
         else None
     )
 
@@ -168,7 +174,7 @@ def build_agent(
         "Deep agent built (model=%s, %d tools, execute=%s)",
         model,
         len(tools),
-        "enabled" if settings.execute_enabled else "disabled",
+        "enabled" if runtime_settings.execute_enabled() else "disabled",
     )
     return agent
 
@@ -297,13 +303,23 @@ class AgentRegistry:
         if self._model_factory is not None:
             return self._model_factory(spec.model, spec.temperature)
         # A saved `llm` connection (base URL + API token, see /connections)
-        # overrides .env credentials for the provider.
+        # overrides .env credentials for the provider. When no default llm
+        # connection exists, env fallback is opt-in (PUT /settings
+        # connections.fallback_env=true); otherwise this fails loudly so the
+        # agent never silently runs on .env credentials.
         kwargs = llm_model_kwargs()
         if spec.temperature is not None:
             kwargs["temperature"] = spec.temperature
         if spec.thinking is not None:
             kwargs["reasoning_effort"] = spec.thinking
         if not kwargs:
+            if not runtime_settings.connection_fallback_env():
+                raise ValueError(
+                    "No default 'llm' connection configured — create one via "
+                    "POST /connections (kind=llm, is_default=true), or allow env "
+                    'credentials via PUT /settings {"connections": '
+                    '{"fallback_env": true}}'
+                )
             return spec.model
         from langchain.chat_models import init_chat_model
 

@@ -72,6 +72,8 @@ Endpoints:
                                     and KB embeddings resolve the default `llm` /
                                     `embeddings` connection)
   GET|PUT|DELETE /connections/{name}-> connection detail / replace / delete
+  GET|PUT /settings                -> runtime app settings (admin; execute tool
+                                    toggle + connection policy, DB overrides .env)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):
@@ -102,6 +104,7 @@ from langgraph.graph.state import CompiledStateGraph
 from .api.v1.routes import api_router
 from .core.config import settings
 from .core.database import persistence
+from .services import settings as runtime_settings
 from .services.agent import AgentRegistry, build_backend, build_extra_tools
 from .services.connections import refresh_resolved_connections
 from .services.mcp import mcp_servers
@@ -120,6 +123,9 @@ def create_app(
         # Resolve saved provider connections (default llm/embeddings) so the
         # agent model + KB embeddings use them instead of .env credentials.
         await refresh_resolved_connections()
+        # Load runtime app settings (execute tool toggle, connection policy)
+        # so DB values override .env from the first request on.
+        await runtime_settings.refresh_app_settings()
         # Shared durable filesystem backend: agent and /agent/* CRUD API write
         # to the same store (Postgres in production), so skills added via the
         # API are visible to the agent on the next run.
@@ -155,7 +161,7 @@ def create_app(
             persistence.backend_name,
             mcp_servers.names or "none",
             "enabled" if search_tool else "not configured",
-            "enabled" if settings.execute_enabled else "disabled",
+            "enabled" if runtime_settings.execute_enabled() else "disabled",
         )
         yield
         await mcp_servers.close()

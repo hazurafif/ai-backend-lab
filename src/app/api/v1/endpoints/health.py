@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from ....core.config import settings
 from ....core.database import persistence
 from ....services import resources
+from ....services import settings as runtime_settings
 from ....services.mcp import mcp_servers
 
 router = APIRouter(tags=["health"])
@@ -25,8 +26,8 @@ async def health():
             "enabled": settings.searxng_enabled,
         },
         "execute": {
-            "enabled": settings.execute_enabled,
-            "max_timeout": settings.execute_max_timeout,
+            "enabled": runtime_settings.execute_enabled(),
+            "max_timeout": runtime_settings.execute_max_timeout(),
         },
         "agent_resources": {
             "skills": len(await resources.list_skills(persistence.store)),

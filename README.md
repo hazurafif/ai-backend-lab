@@ -83,6 +83,28 @@ curl -X POST http://127.0.0.1:8000/connections \
   behavior stays. Connections target OpenAI-compatible endpoints
   (langchain-openai).
 
+**Runtime app settings (DB overrides .env):** admin can flip the execute tool
+and the connection policy at runtime via `GET|PUT /settings` — values are
+stored in the DB (`app_settings` table) and take effect on the next agent run
+(backend + graphs rebuild immediately):
+
+```bash
+# enable the execute tool, cap commands at 120s
+curl -X PUT http://127.0.0.1:8000/settings \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"execute": {"enabled": true, "max_timeout": 120}}'
+# make DB connections mandatory (no silent .env fallback)
+curl -X PUT http://127.0.0.1:8000/settings \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"connections": {"fallback_env": false}}'
+```
+
+- `GET /settings` — effective values + `source` (`db` or `env`) per key
+- `PUT /settings` — partial update; unset fields keep their current value
+- By default `connections.fallback_env` is **false**: a missing default `llm`
+  connection is a loud error, never a silent read of `.env` credentials
+  (opt back in with `CONNECTION_FALLBACK_ENV=true` in `.env`)
+
 **Thinking / reasoning effort:** agent configs accept a `thinking` level that
 is passed to the model as `reasoning_effort` (OpenAI-compatible endpoints,
 stored connections included). Levels follow the standard reasoning-effort
@@ -121,6 +143,7 @@ curl -X POST http://127.0.0.1:8000/agents \
 | `GET /agent/tools` + CRUD | Bearer (admin) | Manage MCP tool servers (applied on restart or `/agent/tools/reconnect`) |
 | `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
 | `GET/POST /connections` + `GET/PUT/DELETE /connections/{name}` | Bearer (admin) | Manage provider connections (base URL + API token in the DB, used by the agent LLM + KB embeddings instead of `.env` keys; token is write-only, `is_default` per kind selects the resolved default) |
+| `GET/PUT /settings` | Bearer (admin) | Runtime app settings (DB overrides .env): execute tool toggle + connection policy (`fallback_env`); mutations rebuild agent graphs immediately |
 | `POST /mcp/tools/call` | Bearer | MCP apps tools proxy: invoke a tool on a configured MCP server (`server_hint` or fan-out; `CallToolResult` passthrough — 200 with `isError`, 502 transport, 404 no match) |
 | `GET|POST /agents` | Bearer | List / create agent configs (profile: model + system prompt + skills + tools + temperature + `thinking` reasoning effort; `scope: "global"` requires admin) |
 | `GET/PUT/DELETE /agents/{name}` | Bearer | Read / replace / delete an agent config (owner; global ones: admin) |

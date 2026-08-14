@@ -50,16 +50,25 @@ class LocalEmbeddings(Embeddings):
 
 
 def build_embeddings() -> Embeddings:
-    """Real OpenAI embeddings when a key is configured, else the local one.
+    """Real OpenAI embeddings when an `embeddings` connection exists, else local.
 
-    Credentials resolve in this order: the saved `embeddings` connection
-    (base_url + api_token, see /connections) first, then OPENAI_API_KEY /
-    EMBEDDINGS_BASE_URL from .env.
+    Credentials resolve from the saved `embeddings` connection (base_url +
+    api_token, see /connections) first. .env keys (OPENAI_API_KEY /
+    EMBEDDINGS_BASE_URL) are only consulted when the env fallback is opted in
+    (CONNECTION_FALLBACK_ENV=true / PUT /settings connections.fallback_env);
+    otherwise a missing connection falls back to the deterministic local
+    embedder.
     """
+    from ...services import settings as runtime_settings
     from ...services.connections import resolved_embeddings
 
     conn = resolved_embeddings()
-    api_key = (conn or {}).get("api_token") or os.environ.get("OPENAI_API_KEY")
+    if conn is None:
+        api_key = (
+            os.environ.get("OPENAI_API_KEY") if runtime_settings.connection_fallback_env() else None
+        )
+    else:
+        api_key = conn.get("api_token")
     if api_key:
         from langchain_openai import OpenAIEmbeddings
 

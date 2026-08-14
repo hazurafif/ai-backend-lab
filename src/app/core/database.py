@@ -1001,6 +1001,75 @@ class ConnectionStore:
         return dict(candidates[0])
 
 
+class AppSettingsStore:
+    """Admin app settings (key-value JSON) in Postgres (`app_settings` table).
+
+    Global infra configuration that overrides .env defaults at runtime, e.g.
+    `execute` ({"enabled", "max_timeout", "inherit_env"}) and `connections`
+    ({"fallback_env"}). Falls back to in-memory dicts when Postgres is off
+    (dev mode).
+    """
+
+    def __init__(self) -> None:
+        self._pool: AsyncConnectionPool | None = None
+        self._memory: dict[str, dict] = {}  # key -> value dict
+
+    @property
+    def is_postgres(self) -> bool:
+        return self._pool is not None
+
+    async def start(self, pool: AsyncConnectionPool | None) -> None:
+        self._pool = pool
+        self._memory = {}
+
+    async def stop(self) -> None:
+        self._pool = None
+        self._memory = {}
+
+    async def list(self) -> list[dict]:
+        """All settings as {"key": ..., "value": ...} rows, newest first."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT key, value, updated_at FROM app_settings ORDER BY key")
+                rows = await cur.fetchall()
+            return [
+                {"key": r[0], "value": dict(r[1] or {}), "updated_at": r[2].isoformat()}
+                for r in rows
+            ]
+        return [{"key": k, "value": dict(v), "updated_at": None} for k, v in self._memory.items()]
+
+    async def get(self, key: str) -> dict | None:
+        """The stored value of a setting key, or None when unset."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+                row = await cur.fetchone()
+            return dict(row[0] or {}) if row else None
+        value = self._memory.get(key)
+        return dict(value) if value is not None else None
+
+    async def set(self, key: str, value: dict) -> None:
+        """Upsert a setting key."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
+                    "updated_at = now()",
+                    (key, Jsonb(value)),
+                )
+            return
+        self._memory[key] = dict(value)
+
+    async def delete(self, key: str) -> None:
+        """Remove a setting key (reverts to the .env default)."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("DELETE FROM app_settings WHERE key = %s", (key,))
+            return
+        self._memory.pop(key, None)
+
+
 class Persistence:
     """Owns the checkpointer, store, chat history and users; set up at startup and closed at shutdown."""
 
@@ -1011,6 +1080,7 @@ class Persistence:
         self.users = UserStore()
         self.kb = KbStore()
         self.connections = ConnectionStore()
+        self.settings = AppSettingsStore()
         self.backend_name = "memory"
         self._pool: AsyncConnectionPool | None = None
         self._saver_cm = None
@@ -1062,6 +1132,7 @@ class Persistence:
         await self.chat_history.start(pool)
         await self.kb.start(pool)
         await self.connections.start(pool)
+        await self.settings.start(pool)
         if pool is None:
             self.checkpointer = InMemorySaver()
             self.store = InMemoryStore()
@@ -1088,6 +1159,7 @@ class Persistence:
         await self.chat_history.stop()
         await self.kb.stop()
         await self.connections.stop()
+        await self.settings.stop()
 
     async def ensure_default_admin(self) -> None:
         """Guarantee an admin account exists; seed the default on a fresh store.
