@@ -87,15 +87,29 @@ async def sdk_stream(
                 started_text.add(ms_id)
                 yield _chunk({"type": "text-start", "id": ms_id})
             yield _chunk({"type": "text-delta", "id": ms_id, "delta": data.get("delta", "")})
-        elif name == "reasoning_delta":
+        elif name == "reasoning_start":
             ms_id = data.get("id") or response_id
             if ms_id not in started_reasoning:
                 started_reasoning.add(ms_id)
                 yield _chunk({"type": "reasoning-start", "id": ms_id})
+        elif name == "reasoning_delta":
+            ms_id = data.get("id") or response_id
+            if ms_id not in started_reasoning:
+                # Fallback: producers that only emit deltas (no explicit
+                # start) still get a synthesized start bracket.
+                started_reasoning.add(ms_id)
+                yield _chunk({"type": "reasoning-start", "id": ms_id})
             yield _chunk({"type": "reasoning-delta", "id": ms_id, "delta": data.get("delta", "")})
+        elif name == "reasoning_end":
+            ms_id = data.get("id") or response_id
+            if ms_id in started_reasoning:
+                started_reasoning.discard(ms_id)
+                yield _chunk({"type": "reasoning-end", "id": ms_id})
         elif name == "message":
             ms_id = data.get("id") or response_id
             if ms_id in started_reasoning:
+                # Fallback: close a reasoning block that was never explicitly
+                # ended (e.g. the producer errored mid-stream).
                 yield _chunk({"type": "reasoning-end", "id": ms_id})
             if ms_id in started_text:
                 yield _chunk({"type": "text-end", "id": ms_id})

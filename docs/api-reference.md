@@ -150,7 +150,9 @@ curl -N -X POST http://127.0.0.1:8000/chat \
 
 ```
 event: message_delta   {"id","delta"}                        token chunk
+event: reasoning_start {"id"}                               thinking/reasoning turn began
 event: reasoning_delta {"id","delta"}                        thinking/reasoning token chunk
+event: reasoning_end   {"id"}                               thinking/reasoning turn finished
 event: message         {"id","message"}                      finalized message (langchain schema)
 event: tool_start      {"id","name","args"}                  tool call began
 event: tool_delta      {"id","name","delta"}                 tool output chunk

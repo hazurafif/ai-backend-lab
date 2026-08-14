@@ -333,11 +333,27 @@ async def _run_agent(
                     except Exception as exc:
                         await put("error", {"source": "messages", "message": str(exc)})
 
+                async def pipe_reasoning(ms, ms_id: str) -> None:
+                    # Thinking is a bracketed lifecycle (start -> delta* ->
+                    # end), shaped like tool calls, so each reasoning turn
+                    # (one per LLM message) is delimited for consumers.
+                    started = False
+                    try:
+                        async for delta in ms.reasoning:
+                            if not started:
+                                started = True
+                                await put("reasoning_start", {"id": ms_id})
+                            await put("reasoning_delta", {"id": ms_id, "delta": delta})
+                    except Exception as exc:
+                        await put("error", {"source": "messages", "message": str(exc)})
+                    if started:
+                        await put("reasoning_end", {"id": ms_id})
+
                 # Text + reasoning (thinking) deltas stream concurrently; the
                 # finalized message event is emitted only after both finish.
                 await asyncio.gather(
                     pipe(ms.text, "message_delta", ms_id),
-                    pipe(ms.reasoning, "reasoning_delta", ms_id),
+                    pipe_reasoning(ms, ms_id),
                 )
                 try:
                     out_attr = ms.output  # awaitable property (async) / property (sync)

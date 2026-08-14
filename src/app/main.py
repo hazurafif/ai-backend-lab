@@ -95,7 +95,9 @@ Endpoints:
 
 SSE events (event: <name>, data: <json>):
   message_delta   {"id", "delta"}                           token chunk
+  reasoning_start {"id"}                                    thinking/reasoning turn started
   reasoning_delta {"id", "delta"}                           thinking/reasoning token chunk
+  reasoning_end   {"id"}                                    thinking/reasoning turn finished
   message         {"id", "message"}                         finalized message (langchain serialized)
   tool_start      {"id", "name", "args"}                    tool call started
   tool_delta      {"id", "name", "delta"}                   tool output chunk

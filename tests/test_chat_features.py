@@ -209,11 +209,15 @@ async def test_ai_sdk_reasoning_chunks(memory_persistence):
         assert reasoning, "missing reasoning-delta chunks"
         assert "".join(c["delta"] for c in reasoning) == "internal deliberation..."
 
-        # Bracketed by reasoning-start/end with a stable id.
+        # Bracketed by reasoning-start/end with a stable id, and in order:
+        # start -> deltas -> end.
         starts = [c for c in chunks if c.get("type") == "reasoning-start"]
         ends = [c for c in chunks if c.get("type") == "reasoning-end"]
         assert starts and ends
-        assert starts[0]["id"] == ends[0]["id"]
+        assert starts[0]["id"] == ends[0]["id"] == reasoning[0]["id"]
+        order = [c.get("type") for c in chunks]
+        assert order.index("reasoning-start") < order.index("reasoning-delta")
+        assert order.index("reasoning-delta") < order.index("reasoning-end")
 
         # Text still streams normally alongside reasoning.
         text = [c for c in chunks if c.get("type") == "text-delta"]

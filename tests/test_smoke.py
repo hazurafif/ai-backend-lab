@@ -193,17 +193,27 @@ async def test_reasoning_streaming_pipeline(memory_persistence):
     events = await collect_stream(agent, "tester", message="think hard")
 
     names = [e for e, _ in events]
+    assert "reasoning_start" in names, "missing reasoning_start"
     assert "reasoning_delta" in names, "missing reasoning_delta events"
+    assert "reasoning_end" in names, "missing reasoning_end"
     assert "message_delta" in names, "missing message_delta events"
 
-    # Reasoning text is delivered as deltas (single replay chunk here) and
-    # arrives before the finalized message event.
-    reasoning = "".join(d["delta"] for e, d in events if e == "reasoning_delta")
-    assert reasoning == "Let me reason step by step: the answer is 42."
+    # Thinking is a bracketed lifecycle (start -> delta* -> end), shaped
+    # like a tool call, with a stable id across the whole turn.
+    reasoning = [d for e, d in events if e == "reasoning_delta"]
+    assert "".join(d["delta"] for d in reasoning) == "Let me reason step by step: the answer is 42."
+    first_idx = names.index("reasoning_start")
+    deltas = [i for i, e in enumerate(names) if e == "reasoning_delta"]
+    end_idx = names.index("reasoning_end")
+    assert deltas and first_idx < deltas[0] and deltas[-1] < end_idx
+    starts = [d for e, d in events if e == "reasoning_start"]
+    ends = [d for e, d in events if e == "reasoning_end"]
+    assert len(starts) == len(ends) == 1
+    assert starts[0]["id"] == ends[0]["id"] == reasoning[0]["id"]
     text = "".join(d["delta"] for e, d in events if e == "message_delta")
     assert text == "The answer is 42."
     msg_idx = names.index("message")
-    assert names.index("reasoning_delta") < msg_idx
+    assert end_idx < msg_idx
 
     # The finalized message keeps the reasoning block (langchain schema).
     msg = next(d for e, d in events if e == "message")
