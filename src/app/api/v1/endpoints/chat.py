@@ -28,7 +28,9 @@ from ....services import agent_configs, ai_sdk_chat, session_stats
 from ....services import share as share_service
 from ....services.chat import _serialize_message, agent_stream, sse_response
 from ....services.searxng import set_search_enabled
+from ....services.title_generator import generate_title
 from ....services.uploads import file_notes, save_uploads
+from ....util.date import now_iso
 
 router = APIRouter(tags=["chat"])
 
@@ -323,6 +325,46 @@ async def rename_thread(
     value = dict(item.value)
     value["title"] = body.title
     await persistence.store.aput(ns, thread_id, value)
+    return ThreadOut(thread_id=thread_id, **value)
+
+
+@router.post("/threads/{thread_id}/title", response_model=ThreadOut)
+async def generate_thread_title(
+    request: Request,
+    thread_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate a title from the LLM (template) and upsert it on the thread.
+
+    The conversation is rendered into the title template and run through the
+    thread's own agent model; the result is stored as the metadata title,
+    creating the metadata row when the thread has none (legacy threads).
+    Fails with 404 when the thread has no messages yet.
+    """
+    username = current_user["username"]
+    await _assert_thread_owner(thread_id, username)
+    agent = await _thread_agent(request, thread_id, username)
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = await agent.aget_state(config)
+    messages = (snapshot.values or {}).get("messages") if snapshot is not None else None
+    if not messages:
+        raise NotFound(detail=f"Thread '{thread_id}' has no messages yet")
+
+    metadata = await persistence.store.aget(thread_metadata_ns(username), thread_id)
+    value = dict(metadata.value) if metadata is not None else {}
+    agent_name = value.get("agent") or "default"
+    try:
+        model = await request.app.state.agents.model_for(agent_name, username)
+    except KeyError:
+        raise NotFound(detail=f"Agent '{agent_name}' not found") from None
+
+    title = await generate_title(model, messages)
+    now = now_iso()
+    value.setdefault("created_at", now)
+    value["title"] = title
+    value["updated_at"] = now
+    value["agent"] = agent_name
+    await persistence.store.aput(thread_metadata_ns(username), thread_id, value)
     return ThreadOut(thread_id=thread_id, **value)
 
 

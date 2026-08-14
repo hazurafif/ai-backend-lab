@@ -18,6 +18,8 @@ Endpoints:
                                     total tokens from usage_metadata, current
                                     context vs the model's window (utilization +
                                     remaining), active-run flag
+  POST /threads/{id}/title        -> LLM-generated title (prompt template) upserted
+                                    on the thread metadata (create or update)
   PATCH /threads/{id}             -> rename a thread
   DELETE /threads/{id}            -> delete a thread
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run

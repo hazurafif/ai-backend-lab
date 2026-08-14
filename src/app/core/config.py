@@ -62,7 +62,11 @@ class Settings:
     # Postgres DSN, e.g. postgresql://user:pass@host:5432/db (psycopg conninfo
     # or URL — NOT the SQLAlchemy-style postgresql+psycopg:// prefix).
     # If unset, the app falls back to in-memory checkpointer/store (dev mode).
-    database_uri: str | None = field(default_factory=lambda: os.environ.get("DATABASE_URI") or None)
+    database_uri: str | None = field(
+        default_factory=lambda: os.environ.get("DATABASE_URI")
+        or os.environ.get("DATABASE_URL")  # set by `fly postgres attach`
+        or None
+    )
 
     # --- MCP servers ---
     # JSON string with server configs, or a path to a JSON file. Example:

@@ -325,6 +325,17 @@ class AgentRegistry:
 
         return init_chat_model(spec.model, **kwargs)
 
+    async def model_for(self, name: str, username: str) -> str | BaseChatModel:
+        """The chat model of an agent config (spec resolution + model build).
+
+        Used by auxiliary LLM calls (e.g. thread title generation) that want
+        the thread's own model without running the full agent graph.
+        """
+        spec = await load_spec(self._store, name, username)
+        if spec is None:
+            raise KeyError(name)
+        return self._resolve_model(spec)
+
     def update_mcp_tools(
         self,
         mcp_tools: list[BaseTool] | None,
