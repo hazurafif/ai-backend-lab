@@ -43,6 +43,7 @@ from ..core.constants import (
     user_skills_ns,
 )
 from ..schema.agent_config_schema import AgentConfigIn, AgentConfigOut
+from ..services import settings as runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ def default_spec() -> AgentSpec:
         skills=None,
         tools=None,
         temperature=None,
-        interrupt_on=settings.interrupt_on or None,
+        interrupt_on=runtime_settings.interrupt_on(),
         thinking=None,
         owner=_SYSTEM_OWNER,
         builtin=True,
@@ -252,7 +253,7 @@ async def get_config(store: BaseStore, name: str, username: str) -> AgentConfigO
                 "skills": None,
                 "tools": None,
                 "temperature": None,
-                "interrupt_on": settings.interrupt_on or None,
+                "interrupt_on": runtime_settings.interrupt_on(),
                 "scope": "global",
                 "owner": _SYSTEM_OWNER,
             },

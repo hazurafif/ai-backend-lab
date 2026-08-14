@@ -97,10 +97,16 @@ curl -X PUT http://127.0.0.1:8000/settings \
 curl -X PUT http://127.0.0.1:8000/settings \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"connections": {"fallback_env": false}}'
+# human-in-the-loop: pause before every execute tool call (builtin agent)
+curl -X PUT http://127.0.0.1:8000/settings \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"hitl": {"interrupt_on": {"execute": true}}}'
 ```
 
 - `GET /settings` — effective values + `source` (`db` or `env`) per key
 - `PUT /settings` — partial update; unset fields keep their current value
+- HITL (`hitl.interrupt_on`, tool name → pause for approval) applies to the
+  builtin `default` agent; named agent configs keep their per-config value
 - By default `connections.fallback_env` is **false**: a missing default `llm`
   connection is a loud error, never a silent read of `.env` credentials
   (opt back in with `CONNECTION_FALLBACK_ENV=true` in `.env`)

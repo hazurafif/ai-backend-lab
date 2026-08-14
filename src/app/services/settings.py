@@ -76,6 +76,20 @@ def execute_inherit_env() -> bool:
     return settings.execute_inherit_env
 
 
+def interrupt_on() -> dict | None:
+    """Effective HITL gating (tool name -> pause for approval).
+
+    DB `hitl.interrupt_on` wins over INTERRUPT_ON_JSON; {} / None = HITL off.
+    Applies to the builtin default agent; named agent configs keep their own
+    per-config `interrupt_on`.
+    """
+    row = _row("hitl")
+    if row is not None and "interrupt_on" in row:
+        value = row["interrupt_on"]
+        return dict(value) if value else None
+    return settings.interrupt_on or None
+
+
 # ---------------------------------------------------------------------------
 # connection policy
 # ---------------------------------------------------------------------------

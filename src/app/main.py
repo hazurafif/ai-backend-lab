@@ -80,7 +80,8 @@ Endpoints:
                                     `embeddings` connection)
   GET|PUT|DELETE /connections/{name}-> connection detail / replace / delete
   GET|PUT /settings                -> runtime app settings (admin; execute tool
-                                    toggle + connection policy, DB overrides .env)
+                                    toggle + HITL interrupt_on + connection
+                                    policy, DB overrides .env)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):

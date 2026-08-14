@@ -156,6 +156,32 @@ async def test_put_settings_connection_policy(persistence):
         assert r.json()["connections"] == {"fallback_env": False, "source": "db"}
 
 
+async def test_put_settings_hitl(persistence):
+    client, _app = await _admin_client()
+    async with client:
+        # Enable HITL for the builtin default agent: pause before `execute`.
+        r = await client.put("/settings", json={"hitl": {"interrupt_on": {"execute": True}}})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["hitl"] == {
+            "interrupt_on": {"execute": True},
+            "source": "db",
+        }
+
+        # The builtin default agent now builds with the DB interrupt_on.
+        from app.services.agent_configs import default_spec
+
+        assert default_spec().interrupt_on == {"execute": True}
+
+        # Health reflects it.
+        r = await client.get("/health")
+        assert r.json()["interrupt_on"] == {"execute": True}
+
+        # Disable again ({} = off).
+        r = await client.put("/settings", json={"hitl": {"interrupt_on": {}}})
+        assert r.json()["hitl"]["interrupt_on"] is None
+
+
 # ---------------------------------------------------------------------------
 # DB-only connections: no silent .env fallback
 # ---------------------------------------------------------------------------

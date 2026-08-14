@@ -27,6 +27,7 @@ def _source(row: dict | None, field: str) -> str:
 def _out() -> SettingsOut:
     execute_row = settings_service.get_setting("execute")
     connections_row = settings_service.get_setting("connections")
+    hitl_row = settings_service.get_setting("hitl")
     return SettingsOut(
         execute={
             "enabled": settings_service.execute_enabled(),
@@ -37,6 +38,10 @@ def _out() -> SettingsOut:
         connections={
             "fallback_env": settings_service.connection_fallback_env(),
             "source": _source(connections_row, "fallback_env"),
+        },
+        hitl={
+            "interrupt_on": settings_service.interrupt_on(),
+            "source": _source(hitl_row, "interrupt_on"),
         },
     )
 
@@ -94,6 +99,15 @@ async def put_settings(body: SettingsIn, request: Request, _: dict = Depends(get
                 "fallback_env": body.connections.fallback_env
                 if body.connections.fallback_env is not None
                 else current.get("fallback_env"),
+            },
+        )
+    if body.hitl is not None:
+        await settings_service.update_app_setting(
+            "hitl",
+            {
+                "interrupt_on": body.hitl.interrupt_on
+                if body.hitl.interrupt_on is not None
+                else (settings_service.get_setting("hitl") or {}).get("interrupt_on"),
             },
         )
     await _apply_mutation(request)

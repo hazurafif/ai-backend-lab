@@ -20,7 +20,7 @@ async def health():
         "persistence": persistence.backend_name,
         "mcp_servers": mcp_servers.names,
         "model": settings.model,
-        "interrupt_on": settings.interrupt_on,
+        "interrupt_on": runtime_settings.interrupt_on(),
         "searxng": {
             "installed": settings.searxng_url is not None,
             "enabled": settings.searxng_enabled,

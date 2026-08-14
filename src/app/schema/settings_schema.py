@@ -25,11 +25,25 @@ class ConnectionsPolicyIn(BaseModel):
     )
 
 
+class HitlSettingsIn(BaseModel):
+    """Human-in-the-loop gating for the builtin default agent."""
+
+    interrupt_on: dict[str, bool] | None = Field(
+        default=None,
+        description=(
+            'Tool name -> pause for approval, e.g. {"execute": true, '
+            '"edit_file": true}. {} / null = HITL off. Named agent configs '
+            "keep their own per-config interrupt_on."
+        ),
+    )
+
+
 class SettingsIn(BaseModel):
     """Partial update: only the provided keys are written."""
 
     execute: ExecuteSettingsIn | None = None
     connections: ConnectionsPolicyIn | None = None
+    hitl: HitlSettingsIn | None = None
 
 
 class SettingsOut(BaseModel):
@@ -43,4 +57,8 @@ class SettingsOut(BaseModel):
     connections: dict = Field(
         default_factory=dict,
         description='e.g. {"fallback_env": false, "source": "db"|"env"}',
+    )
+    hitl: dict = Field(
+        default_factory=dict,
+        description='e.g. {"interrupt_on": {"execute": true}, "source": "db"|"env"}',
     )
