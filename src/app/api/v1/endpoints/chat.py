@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from langgraph.graph.state import CompiledStateGraph
+from starlette.datastructures import UploadFile
 
 from ....core.constants import thread_metadata_ns
 from ....core.database import persistence
@@ -25,6 +28,7 @@ from ....services import agent_configs, ai_sdk_chat, session_stats
 from ....services import share as share_service
 from ....services.chat import _serialize_message, agent_stream, sse_response
 from ....services.searxng import set_search_enabled
+from ....services.uploads import file_notes, save_uploads
 
 router = APIRouter(tags=["chat"])
 
@@ -75,21 +79,73 @@ async def _thread_agent(request: Request, thread_id: str, username: str) -> Comp
     return await _resolve_agent(request, name, username)
 
 
+def _parse_bool(value: str | None) -> bool | None:
+    """'true'/'false' form value -> bool (anything else -> None)."""
+    if value is None:
+        return None
+    lowered = str(value).strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return None
+
+
+def _form_files(form) -> list[UploadFile]:
+    return [f for f in form.getlist("files") if isinstance(f, UploadFile)]
+
+
+def _augment_message(message: str, results: list[dict]) -> str:
+    """Append the uploaded-file notes to the user message (or use them alone)."""
+    notes = file_notes(results)
+    if not notes:
+        return message
+    return f"{message}\n\n{notes}" if message else notes
+
+
+async def _read_chat_input(
+    request: Request, username: str
+) -> tuple[str, str | None, str | None, bool | None]:
+    """Read (message, thread_id, agent, enable_search) from JSON or multipart.
+
+    Multipart (file uploads): the same fields arrive as form values plus
+    `files`; uploaded files are saved to the user's uploads dir and their
+    paths are appended to the message so the agent can work with them.
+    """
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("multipart/form-data") or ctype.startswith(
+        "application/x-www-form-urlencoded"
+    ):
+        form = await request.form()
+        message = str(form.get("message") or "").strip()
+        thread_id = form.get("thread_id") or None
+        agent_name = form.get("agent") or None
+        enable_search = _parse_bool(form.get("enable_search"))
+        message = _augment_message(message, await save_uploads(username, _form_files(form)))
+        if not message:
+            raise HTTPException(status_code=422, detail="No user message found in request")
+        return message, thread_id, agent_name, enable_search
+    body = ChatRequest.model_validate(await request.json())
+    return body.message, body.thread_id, body.agent, body.enable_search
+
+
 @router.post("/chat")
 async def chat(
     request: Request,
-    body: ChatRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    agent = await _resolve_agent(request, body.agent, current_user["username"])
-    set_search_enabled(body.enable_search)
+    message, thread_id, agent_name, enable_search = await _read_chat_input(
+        request, current_user["username"]
+    )
+    agent = await _resolve_agent(request, agent_name, current_user["username"])
+    set_search_enabled(enable_search)
     return sse_response(
         agent_stream(
             agent,
             current_user["username"],
-            message=body.message,
-            thread_id=body.thread_id,
-            agent_name=body.agent or "default",
+            message=message,
+            thread_id=thread_id,
+            agent_name=agent_name or "default",
         )
     )
 
@@ -97,20 +153,26 @@ async def chat(
 @router.post("/api/chat")
 async def ai_sdk_chat_endpoint(
     request: Request,
-    body: AiSdkChatRequest,
 ):
     """AI SDK data-stream endpoint for the frontend (useChat).
 
-    Body: {"id": <chat uuid>, "messages": [UIMessage...],
-    "selectedChatModel": ...}. The last user message is run through the
-    agent; the stream is translated to AI SDK chunks (see
-    `ai_sdk_chat.sdk_stream`). Auth is optional: a Bearer JWT scopes
-    thread metadata to that user, otherwise a "guest" namespace is used
-    (starter mode, matching the frontend which has no login yet).
+    JSON body: {"id": <chat uuid>, "messages": [UIMessage...],
+    "selectedChatModel": ...} — or multipart/form-data with a JSON-encoded
+    `messages` field + `files` uploads (useChat attachments). The last user
+    message is run through the agent; the stream is translated to AI SDK
+    chunks (see `ai_sdk_chat.sdk_stream`). Auth is optional: a Bearer JWT
+    scopes thread metadata to that user, otherwise a "guest" namespace is
+    used (starter mode, matching the frontend which has no login yet).
     """
     agent: CompiledStateGraph = request.app.state.agent
-    set_search_enabled(body.enable_search)
-    text = ai_sdk_chat.extract_user_message(body.messages)
+    is_multipart = request.headers.get("content-type", "").startswith("multipart/form-data")
+    if not is_multipart:
+        body = AiSdkChatRequest.model_validate(await request.json())
+        set_search_enabled(body.enable_search)
+        text = ai_sdk_chat.extract_user_message(body.messages)
+    else:
+        body = None
+        text = ""
 
     username = "guest"
     auth_header = request.headers.get("Authorization")
@@ -119,7 +181,33 @@ async def ai_sdk_chat_endpoint(
         if token_data is not None and token_data.username:
             username = token_data.username
 
-    if body.decisions is not None or body.decision is not None:
+    # Multipart: file uploads (AI SDK useChat attachments). `messages` is a
+    # JSON-encoded form field; uploaded files are saved and their paths are
+    # appended to the extracted user text. HITL resume stays JSON-only.
+    if is_multipart:
+        form = await request.form()
+        try:
+            messages = json.loads(str(form.get("messages") or "[]"))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail="Invalid 'messages' form field") from None
+        if not isinstance(messages, list):
+            raise HTTPException(status_code=422, detail="Invalid 'messages' form field")
+        set_search_enabled(_parse_bool(form.get("enable_search")))
+        text = ai_sdk_chat.extract_user_message(messages)
+        text = _augment_message(text, await save_uploads(username, _form_files(form)))
+        if not text:
+            raise HTTPException(status_code=422, detail="No user message found in request")
+        agent = await _resolve_agent(request, form.get("agent") or None, username)
+        events = agent_stream(
+            agent,
+            username,
+            message=text,
+            thread_id=form.get("id") or None,
+            agent_name=form.get("agent") or "default",
+        )
+        return sse_response(ai_sdk_chat.sdk_stream(events))
+
+    if body is not None and (body.decisions is not None or body.decision is not None):
         # HITL resume: continue a paused run. `id` is the thread_id of the
         # interrupted run; decisions follow ResumeRequest semantics.
         if not body.id:

@@ -102,7 +102,7 @@ curl -X POST http://127.0.0.1:8000/agents \
 | `POST /login` | – | OAuth2 form `username`/`password` → JWT (access + refresh token) |
 | `POST /refresh` | – | Exchange a refresh token for a new access token |
 | `POST /register` | – | Self-service registration (always creates a `user` role) |
-| `POST /chat` | Bearer | Run the agent; **SSE stream** of events. Optional `agent` field selects a custom agent config |
+| `POST /chat` | Bearer | Run the agent; **SSE stream** of events. Optional `agent` field selects a custom agent config. **File uploads**: send `multipart/form-data` with `message`/`thread_id`/`agent` fields + `files` (multiple); files land in `uploads/<user>/` and the agent is told their paths to manipulate them with its filesystem/execute tools (e.g. `pdftotext` for PDFs) |
 | `POST /api/chat` | optional Bearer | AI SDK data-stream protocol for the frontend (`useChat`), incl. HITL resume. Optional `agent` field |
 | `GET /threads` | Bearer | Conversations of the current user (newest first, `limit`/`offset` pagination; each thread carries the `agent` it runs on) |
 | `GET /threads/{id}/messages` | Bearer | Full history of a thread |

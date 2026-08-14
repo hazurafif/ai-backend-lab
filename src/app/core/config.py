@@ -111,6 +111,17 @@ class Settings:
         default_factory=lambda: os.environ.get("EXECUTE_INHERIT_ENV", "false").lower() == "true"
     )
 
+    # --- Chat file uploads ---
+    # Files posted to /chat and /api/chat (multipart) are saved under
+    # UPLOADS_DIR (relative to the server cwd, which is the agent's
+    # filesystem root when EXECUTE_ENABLED=true) and the agent is told their
+    # paths, so it can inspect/manipulate them with its own tools (e.g.
+    # `pdftotext` for PDFs) instead of the API parsing arbitrary formats.
+    uploads_dir: str = field(default_factory=lambda: os.environ.get("UPLOADS_DIR", "./uploads"))
+    max_upload_size_mb: int = field(
+        default_factory=lambda: int(os.environ.get("MAX_UPLOAD_SIZE_MB", "25"))
+    )
+
     # --- Knowledge base (RAG) ---
     # WEAVIATE_URL unset -> no vector store: KB uploads are rejected with 503
     # and the agent's search_knowledge_base tool is not registered.

@@ -5,7 +5,10 @@ resources, health), business logic in `app/services/`. The SSE event contract
 below is normative — keep it in sync with `app/services/chat.py`.
 
 Endpoints:
-  POST /chat                      -> SSE stream of agent events
+  POST /chat                      -> SSE stream of agent events (JSON body, or
+                                    multipart/form-data with optional `files`
+                                    uploads the agent reads/manipulates via its
+                                    filesystem/execute tools)
   POST /api/chat                  -> AI SDK data-stream protocol (frontend useChat;
                                      supports HITL resume via `decision`/`decisions`)
   GET  /threads                   -> conversations for the current user (limit/offset)
