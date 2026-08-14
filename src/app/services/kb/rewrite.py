@@ -89,10 +89,14 @@ def build_rewriter(*, force: bool = False) -> QueryRewriter:
     rewrite vs plain retrieval on a golden set).
     """
     if force or settings.kb_query_rewrite:
-        return LLMQueryRewriter(
-            model=settings.kb_rewrite_model or settings.model,
-            min_length=settings.kb_rewrite_min_length,
-        )
+        model = settings.kb_rewrite_model or settings.model
+        if model:
+            return LLMQueryRewriter(
+                model=model,
+                min_length=settings.kb_rewrite_min_length,
+            )
+    # No configured LLM (KB_QUERY_REWRITE on but neither DEEPAGENTS_MODEL
+    # nor KB_REWRITE_MODEL set) -> plain retrieval instead of crashing.
     return IdentityQueryRewriter()
 
 

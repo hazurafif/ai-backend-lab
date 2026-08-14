@@ -136,7 +136,7 @@ from .core.config import settings
 from .core.database import persistence
 from .services import settings as runtime_settings
 from .services.agent import AgentRegistry, build_backend, build_extra_tools
-from .services.connections import refresh_resolved_connections
+from .services.connections import llm_model_name, refresh_resolved_connections
 from .services.mcp import mcp_servers
 from .services.reasoning_bridge import install as install_reasoning_bridge
 
@@ -192,7 +192,7 @@ def create_app(
         app.state.agent = await app.state.agents.resolve("default", "anonymous")
         logger.info(
             "Agent ready: model=%s persistence=%s mcp=%s searxng=%s execute=%s",
-            settings.model,
+            settings.model or llm_model_name(),
             persistence.backend_name,
             mcp_servers.names or "none",
             "enabled" if search_tool else "not configured",

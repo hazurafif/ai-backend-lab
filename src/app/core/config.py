@@ -44,12 +44,13 @@ def _load_optional_int(name: str) -> int | None:
 @dataclass
 class Settings:
     # --- Agent ---
-    # Model string, e.g. "openai:gpt-4o-mini", "anthropic:claude-sonnet-4-5", "google_genai:gemini-2.5-flash"
-    # For a custom OpenAI-compatible endpoint (e.g. opencode.ai/zen/go/v1),
-    # set OPENAI_BASE_URL + OPENAI_API_KEY in .env; langchain-openai reads them.
-    model: str = field(
-        default_factory=lambda: os.environ.get("DEEPAGENTS_MODEL", "openai:gpt-4o-mini")
-    )
+    # Model string, e.g. "openai:gpt-4o-mini", "anthropic:claude-sonnet-4-5", "google_genai:gemini-2.5-flash".
+    # Optional: when unset, the default `llm` connection's `extra.model` is
+    # used; when neither exists the app refuses to start (no silent default
+    # model). For a custom OpenAI-compatible endpoint (e.g.
+    # opencode.ai/zen/go/v1), the connection carries the base URL + key and
+    # langchain-openai reads them.
+    model: str | None = field(default_factory=lambda: os.environ.get("DEEPAGENTS_MODEL") or None)
     system_prompt: str = field(
         default_factory=lambda: os.environ.get("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
     )

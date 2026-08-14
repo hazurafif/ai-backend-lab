@@ -14,10 +14,10 @@ Namespaces:
   config references them; the agent's SkillsMiddleware reads this namespace
   via a `/skills/<owner>/<name>/` backend route)
 
-The built-in `default` agent (from `DEEPAGENTS_MODEL` / `SYSTEM_PROMPT` env)
-is synthesized, not stored: `skills=None`/`tools=None` on a config mean
-"inherit the global behavior" (all global skills / all configured MCP tools),
-while `[]` means "none".
+The built-in `default` agent is synthesized from `DEEPAGENTS_MODEL` (or the
+default `llm` connection's `extra.model` when unset) + `SYSTEM_PROMPT` env
+settings and cannot be created or deleted through the API. When neither model
+source exists, agent builds fail loudly — there is no default model.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class AgentSpec:
     """Resolved, build-ready agent definition (what the registry builds)."""
 
     name: str
-    model: str
+    model: str | None  # None = fall back to the default llm connection's extra.model
     system_prompt: str | None
     skills: list[str] | None  # None = inherit global skills, [] = none
     tools: list[str] | None  # None = inherit all tools, [] = none

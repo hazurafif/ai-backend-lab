@@ -94,7 +94,14 @@ class AgentConfigOut(BaseModel):
 
     name: str
     description: str | None = None
-    model: str
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Provider:model string. None on the builtin default agent when "
+            "DEEPAGENTS_MODEL is unset — the default llm connection's "
+            "extra.model is used then."
+        ),
+    )
     system_prompt: str | None = None
     skills: list[str] | None = None
     tools: list[str] | None = None

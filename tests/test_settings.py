@@ -255,3 +255,72 @@ async def test_resolve_model_uses_db_connection_when_present(persistence, monkey
     assert isinstance(model, BaseChatModel)
     assert getattr(model, "openai_api_base", None) == "https://api.example.com/v1"
     assert model.openai_api_key.get_secret_value() == "sk-db-token"  # type: ignore[attr-defined]
+
+
+async def test_resolve_model_uses_connection_model_when_spec_has_none(persistence, monkeypatch):
+    """No DEEPAGENTS_MODEL: the default llm connection's extra.model is used."""
+    monkeypatch.setattr(config.settings, "connection_fallback_env", False)
+    monkeypatch.setattr(config.settings, "model", None)
+    await persistence.connections.create(
+        {
+            "name": "zen",
+            "kind": "llm",
+            "base_url": "https://api.example.com/v1",
+            "api_token": "sk-db-token",
+            "extra": {"model": "openai:deepseek-v4-flash"},
+            "is_default": True,
+        }
+    )
+    await settings_service.refresh_app_settings()
+    from app.services import connections as connection_service
+
+    await connection_service.refresh_resolved_connections()
+
+    from app.services.agent_configs import AgentSpec
+
+    spec = AgentSpec(
+        name="default",
+        model=None,
+        system_prompt=None,
+        skills=None,
+        tools=None,
+        temperature=None,
+        interrupt_on=None,
+        thinking=None,
+        builtin=True,
+    )
+    model: BaseChatModel = _registry(persistence)._resolve_model(spec)
+    assert isinstance(model, BaseChatModel)
+    assert getattr(model, "openai_api_base", None) == "https://api.example.com/v1"
+    assert model.model_name == "deepseek-v4-flash"
+
+    # An explicit spec model still wins over the connection's model.
+    spec.model = "openai:gpt-4o-mini"
+    model = _registry(persistence)._resolve_model(spec)
+    assert model.model_name == "gpt-4o-mini"
+
+
+async def test_resolve_model_requires_model_when_unconfigured(persistence, monkeypatch):
+    """No model anywhere (env + connection) -> loud error, never a default."""
+    monkeypatch.setattr(config.settings, "connection_fallback_env", True)
+    monkeypatch.setattr(config.settings, "model", None)
+    await settings_service.refresh_app_settings()
+    from app.services import connections as connection_service
+
+    await connection_service.refresh_resolved_connections()
+
+    from app.services.agent_configs import AgentSpec
+
+    spec = AgentSpec(
+        name="default",
+        model=None,
+        system_prompt=None,
+        skills=None,
+        tools=None,
+        temperature=None,
+        interrupt_on=None,
+        thinking=None,
+        builtin=True,
+    )
+    with pytest.raises(ValueError, match="No model configured"):
+        _registry(persistence)._resolve_model(spec)

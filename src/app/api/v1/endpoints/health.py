@@ -8,6 +8,7 @@ from ....core.config import settings
 from ....core.database import persistence
 from ....services import resources
 from ....services import settings as runtime_settings
+from ....services.connections import llm_model_name, resolved_llm
 from ....services.mcp import mcp_servers
 
 router = APIRouter(tags=["health"])
@@ -19,7 +20,9 @@ async def health():
         "status": "ok",
         "persistence": persistence.backend_name,
         "mcp_servers": mcp_servers.names,
-        "model": settings.model,
+        "model": settings.model or llm_model_name(),
+        "llm_connection": (resolved_llm() or {}).get("name"),
+        "llm_connection_model": llm_model_name(),
         "interrupt_on": runtime_settings.interrupt_on(),
         "searxng": {
             "installed": settings.searxng_url is not None,

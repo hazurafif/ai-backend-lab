@@ -39,7 +39,7 @@ from langgraph.types import Checkpointer
 from ..core.config import settings
 from ..core.constants import GLOBAL_SKILLS_NS, SKILLS_SOURCE
 from ..services import settings as runtime_settings
-from ..services.connections import llm_model_kwargs
+from ..services.connections import llm_model_kwargs, llm_model_name
 from ..services.kb.tool import build_kb_search_tool
 from ..services.searxng import build_search_tool
 from .agent_configs import AgentSpec, load_spec
@@ -320,6 +320,18 @@ class AgentRegistry:
             kwargs["temperature"] = spec.temperature
         if spec.thinking is not None:
             kwargs["reasoning_effort"] = spec.thinking
+        # Model name: the spec's explicit model wins; otherwise the default
+        # llm connection's extra.model; otherwise nothing is configured and
+        # the agent refuses to build (no silent default model).
+        model_name = spec.model or llm_model_name()
+        if model_name is None:
+            raise ValueError(
+                "No model configured: set DEEPAGENTS_MODEL, or save a default "
+                "llm connection carrying the model, e.g. POST /connections "
+                '{"name": "zen", "kind": "llm", "base_url": "https://.../v1", '
+                '"api_token": "sk-...", "extra": {"model": '
+                '"openai:deepseek-v4-flash"}, "is_default": true}'
+            )
         if not kwargs:
             if not runtime_settings.connection_fallback_env():
                 raise ValueError(
@@ -328,10 +340,10 @@ class AgentRegistry:
                     'credentials via PUT /settings {"connections": '
                     '{"fallback_env": true}}'
                 )
-            return spec.model
+            return model_name
         from langchain.chat_models import init_chat_model
 
-        model = init_chat_model(spec.model, **kwargs)
+        model = init_chat_model(model_name, **kwargs)
         # Models without a langchain model profile (e.g. deepseek-v4-flash via
         # the Console Go gateway) come back with profile=None, and deepagents'
         # FilesystemMiddleware treats missing profile fields as "supported" —

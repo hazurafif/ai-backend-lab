@@ -61,6 +61,20 @@ def llm_model_kwargs() -> dict[str, Any]:
     return kwargs
 
 
+def llm_model_name() -> str | None:
+    """The model of the default llm connection (`extra.model`), or None.
+
+    The connection's model is the fallback for the builtin `default` agent
+    when `DEEPAGENTS_MODEL` is unset; an explicit spec/agent model always
+    wins over it.
+    """
+    conn = resolved_llm()
+    if conn is None:
+        return None
+    extra = conn.get("extra") or {}
+    return extra.get("model") or None
+
+
 def mask_token(token: str | None) -> str | None:
     """Mask an api_token for API responses: first 4 + last 4 chars.
 
@@ -84,6 +98,7 @@ def to_out(row: dict) -> dict:
 
 __all__ = [
     "llm_model_kwargs",
+    "llm_model_name",
     "mask_token",
     "refresh_resolved_connections",
     "resolved_connection",

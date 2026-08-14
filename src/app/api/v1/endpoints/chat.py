@@ -37,6 +37,7 @@ from ....services.chat import (
     notification_stream,
     sse_response,
 )
+from ....services.connections import llm_model_name
 from ....services.searxng import set_search_enabled
 from ....services.title_generator import generate_followups, generate_title
 from ....services.uploads import file_notes, save_uploads
@@ -602,7 +603,7 @@ async def thread_usage(
     spec = await agent_configs.load_spec(
         persistence.store, agent_name or "default", current_user["username"]
     )
-    model = spec.model if spec is not None else None
+    model = (spec.model if spec is not None else None) or llm_model_name()
     usage = session_stats.compute_usage(history)
     return ThreadUsageOut(
         thread_id=thread_id,

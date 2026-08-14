@@ -52,7 +52,7 @@ Everything is env-driven — full list in `.env.example` (`src/app/core/config.p
 
 | Concern | How |
 |---|---|
-| Chat model | `DEEPAGENTS_MODEL=<provider>:<model>` (any `init_chat_model` string); OpenAI-compatible gateways via `OPENAI_BASE_URL`/`OPENAI_API_KEY` |
+| Chat model | `DEEPAGENTS_MODEL=<provider>:<model>` or the default `llm` connection's `extra.model` — no default, unconfigured = loud startup error |
 | Postgres | `DATABASE_URI=postgresql://user:pass@host:5432/dbname` — tables/migrations apply at startup |
 | MCP servers | `MCP_SERVERS_JSON` or `mcp_servers.json`; or store-managed via `/agent/tools` |
 | Web search | `SEARXNG_URL` + `SEARXNG_ENABLED` (`podman compose --profile extras up -d searxng`) |
@@ -65,7 +65,10 @@ in the DB via `GET|POST /connections` (+ `/connections/{name}`) — kinds `llm`,
 `embeddings`, `mcp`, `weaviate`, `searxng`, one default per kind. The agent LLM
 and KB embeddings resolve the default connection at startup; env keys are only
 used when `CONNECTION_FALLBACK_ENV=true` (default: missing connection is a loud
-error, never a silent `.env` read). Runtime overrides: `GET|PUT /settings`.
+error, never a silent `.env` read). **There is no default model**: the agent's
+model comes from `DEEPAGENTS_MODEL`, or from the default `llm` connection's
+`extra.model` (e.g. `"extra": {"model": "openai:deepseek-v4-flash"}`) —
+without either, agent builds fail loudly. Runtime overrides: `GET|PUT /settings`.
 
 ## API
 
