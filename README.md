@@ -46,6 +46,31 @@ container (cwd `/app`), so the container is the boundary — not the host.
 No container engine on macOS? `./scripts/run_podman.sh` (`start` | `stop` | `clean`)
 runs the app capped at 1 GB RAM.
 
+## Storage model (what the agent sees)
+
+File tools and the `execute` tool resolve paths through a composite backend;
+`execute` always runs on the default backend (not path-routable), so the
+default itself is per-user in execute mode.
+
+| Path | Backend | File tools | `execute` | Multi-user | Durability |
+|---|---|---|---|---|---|
+| `/workspaces/…` + everything non-routed | `UserShellBackend` → `WORKSPACE_ROOT/<user_id>/` | ✅ | ✅ (cwd = user dir) | ✅ enforced in code | named volume (`workspaces`) |
+| `/memories/`, `/tmp/`, `/uploads/` | `StoreBackend` (per-user) | ✅ | ❌ | ✅ | Postgres |
+| `/skills/` | `StoreBackend` (global) | ✅ | ❌ | ✅ | Postgres |
+
+Rules of thumb:
+
+- **`/workspaces/` is where real work happens**: `write_file` and `execute`
+  agree on real files under `WORKSPACE_ROOT/<user_id>/` (no repo pollution,
+  isolation enforced in code, survives container restarts).
+- **Store mounts are durable but shell-invisible**: to *run* a skill script,
+  copy it into `/workspaces/` first (`read_file /skills/…` → `write_file`).
+- **Not a sandbox**: `execute` can still reach absolute paths; per-user
+  isolation is the *default* (cwd + file-tool roots), not a boundary — keep
+  HITL (`INTERRUPT_ON_JSON='{"execute": true}'`) in trusted environments.
+- Without `EXECUTE_ENABLED`, `/workspaces/` falls back to the per-user store:
+  same paths, different durability.
+
 ## Configuration
 
 Everything is env-driven — full list in `.env.example` (`src/app/core/config.py`):
