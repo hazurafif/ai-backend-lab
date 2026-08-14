@@ -33,10 +33,18 @@ uv run uvicorn app.main:app --port 8000 --reload
 ## Container
 
 ```bash
-docker compose up -d --build   # app (:8000) + Postgres (:5432); add `searxng` / `weaviate` as needed
+podman compose up -d --build            # app (:8000) + Postgres (:5432)
+podman compose --profile extras up -d   # + searxng (:8092) + weaviate (:8093)
+podman compose logs -f app              # follow the app logs
 ```
 
-No Docker on macOS? `./scripts/run_podman.sh` (`start` | `stop` | `clean`) runs the app capped at 1 GB RAM.
+`docker compose` works identically. The app container runs as a non-root user
+with a `/health` healthcheck and a 1 GB memory cap; the agent's `execute`
+tool (when enabled via `EXECUTE_ENABLED=true`) runs *inside* the app
+container (cwd `/app`), so the container is the boundary — not the host.
+
+No container engine on macOS? `./scripts/run_podman.sh` (`start` | `stop` | `clean`)
+runs the app capped at 1 GB RAM.
 
 ## Configuration
 
@@ -47,7 +55,7 @@ Everything is env-driven — full list in `.env.example` (`src/app/core/config.p
 | Chat model | `DEEPAGENTS_MODEL=<provider>:<model>` (any `init_chat_model` string); OpenAI-compatible gateways via `OPENAI_BASE_URL`/`OPENAI_API_KEY` |
 | Postgres | `DATABASE_URI=postgresql://user:pass@host:5432/dbname` — tables/migrations apply at startup |
 | MCP servers | `MCP_SERVERS_JSON` or `mcp_servers.json`; or store-managed via `/agent/tools` |
-| Web search | `SEARXNG_URL` + `SEARXNG_ENABLED` (`docker compose up -d searxng`) |
+| Web search | `SEARXNG_URL` + `SEARXNG_ENABLED` (`podman compose --profile extras up -d searxng`) |
 | Execute tool | `EXECUTE_ENABLED=true` — opt-in, off by default, dev/trusted only |
 | HITL | `INTERRUPT_ON_JSON='{"execute": true, "edit_file": true}'` |
 | KB embeddings | OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`) or **local MLX**: `./scripts/mlx_embeddings.sh` + `EMBEDDINGS_MLX_URL=http://127.0.0.1:8080/v1` (Qwen3-Embedding-0.6B on Apple Silicon, no API fees) |

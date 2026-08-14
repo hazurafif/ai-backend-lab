@@ -1,3 +1,13 @@
+# AI backend stack: FastAPI Deep Agents app + Postgres.
+#
+#   podman compose up -d --build          # app (:8000) + Postgres (:5432)
+#   podman compose --profile extras up -d # + searxng (:8092) + weaviate (:8093)
+#   podman compose logs -f app            # follow the app logs
+#
+# `name` pins the compose project so containers/volumes keep their current
+# names (ai-backend-lab-*) across config changes.
+name: ai-backend-lab
+
 services:
   app:
     build: .
@@ -9,9 +19,19 @@ services:
       DATABASE_URI: postgresql://aibackend:aibackend@postgres:5432/aibackend
     ports:
       - "8000:8000"
+    volumes:
+      # Host copies of uploads + agent workspace files (non-routed writes).
+      # Store-backed routes (/skills/, /memories/, /tmp/, /uploads/) live in
+      # Postgres and need no volume.
+      - uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
+    # The agent's execute tool runs inside this container (cwd /app, as
+    # appuser) — the container is the boundary, not the host.
+    mem_limit: 1g
+    pids_limit: 512
+    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
@@ -28,11 +48,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
 
   # Self-hosted metasearch engine backing the agent's web_search tool.
   # JSON API is enabled via ./searxng/settings.yml (required by the backend).
+  # Opt-in: podman compose --profile extras up -d searxng
   searxng:
     image: searxng/searxng:latest
+    profiles: ["extras"]
     ports:
       - "8092:8080"
     volumes:
@@ -41,8 +64,10 @@ services:
 
   # Vector store for the knowledge base (RAG): hybrid search, no vectorizer
   # modules — embeddings are computed in app code (WEAVIATE_URL in .env).
+  # Opt-in: podman compose --profile extras up -d weaviate
   weaviate:
     image: cr.weaviate.io/semitechnologies/weaviate:1.30.0
+    profiles: ["extras"]
     environment:
       QUERY_DEFAULTS_LIMIT: "25"
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
@@ -57,4 +82,5 @@ services:
 
 volumes:
   pgdata:
+  uploads:
   weaviate_data:
