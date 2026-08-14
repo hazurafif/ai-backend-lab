@@ -62,7 +62,7 @@ error, never a silent `.env` read). Runtime overrides: `GET|PUT /settings`.
 ## API
 
 Main surface — the full endpoint table and the SSE contract live in
-[docs/api-reference.md](docs/api-reference.md):
+[./docs/api-reference.md](./docs/api-reference.md):
 
 | Endpoint | Description |
 |---|---|
@@ -82,7 +82,7 @@ Main surface — the full endpoint table and the SSE contract live in
 
 - **Agent configs** — `{"name": "research", "model": "anthropic:claude-sonnet-4-5", "skills": [...], "tools": [...], "thinking": "xhigh"}`; resolution: your own → global → builtin `default`. Graphs are built lazily and cached; conversations survive rebuilds.
 - **Skills** — skill-creator layout (`SKILL.md` + bundled files) in the durable store; global (admin) and per-user scopes.
-- **Knowledge bases** — `POST /knowledge/{id}/files` (multipart, per-file `path` for folders) or `/zip`; per-user quota, `?alpha=` hybrid tuning, reranking (`KB_RERANK_MODEL`), query rewrite, retrieval eval via `scripts/kb_eval.py`. See [docs/knowledge-base-plan.md](docs/knowledge-base-plan.md) and [docs/rag-techniques-research.md](docs/rag-techniques-research.md).
+- **Knowledge bases** — `POST /knowledge/{id}/files` (multipart, per-file `path` for folders) or `/zip`; per-user quota, `?alpha=` hybrid tuning, reranking (`KB_RERANK_MODEL`), query rewrite, retrieval eval via `scripts/kb_eval.py`. See [./docs/knowledge-base-plan.md](./docs/knowledge-base-plan.md) and [./docs/rag-techniques-research.md](./docs/rag-techniques-research.md).
 - **HITL** — `event: interrupt` → approval UI → `POST /threads/{id}/resume` with `approve` / `edit` / `reject` / `respond`.
 - **Sharing** — `POST /threads/{id}/share` → public read-only link at `/shared/{token}` (no auth).
 
@@ -110,7 +110,7 @@ uv run pre-commit install            # ruff + conventional-commits hooks
 
 ## Docs
 
-- [docs/api-reference.md](docs/api-reference.md) — full endpoint table, SSE contract, agent configs, MCP wiring, KB tuning, HITL, sharing
-- [docs/knowledge-base-plan.md](docs/knowledge-base-plan.md) — RAG pipeline design & rationale
-- [docs/rag-techniques-research.md](docs/rag-techniques-research.md) — retrieval research (chunking, reranking, eval)
+- [./docs/api-reference.md](./docs/api-reference.md) — full endpoint table, SSE contract, agent configs, MCP wiring, KB tuning, HITL, sharing
+- [./docs/knowledge-base-plan.md](./docs/knowledge-base-plan.md) — RAG pipeline design & rationale
+- [./docs/rag-techniques-research.md](./docs/rag-techniques-research.md) — retrieval research (chunking, reranking, eval)
 - [AGENTS.md](AGENTS.md) — architecture map + dev conventions (structure, async rules, git workflow)

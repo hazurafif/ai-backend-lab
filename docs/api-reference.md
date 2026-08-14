@@ -487,7 +487,7 @@ rankings so you can eyeball whether reranking changes orders sensibly.
 
 Before tuning anything, build a golden set of real queries + relevant
 document paths and measure. See `data/golden_set.example.json` for the
-format and `docs/rag-techniques-research.md` for why this comes first.
+format and `./docs/rag-techniques-research.md` for why this comes first.
 
 ```bash
 # in-memory sweep (uses configured embeddings; no Weaviate needed)
