@@ -97,10 +97,10 @@ curl -X PUT http://127.0.0.1:8000/settings \
 curl -X PUT http://127.0.0.1:8000/settings \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"connections": {"fallback_env": false}}'
-# human-in-the-loop: pause before every execute tool call (builtin agent)
+# human-in-the-loop: pause before shell commands and file mutations
 curl -X PUT http://127.0.0.1:8000/settings \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"hitl": {"interrupt_on": {"execute": true}}}'
+  -d '{"hitl": {"interrupt_on": {"execute": true, "edit_file": true, "write_file": true}}}'
 ```
 
 - `GET /settings` — effective values + `source` (`db` or `env`) per key
