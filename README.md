@@ -82,6 +82,12 @@ curl -X POST http://127.0.0.1:8000/connections \
   connection at startup and after every mutation; without one, env-based
   behavior stays. Connections target OpenAI-compatible endpoints
   (langchain-openai).
+- **Local embeddings on Apple Silicon (MLX):** `scripts/mlx_embeddings.sh`
+  serves Qwen3-Embedding-0.6B (1024 dims, Apache-2.0, quantized ~600 MB)
+  via `mlx_lm.server --embedding-model`, exposing `POST /v1/embeddings`.
+  Set `EMBEDDINGS_MLX_URL=http://127.0.0.1:8080/v1` (env fallback on) to use
+  it — no API fees, and queries get Qwen's "Instruct: ..." prefix
+  automatically (documents stay bare).
 
 **Runtime app settings (DB overrides .env):** admin can flip the execute tool
 and the connection policy at runtime via `GET|PUT /settings` — values are

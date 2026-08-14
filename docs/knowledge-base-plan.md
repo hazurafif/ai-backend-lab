@@ -211,6 +211,10 @@ WEAVIATE_URL=http://localhost:8093        # service baru di compose
 # WEAVIATE_API_KEY=...                    # opsional, auth
 EMBEDDINGS_MODEL=text-embedding-3-small   # dipakai via OpenAIEmbeddings
 # EMBEDDINGS_BASE_URL=...                 # custom OpenAI-compatible endpoint
+# Lokal di Apple Silicon via MLX (Qwen3-Embedding-0.6B, scripts/mlx_embeddings.sh):
+# EMBEDDINGS_MLX_URL=http://127.0.0.1:8080/v1   # menang atas OPENAI_API_KEY
+# EMBEDDINGS_MLX_MODEL=mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ  # default
+# EMBEDDINGS_QUERY_INSTRUCTION=...        # prefix query utk model instruction-aware ("" = nonaktif)
 KB_MAX_FILE_SIZE_MB=25                    # cap per file
 KB_ALLOWED_EXTENSIONS=.md,.txt,.pdf,.docx,.csv,.html,.json,.py,.js,.ts,.go,.rs,.java,.sql
 KB_CHUNK_SIZE=1000                        # chars

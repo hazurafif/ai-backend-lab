@@ -154,6 +154,25 @@ class Settings:
     embeddings_dimensions: int | None = field(
         default_factory=lambda: _load_optional_int("EMBEDDINGS_DIMENSIONS")
     )
+    # Local embeddings on Apple Silicon via MLX: when EMBEDDINGS_MLX_URL is set
+    # and no 'embeddings' connection exists, build_embeddings() targets this
+    # OpenAI-compatible endpoint (mlx_lm.server --embedding-model, see
+    # scripts/mlx_embeddings.sh) with Qwen3-Embedding-0.6B (1024 dims, Apache-2.0).
+    embeddings_mlx_url: str | None = field(
+        default_factory=lambda: os.environ.get("EMBEDDINGS_MLX_URL") or None
+    )
+    embeddings_mlx_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "EMBEDDINGS_MLX_MODEL", "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+        )
+    )
+    # Qwen3-Embedding is instruction-aware: prepending an instruction to
+    # *queries* (not passages) gains ~1-5% retrieval quality. Empty string
+    # disables; unset uses the Qwen retrieval instruction for qwen3-embedding
+    # models and nothing for others.
+    embeddings_query_instruction: str | None = field(
+        default_factory=lambda: os.environ.get("EMBEDDINGS_QUERY_INSTRUCTION")
+    )
     # BM25F field weights for Weaviate hybrid search: {"path": 2.0, "content": 1.0}
     # boosts titles/paths over body text (keyword stage only).
     kb_bm25_property_weights: dict[str, float] = field(
