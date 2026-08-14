@@ -82,6 +82,18 @@ curl -X POST http://127.0.0.1:8000/agent/connections \
   without it the env-based behavior stays.
 - Connections target OpenAI-compatible endpoints (langchain-openai).
 
+**Thinking / reasoning effort:** agent configs accept a `thinking` level that
+is passed to the model as `reasoning_effort` (OpenAI-compatible endpoints,
+stored connections included). Levels follow the standard reasoning-effort
+set — `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (extra high),
+`max`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/agents \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "coder", "model": "openai:gpt-5.2", "thinking": "xhigh"}'
+```
+
 ## API
 
 | Endpoint | Auth | Description |
@@ -109,7 +121,7 @@ curl -X POST http://127.0.0.1:8000/agent/connections \
 | `POST /agent/tools/reconnect` | Bearer (admin) | Reconnect MCP servers from the store + rebuild the agent |
 | `GET/POST /agent/connections` + `GET/PUT/DELETE /agent/connections/{name}` | read: any user; write: Bearer (admin) | Manage API connections (base URL + API key in the DB, used by the agent instead of `.env` keys; key is write-only, updates merge) |
 | `POST /mcp/tools/call` | Bearer | MCP apps tools proxy: invoke a tool on a configured MCP server (`server_hint` or fan-out; `CallToolResult` passthrough — 200 with `isError`, 502 transport, 404 no match) |
-| `GET|POST /agents` | Bearer | List / create agent configs (profile: model + system prompt + skills + tools; `scope: "global"` requires admin) |
+| `GET|POST /agents` | Bearer | List / create agent configs (profile: model + system prompt + skills + tools + temperature + `thinking` reasoning effort + `connection`; `scope: "global"` requires admin) |
 | `GET/PUT/DELETE /agents/{name}` | Bearer | Read / replace / delete an agent config (owner; global ones: admin) |
 | `POST /agents/{name}/test` | Bearer | Dry-run: build the graph (validates the model string); `400` when it cannot be built |
 | `GET /users/me` | Bearer | Current user |

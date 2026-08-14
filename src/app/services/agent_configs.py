@@ -62,6 +62,7 @@ class AgentSpec:
     tools: list[str] | None  # None = inherit all tools, [] = none
     temperature: float | None
     interrupt_on: dict[str, bool] | None
+    thinking: str | None  # reasoning-effort level: none..minimal..max
     connection: str | None  # API connection name (base URL + key from the store)
     owner: str = _SYSTEM_OWNER
     builtin: bool = False
@@ -96,6 +97,7 @@ class AgentSpec:
                     self.tools,
                     self.temperature,
                     self.interrupt_on,
+                    self.thinking,
                     self.connection,
                     self.skills_source,
                 ],
@@ -121,6 +123,7 @@ def default_spec(connection: str | None = None) -> AgentSpec:
         tools=None,
         temperature=None,
         interrupt_on=settings.interrupt_on or None,
+        thinking=None,
         connection=connection,
         owner=_SYSTEM_OWNER,
         builtin=True,
@@ -143,6 +146,7 @@ def _value(cfg: AgentConfigIn, *, owner: str, created_at: str | None = None) -> 
         "tools": cfg.tools,
         "temperature": cfg.temperature,
         "interrupt_on": cfg.interrupt_on,
+        "thinking": cfg.thinking,
         "connection": cfg.connection,
         "scope": cfg.scope,
         "owner": owner,
@@ -164,6 +168,7 @@ def _spec_from_value(value: dict[str, Any]) -> AgentSpec:
         tools=value.get("tools"),
         temperature=value.get("temperature"),
         interrupt_on=value.get("interrupt_on"),
+        thinking=value.get("thinking"),
         connection=value.get("connection"),
         owner=value.get("owner") or _GLOBAL_OWNER,
         description=value.get("description"),

@@ -313,10 +313,17 @@ class AgentRegistry:
             }
             if spec.temperature is not None:
                 kwargs["temperature"] = spec.temperature
+            if spec.thinking is not None:
+                kwargs["reasoning_effort"] = spec.thinking
             return init_chat_model(spec.model, **kwargs)
-        if spec.temperature is None:
+        if spec.temperature is None and spec.thinking is None:
             return spec.model
-        return init_chat_model(spec.model, temperature=spec.temperature)
+        kwargs = {}
+        if spec.temperature is not None:
+            kwargs["temperature"] = spec.temperature
+        if spec.thinking is not None:
+            kwargs["reasoning_effort"] = spec.thinking
+        return init_chat_model(spec.model, **kwargs)
 
     def update_mcp_tools(
         self,

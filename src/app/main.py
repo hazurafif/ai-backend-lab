@@ -47,7 +47,10 @@ Endpoints:
                                     user, attachable to own agent configs)
   GET|POST /agents                -> list / create agent configs (customizable
                                     profiles: model + system prompt + skills +
-                                    tools; scope=global requires admin)
+                                    tools + temperature + thinking (reasoning
+                                    effort: none..minimal..low..medium..high..
+                                    xhigh..max) + connection; scope=global
+                                    requires admin)
   GET|PUT|DELETE /agents/{name}   -> read / replace / delete an agent config
   POST /agents/{name}/test        -> dry-run: build the graph (validates model)
   POST /kb                         -> create a knowledge base (per-user)

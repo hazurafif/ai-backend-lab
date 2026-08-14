@@ -289,6 +289,7 @@ async def test_resolve_model_uses_stored_connection(persistence):
         tools=None,
         temperature=None,
         interrupt_on=None,
+        thinking=None,
         connection="openai",
     )
     model = await registry._resolve_model(spec)

@@ -21,6 +21,11 @@ MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
 
 TOOL_NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$"
 
+# Reasoning-effort levels for thinking models (OpenAI ReasoningEffort set,
+# also used by Anthropic's effort parameter). "xhigh" = extra high.
+THINKING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+THINKING_LEVEL = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
 
 class AgentConfigIn(BaseModel):
     """Create/update payload for an agent config."""
@@ -66,6 +71,15 @@ class AgentConfigIn(BaseModel):
         ),
     )
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    thinking: THINKING_LEVEL | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort / thinking level for the model: none, minimal, low, "
+            "medium, high, xhigh (extra high), max. Passed as `reasoning_effort` "
+            "to OpenAI-compatible endpoints (incl. stored connections). "
+            "None = provider default."
+        ),
+    )
     interrupt_on: dict[str, bool] | None = Field(
         default=None,
         description='e.g. {"edit_file": true} -> pause for human approval before edits',
@@ -97,6 +111,7 @@ class AgentConfigOut(BaseModel):
     skills: list[str] | None = None
     tools: list[str] | None = None
     temperature: float | None = None
+    thinking: THINKING_LEVEL | None = None
     interrupt_on: dict[str, bool] | None = None
     connection: str | None = None
     scope: Literal["user", "global"] = "user"
