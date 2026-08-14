@@ -129,8 +129,16 @@ async def delete_tool_server(name: str, request: Request, _: dict = Depends(get_
 
 @router.post("/tools/reconnect")
 async def reconnect_tools(request: Request, _: dict = Depends(get_admin_user)):
-    """Reconnect MCP servers from the store and rebuild the agent (live)."""
-    await mcp_servers.connect(store=persistence.store)
+    """Reconnect MCP servers from the store and rebuild the agent (live).
+
+    Unreachable servers are recorded per-server (not fatal) so the healthy
+    ones still load; the response reports them under `failed`. Total failure
+    to rebuild the agent (e.g. no model configured yet) is a 503, not a 500.
+    """
+    try:
+        await mcp_servers.connect(store=persistence.store)
+    except Exception as exc:
+        raise ServiceUnavailable(f"MCP connect failed: {exc}") from None
     registry: AgentRegistry = request.app.state.agents
     registry.update_mcp_tools(mcp_servers.tools, mcp_servers.tools_by_server)
     registry.update_extra_tools(build_extra_tools() or None)
@@ -142,4 +150,8 @@ async def reconnect_tools(request: Request, _: dict = Depends(get_admin_user)):
         request.app.state.agent = None
         raise ServiceUnavailable(str(exc)) from None
     request.app.state.backend = registry.backend
-    return {"connected": mcp_servers.names, "tools": len(mcp_servers.tools)}
+    return {
+        "connected": [n for n in mcp_servers.names if n not in mcp_servers.failed],
+        "tools": len(mcp_servers.tools),
+        "failed": mcp_servers.failed,
+    }

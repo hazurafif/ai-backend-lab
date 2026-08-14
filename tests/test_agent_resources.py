@@ -411,4 +411,4 @@ async def test_reconnect_rebuilds_agent(persistence, monkeypatch):
         async with await client_for(app) as http:
             r = await http.post("/agent/tools/reconnect")
             assert r.status_code == 200, r.text
-            assert r.json() == {"connected": [], "tools": 0}
+            assert r.json() == {"connected": [], "tools": 0, "failed": {}}

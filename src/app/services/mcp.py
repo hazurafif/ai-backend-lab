@@ -140,9 +140,15 @@ class MCPServers:
         self._client = client
         self.tools = []
         self.tools_by_server = {}
+        self.failed = {}
         seen: set[str] = set()
         for server_name in self._config:
-            server_tools = await client.get_tools(server_name=server_name)
+            try:
+                server_tools = await client.get_tools(server_name=server_name)
+            except Exception as exc:  # one dead server must not kill the rest
+                self.failed[server_name] = str(exc)
+                logger.warning("MCP server %s unreachable, skipping: %s", server_name, exc)
+                continue
             names: list[str] = []
             for tool in server_tools:
                 if tool.name in seen:
@@ -151,7 +157,15 @@ class MCPServers:
                 names.append(tool.name)
                 self.tools.append(tool)
             self.tools_by_server[server_name] = names
-        logger.info("Connected MCP servers: %s (%d tools total)", self.names, len(self.tools))
+        if self.failed:
+            logger.info(
+                "Connected MCP servers: %s (%d tools total); failed: %s",
+                self.names,
+                len(self.tools),
+                self.failed,
+            )
+        else:
+            logger.info("Connected MCP servers: %s (%d tools total)", self.names, len(self.tools))
         return self.tools
 
     # ------------------------------------------------------------------
