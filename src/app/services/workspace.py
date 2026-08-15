@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 _CREDENTIALS_FILE = ".git-credentials"
 _WORKSPACE_GITIGNORE = f"{_CREDENTIALS_FILE}\n"
+_COMMIT_PREFIX = "[AGENT] "
 
 
 def workspace_root() -> Path:
@@ -103,15 +104,15 @@ def ensure_git() -> None:
         return
     _configure_git()
     if _git("rev-parse", "--verify", "-q", "HEAD") is None:
-        _git("commit", "-q", "--allow-empty", "-m", "workspace initialized")
+        _git("commit", "-q", "--allow-empty", "-m", f"{_COMMIT_PREFIX}workspace initialized")
 
 
 def _git_commit(message: str) -> None:
-    """Stage everything and commit; no-op when nothing changed."""
+    """Stage everything and commit with the [AGENT] prefix; no-op when unchanged."""
     ensure_git()
     if _git("add", "-A") is None:
         return
-    _git("commit", "-q", "-m", message)
+    _git("commit", "-q", "-m", f"{_COMMIT_PREFIX}{message}")
 
 
 async def git_commit(message: str) -> None:
