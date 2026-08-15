@@ -125,24 +125,25 @@ class Settings:
     )
 
     # --- Chat file uploads ---
-    # Uploads are stored in Postgres (store) and materialized into the user's
-    # workspace dir (uploads/) by the workspace sync — no host-disk copy.
+    # Uploads are stored as real files in the user's workspace dir (uploads/),
+    # versioned by the workspace git repo — no Postgres involvement.
     max_upload_size_mb: int = field(
         default_factory=lambda: int(os.environ.get("MAX_UPLOAD_SIZE_MB", "25"))
     )
     # Root of the per-user workspace (the agent's only filesystem): real
-    # files under <WORKSPACE_ROOT>/<user_id>/, mounted as a named volume in
-    # compose (default ./ .workspace = container /app/.workspace). The repo
-    # stays clean; the volume is the source of truth.
+    # files under <WORKSPACE_ROOT>/<user_id>/, bind-mounted from the host's
+    # ./.workspace in compose (so user dirs show up on the host). The app
+    # repo stays clean; the files on disk are the source of truth.
     workspace_root: str = field(
         default_factory=lambda: os.environ.get("WORKSPACE_ROOT", ".workspace")
     )
 
-    # --- Workspace git (versioning only; the volume is the source of truth) ---
-    # The workspace root is its own git repo, auto-committed after each run.
-    # Whether to PUSH is the agent's call (via the execute tool) — these
-    # settings only configure identity + credentials so a push can succeed:
-    # GIT_TOKEN + GIT_REMOTE_URL make `git push` work out of the box.
+    # --- Workspace git (versioning only; the files on disk are the source of truth) ---
+    # The workspace root is its own git repo, initialized at startup and
+    # auto-committed after each run. Whether to PUSH is the agent's call (via
+    # the execute tool) — these settings only configure identity + credentials
+    # so a push can succeed from inside the container: GIT_TOKEN +
+    # GIT_REMOTE_URL are written to .git-credentials (gitignored) at startup.
     git_username: str = field(default_factory=lambda: os.environ.get("GIT_USERNAME", "ai-backend"))
     git_email: str = field(default_factory=lambda: os.environ.get("GIT_EMAIL", "ai-backend@local"))
     git_token: str | None = field(default_factory=lambda: os.environ.get("GIT_TOKEN") or None)

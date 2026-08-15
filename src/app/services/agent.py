@@ -8,14 +8,20 @@ The agent gets the Deep Agents built-in harness:
 
 Plus:
   - MCP tools from gofastmcp servers (passed via `tools=`)
-  - Postgres checkpointer (conversations) + Postgres store (cross-thread memory)
-  - durable filesystem backend: by default a StoreBackend over the LangGraph
-    store (Postgres in production, in-memory in dev), so every user's workspace
-    persists across threads. `/memories/` (per user) and `/skills/` (global,
-    shared by all users) are routed to the store as well.
-  - skills loaded from the store-backed `/skills/` source, managed via the
-    /agent/skills CRUD API (no agent rebuild needed — SkillsMiddleware reads
-    the backend on every run).
+  - Postgres checkpointer (conversations) + Postgres store (agent configs,
+    skills, thread metadata)
+  - one real per-user filesystem: every file-tool path and shell command
+    resolves to ``WORKSPACE_ROOT/<user_id>/`` (plain host files, bind-mounted
+    in compose, git-versioned by services/workspace). No virtual mounts, no
+    store mirroring — the disk is the source of truth.
+  - skills materialized into the user's workspace before each run (see
+    services/workspace.materialize_skills), loaded via the store-backed
+    /skills CRUD API (no agent rebuild needed — SkillsMiddleware reads the
+    backend on every run).
+
+The agent is told its workspace layout (skills/, uploads/, tmp/, memories/)
+by the system prompt — see DEFAULT_SYSTEM_PROMPT in core/constants.py, which
+is rendered per user ({{username}}) so each agent only knows its own dir.
 """
 
 from __future__ import annotations
@@ -93,12 +99,11 @@ def _runtime_user_id() -> str:
 class UserShellBackend(LocalShellBackend):
     """LocalShellBackend whose file-tool root and shell cwd resolve per user.
 
-    The single backend of the simplified model: every file-tool path and
-    shell command resolves to ``WORKSPACE_ROOT/<user_id>/`` — real files on
-    a named volume (the repo stays clean), isolated per user, and visible to
-    **both** the file tools and the `execute` tool. The durable store is
-    mirrored in/out by `services/workspace` (sync_down before a run,
-    sync_up after), so the agent never sees virtual mounts.
+    The single backend of the simple model: every file-tool path and shell
+    command resolves to ``WORKSPACE_ROOT/<user_id>/`` — plain host files
+    (bind-mounted in compose), isolated per user, and visible to **both**
+    the file tools and the `execute` tool. The disk is the source of truth;
+    services/workspace only scaffolds the dirs and versions them with git.
 
     The runtime user comes from the graph execution context (same mechanism
     as `StoreBackend`'s namespace factory); outside a run it is
@@ -230,10 +235,10 @@ def build_backend(*, store: BaseStore) -> CompositeBackend:
     """Build the agent's filesystem backend: one per-user real workspace.
 
     Every path (file tools AND the `execute` tool) resolves to
-    ``WORKSPACE_ROOT/<user_id>/`` via `UserShellBackend` — real files on a
-    named volume, isolated per user, no virtual mounts. Durability comes
-    from `services/workspace`, which mirrors the store (Postgres) into the
-    workspace dir before each run and syncs agent changes back afterwards.
+    ``WORKSPACE_ROOT/<user_id>/`` via `UserShellBackend` — plain host files
+    (bind-mounted in compose, so user dirs show up on the host), isolated
+    per user, no virtual mounts. Durability and versioning come from
+    `services/workspace` (git auto-commit after each run).
 
     The `store` argument is kept for API stability (the resources API and
     tests pass it); the store itself is not consulted at build time.
