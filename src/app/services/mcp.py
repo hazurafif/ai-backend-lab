@@ -65,8 +65,12 @@ logger = logging.getLogger(__name__)
 
 # Tool-not-found signals across MCP servers: gofastmcp/mcp-go raises a
 # JSON-RPC error "tool not found", current FastMCP "Not found: '<name>'",
-# and older FastMCP returns an isError result with "Unknown tool: <name>".
-_TOOL_NOT_FOUND_RE = re.compile(r"unknown tool|tool not found|not found: ", re.IGNORECASE)
+# older FastMCP returns an isError result with "Unknown tool: <name>", and
+# non-FastMCP servers (e.g. context7) answer "Tool <name> not found".
+_TOOL_NOT_FOUND_RE = re.compile(
+    r"unknown tool|tool not found|not found: |tool [a-z0-9_.-]+ not found",
+    re.IGNORECASE,
+)
 
 
 def _is_tool_not_found(message: str) -> bool:

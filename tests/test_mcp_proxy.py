@@ -74,6 +74,23 @@ def scripted_model() -> Scripted:
 # (`<hash>_<name>`); FastMCP resolves the hash server-side via get_tool_by_hash.
 HASHED_SAVE_CONTACT = "a1b2c3d4e5f6_save_contact"
 
+
+def test_tool_not_found_detection():
+    """Non-FastMCP servers (context7) answer "Tool <name> not found" — must
+    count as tool-not-found so fan-out skips them instead of 502ing."""
+    from app.services.mcp import _is_tool_not_found
+
+    assert _is_tool_not_found("Tool f15d2d6be326_submit_answer not found")
+    assert _is_tool_not_found("Tool submit_answer not found")
+    # Existing server dialects keep matching.
+    assert _is_tool_not_found("tool not found")
+    assert _is_tool_not_found("Not found: 'save_contact'")
+    assert _is_tool_not_found("Unknown tool: save_contact")
+    # Legit execution errors must NOT be treated as tool-not-found.
+    assert not _is_tool_not_found("file /tmp/x not found")
+    assert not _is_tool_not_found("invalid params")
+
+
 # A real FastMCP server, spawned as a stdio subprocess. `role` selects which
 # tools are registered; the beta server's tool is stateful (file-backed) so
 # tests can observe that sessions are cached and reused across calls.
@@ -87,7 +104,54 @@ from mcp.types import CallToolResult, TextContent
 
 role = sys.argv[1]
 state_dir = Path(sys.argv[2])
-mcp = FastMCP(f"test-{role}")
+
+if role == "alpha":
+    # A context7-style server: NOT FastMCP. Unknown tools are rejected with
+    # a JSON-RPC -32000 error "Tool <name> not found" (no get_tool_by_hash
+    # extension), which the backend must classify as tool-not-found so
+    # fan-out skips this server instead of failing with a 502.
+    import anyio
+
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData, Tool
+
+    server = Server("alpha")
+
+    @server.list_tools()
+    async def list_tools() -> list[Tool]:
+        return [
+            Tool(
+                name="ping",
+                description="Ping.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="fail_tool",
+                description="Explicit upstream error (isError result).",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+        ]
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict) -> list[TextContent] | CallToolResult:
+        if name == "ping":
+            return [TextContent(type="text", text="pong")]
+        if name == "fail_tool":
+            return CallToolResult(
+                content=[TextContent(type="text", text="boom failed")], isError=True
+            )
+        raise McpError(ErrorData(code=-32000, message=f"Tool {name} not found"))
+
+    async def main() -> None:
+        async with stdio_server() as (read, write):
+            await server.run(read, write, server.create_initialization_options())
+
+    anyio.run(main)
+    sys.exit(0)
+
+mcp = FastMCP("beta")
 
 
 def load_state():
@@ -95,21 +159,7 @@ def load_state():
     return json.loads(f.read_text()) if f.exists() else {"contacts": []}
 
 
-if role == "alpha":
-
-    @mcp.tool()
-    def ping() -> str:
-        \"\"\"Ping.\"\"\"
-        return "pong"
-
-    @mcp.tool()
-    def fail_tool() -> CallToolResult:
-        \"\"\"Explicit upstream error (isError result).\"\"\"
-        return CallToolResult(
-            content=[TextContent(type="text", text="boom failed")], isError=True
-        )
-
-else:
+if role == "beta":
 
     @mcp.tool(name="__HASHED_SAVE_CONTACT__")
     def save_contact(email: str, name: str = "") -> CallToolResult:
@@ -307,7 +357,10 @@ async def test_is_error_raised_tool_wrapped(proxy_env):
 
 
 async def test_fanout_first_hit_wins(proxy_env):
-    """No server_hint: alpha reports tool-not-found, beta executes (first hit wins)."""
+    """No server_hint: alpha (context7-style) reports tool-not-found, beta
+    executes (first hit wins). Regression for the real incident where a
+    hashed app-tool name fanned out to context7 and the raw -32000 error
+    leaked as a 502 instead of skipping to the FastMCP server behind it."""
     http, _ = proxy_env
     r = await call(http, HASHED_SAVE_CONTACT, {"email": "d@e.f"})
     assert r.status_code == 200, r.text
