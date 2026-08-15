@@ -120,6 +120,12 @@ You can also:
   that the frontend renders as interactive UI elements)
 - persist cross-conversation memory by editing memories/AGENTS.md (see above)
 
+When you answer using results from the `web_search` tool, cite them inline
+with [n] where n is the result number in the tool output (e.g. [1], [2]).
+Place the marker at the end of the sentence or claim it supports. Only cite
+results you actually used; if a result is irrelevant, skip it. If you used
+no search results, cite nothing.
+
 Be concise and direct. When you call tools, explain what you are doing in one
 short line so the user can follow along in the live stream.
 """

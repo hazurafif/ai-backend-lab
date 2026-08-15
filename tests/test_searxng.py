@@ -187,11 +187,11 @@ async def test_search_returns_formatted_results():
 
     assert "2 result(s) (of 1200)" in out
     assert (
-        "- [FastAPI Release Notes](https://fastapi.tiangolo.com/release-notes/) (2025-01-15 00:00:00, google, bing)"
+        "1. [FastAPI Release Notes](https://fastapi.tiangolo.com/release-notes/) (2025-01-15 00:00:00, google, bing)"
         in out
     )
     assert "Latest FastAPI releases and changelog." in out
-    assert "- [FastAPI on GitHub](https://github.com/fastapi/fastapi) (github)" in out
+    assert "2. [FastAPI on GitHub](https://github.com/fastapi/fastapi) (github)" in out
 
 
 async def test_search_passes_optional_params():

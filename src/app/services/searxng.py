@@ -100,13 +100,16 @@ class SearxngClient:
             return "No results found."
 
         lines: list[str] = []
-        for r in results[: self.max_results]:
+        # Numbered results: the model cites sources as [n] matching these
+        # indices (see the citation instruction in DEFAULT_SYSTEM_PROMPT),
+        # and the frontend parses the URLs from the markdown lines.
+        for i, r in enumerate(results[: self.max_results], start=1):
             title = r.get("title") or "(untitled)"
             url = r.get("url") or ""
             content = (r.get("content") or "").strip()
             engines = r.get("engines") or ([r.get("engine")] if r.get("engine") else [])
             meta = ", ".join(x for x in (r.get("publishedDate") or "", ", ".join(engines)) if x)
-            line = f"- [{title}]({url})" + (f" ({meta})" if meta else "")
+            line = f"{i}. [{title}]({url})" + (f" ({meta})" if meta else "")
             if content:
                 line += f"\n  {content}"
             lines.append(line)
