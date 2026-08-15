@@ -10,6 +10,7 @@ from app.api.v1.endpoints.connections import router as connections_router
 from app.api.v1.endpoints.health import router as health_router
 from app.api.v1.endpoints.kb import router as kb_router
 from app.api.v1.endpoints.mcp import router as mcp_router
+from app.api.v1.endpoints.preferences import router as preferences_router
 from app.api.v1.endpoints.settings import router as settings_router
 from app.api.v1.endpoints.skills import router as skills_router
 
@@ -24,5 +25,6 @@ api_router.include_router(kb_router, prefix="/knowledge")
 # Backward-compatible alias: the KB routes also answer under /kb.
 api_router.include_router(kb_router, prefix="/kb")
 api_router.include_router(mcp_router)
+api_router.include_router(preferences_router)
 api_router.include_router(settings_router)
 api_router.include_router(health_router)

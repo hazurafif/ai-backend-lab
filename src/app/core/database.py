@@ -4,6 +4,7 @@
 - Store (long-term memory, thread metadata)   -> PostgresStore
 - Chat history (readable message rows)        -> chat_messages table
 - Users (auth: /register, /login, /users/me)  -> users table
+- User preferences (web search toggle)          -> user_preferences table
 All come from `langgraph-checkpoint-postgres` / `psycopg`. When `DATABASE_URI`
 is unset (no Postgres available), we fall back to `InMemorySaver` +
 `InMemoryStore` + in-memory dicts so the backend still runs locally for
@@ -20,6 +21,7 @@ import json
 import logging
 import uuid
 from contextlib import suppress
+from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -1061,6 +1063,96 @@ class AppSettingsStore:
         self._memory.pop(key, None)
 
 
+class UserPreferencesStore:
+    """Per-user preferences (key-value JSON) in Postgres (`user_preferences` table).
+
+    Owner-scoped: every method takes `username` so users only read/write their
+    own row. Currently carries the web search toggle (`enable_search`); the
+    JSONB value keeps future preferences additive without new migrations.
+    Falls back to in-memory dicts when Postgres is off (dev mode).
+    """
+
+    def __init__(self) -> None:
+        self._pool: AsyncConnectionPool | None = None
+        self._memory: dict[str, dict] = {}  # username -> {key: value}
+
+    @property
+    def is_postgres(self) -> bool:
+        return self._pool is not None
+
+    async def start(self, pool: AsyncConnectionPool | None) -> None:
+        self._pool = pool
+        self._memory = {}
+
+    async def stop(self) -> None:
+        self._pool = None
+        self._memory = {}
+
+    async def get(self, username: str, key: str) -> Any | None:
+        """The stored value of a preference key, or None when unset."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT value FROM user_preferences WHERE username = %s", (username,)
+                )
+                row = await cur.fetchone()
+            return (row[0] or {}).get(key) if row else None
+        return self._memory.get(username, {}).get(key)
+
+    async def get_all(self, username: str) -> dict:
+        """All stored preferences of a user, as a plain dict."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT value FROM user_preferences WHERE username = %s", (username,)
+                )
+                row = await cur.fetchone()
+            return dict(row[0] or {}) if row else {}
+        return dict(self._memory.get(username, {}))
+
+    async def set(self, username: str, key: str, value: Any) -> None:
+        """Upsert a preference key; None removes the key (and the row when empty)."""
+        if value is None:
+            await self.delete(username, key)
+            return
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO user_preferences (username, value, updated_at) "
+                    "VALUES (%s, %s, now()) "
+                    "ON CONFLICT (username) DO UPDATE SET "
+                    "value = user_preferences.value || EXCLUDED.value, updated_at = now()",
+                    (username, Jsonb({key: value})),
+                )
+            return
+        self._memory.setdefault(username, {})[key] = value
+
+    async def delete(self, username: str, key: str) -> None:
+        """Remove a preference key; drops the row when it becomes empty."""
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT value FROM user_preferences WHERE username = %s", (username,)
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return
+                value = dict(row[0] or {})
+                value.pop(key, None)
+                if value:
+                    await cur.execute(
+                        "UPDATE user_preferences SET value = %s, updated_at = now() "
+                        "WHERE username = %s",
+                        (Jsonb(value), username),
+                    )
+                else:
+                    await cur.execute(
+                        "DELETE FROM user_preferences WHERE username = %s", (username,)
+                    )
+            return
+        self._memory.get(username, {}).pop(key, None)
+
+
 class Persistence:
     """Owns the checkpointer, store, chat history and users; set up at startup and closed at shutdown."""
 
@@ -1072,6 +1164,7 @@ class Persistence:
         self.kb = KbStore()
         self.connections = ConnectionStore()
         self.settings = AppSettingsStore()
+        self.preferences = UserPreferencesStore()
         self.backend_name = "memory"
         self._pool: AsyncConnectionPool | None = None
         self._saver_cm = None
@@ -1125,6 +1218,7 @@ class Persistence:
             await self.kb.start(pool)
             await self.connections.start(pool)
             await self.settings.start(pool)
+            await self.preferences.start(pool)
         else:
             # Postgres unavailable (no DATABASE_URI, missing migrations dir, or
             # a failed connection): every store degrades to in-memory so the
@@ -1134,6 +1228,7 @@ class Persistence:
             await self.kb.start(None)
             await self.connections.start(None)
             await self.settings.start(None)
+            await self.preferences.start(None)
             self.checkpointer = InMemorySaver()
             self.store = InMemoryStore()
             self.backend_name = "memory"
@@ -1160,6 +1255,7 @@ class Persistence:
         await self.kb.stop()
         await self.connections.stop()
         await self.settings.stop()
+        await self.preferences.stop()
 
     async def ensure_default_admin(self) -> None:
         """Guarantee an admin account exists; seed the default on a fresh store.
