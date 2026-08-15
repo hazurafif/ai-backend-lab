@@ -25,6 +25,9 @@ services:
     environment:
       # In-compose the app reaches Postgres via the service name.
       DATABASE_URI: postgresql://aibackend:aibackend@postgres:5432/aibackend
+      # Self-hosted SearXNG (extras profile) via the compose network; for a
+      # host-side dev run (uv run uvicorn) use SEARXNG_URL=http://localhost:8092.
+      SEARXNG_URL: http://searxng:8080
     ports:
       - "8000:8000"
     volumes:
