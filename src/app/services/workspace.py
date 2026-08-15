@@ -48,7 +48,7 @@ from ..services.agent_configs import AgentSpec
 logger = logging.getLogger(__name__)
 
 _CREDENTIALS_FILE = ".git-credentials"
-_WORKSPACE_GITIGNORE = f"{_CREDENTIALS_FILE}\n"
+_WORKSPACE_GITIGNORE = f"{_CREDENTIALS_FILE}\n.venv/\n__pycache__/\n"
 _COMMIT_PREFIX = "[AGENT] "
 
 
@@ -120,6 +120,13 @@ def _configure_git() -> None:
     gitignore = root / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text(_WORKSPACE_GITIGNORE)
+    else:
+        # Fold in any new patterns (e.g. .venv/) for workspaces initialized
+        # before they existed, so a per-user virtualenv never gets committed.
+        existing = gitignore.read_text().splitlines()
+        missing = [p for p in _WORKSPACE_GITIGNORE.splitlines() if p and p not in existing]
+        if missing:
+            gitignore.write_text("\n".join(existing + missing) + "\n")
 
 
 def ensure_git() -> None:
@@ -161,6 +168,15 @@ _STARTER_MEMORY = """\
 at the start of every run. Edit it with edit_file to persist what you learn
 about the user and how you should work. Keep it concise: only durable,
 high-signal facts and preferences. -->
+
+# Workspace conventions
+
+- File tools use VIRTUAL paths (/uploads, /tmp, /memories, /skills); the
+  shell sees the real filesystem with your workspace as cwd — use relative
+  paths in shell commands, never /app/... with the file tools.
+- Python: use `uv`; keep a .venv inside the workspace (gitignored) and
+  never install into the container's global Python.
+- All shell work stays inside your own user-scoped workspace dir.
 
 # Memory
 
