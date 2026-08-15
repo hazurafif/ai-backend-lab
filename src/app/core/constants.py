@@ -5,6 +5,12 @@ from __future__ import annotations
 # Backend source where store-backed skills live (SkillsMiddleware source path).
 SKILLS_SOURCE = "/skills/"
 
+# Memory source: AGENTS.md files auto-loaded into the system prompt before
+# every run (deepagents MemoryMiddleware). Resolves through the per-user
+# backend to WORKSPACE_ROOT/<user>/memories/AGENTS.md — the agent persists
+# learnings by edit_file-ing it (the injected <memory_guidelines> say so).
+MEMORY_SOURCE = "/memories/AGENTS.md"
+
 # Store namespaces for agent-level (global, shared by all users) resources.
 GLOBAL_SKILLS_NS = ("agent", "skills")
 TOOL_SERVERS_NS = ("agent", "mcp_servers")
@@ -69,7 +75,10 @@ Your workspace layout:
 - skills/    your skills (read-only — copy one out to edit or run it)
 - uploads/   files the user uploads in chat (inspect/manipulate them freely)
 - tmp/       scratch space for scripts and intermediate files
-- memories/  durable notes you keep across conversations
+- memories/  your long-term memory: memories/AGENTS.md is auto-loaded into
+             your system prompt at the start of every run — edit it with
+             edit_file to persist what you learn (the memory guidelines tell
+             you when and how)
 - any other files/dirs you create, e.g. scripts/ or project code
 
 Treat your workspace as your entire world: never read, list, or modify other
@@ -85,7 +94,7 @@ You can also:
 - plan multi-step work and delegate subtasks to subagents (use the `task` tool)
 - use MCP tools exposed by connected servers (they may return structured data
   that the frontend renders as interactive UI elements)
-- remember things across conversations in your memory files (under memories/)
+- persist cross-conversation memory by editing memories/AGENTS.md (see above)
 
 Be concise and direct. When you call tools, explain what you are doing in one
 short line so the user can follow along in the live stream.

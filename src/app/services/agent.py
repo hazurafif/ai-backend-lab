@@ -46,7 +46,7 @@ from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
 from ..core.config import settings
-from ..core.constants import GLOBAL_SKILLS_NS, SKILLS_SOURCE
+from ..core.constants import GLOBAL_SKILLS_NS, MEMORY_SOURCE, SKILLS_SOURCE
 from ..services import settings as runtime_settings
 from ..services.connections import llm_model_kwargs, llm_model_name
 from ..services.kb.tool import build_kb_search_tool
@@ -267,6 +267,7 @@ def build_agent(
     system_prompt: str | None = None,
     interrupt_on: dict[str, Any] | None = None,
     skills: list[str] | None = None,
+    memory: list[str] | None = None,
 ) -> CompiledStateGraph:
     """Build the core Deep Agent.
 
@@ -285,6 +286,10 @@ def build_agent(
         skills: SkillsMiddleware source paths (e.g. the per-agent
             "/skills/<owner>/<name>/" route). None = the global "/skills/"
             source; [] = no skills middleware.
+        memory: MemoryMiddleware sources — AGENTS.md files auto-loaded into
+            the system prompt before every run. None = the default
+            "/memories/AGENTS.md" (per-user via the backend); [] = no
+            memory middleware.
     """
     backend = backend or build_backend(store=store)
 
@@ -312,6 +317,7 @@ def build_agent(
         backend=backend,
         middleware=middleware or (),
         skills=skills if skills is not None else [SKILLS_SOURCE],
+        memory=memory if memory is not None else [MEMORY_SOURCE],
         interrupt_on=interrupt_on or None,
     )
     logger.info(
