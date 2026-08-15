@@ -174,20 +174,28 @@ async def test_skill_crud(persistence):
 
 
 async def test_skill_file_visible_to_backend(persistence, tmp_path, monkeypatch):
-    """Skills written via the API land in the agent's workspace (sync-down)."""
+    """The user's own skills land in their workspace; the global pool does not."""
+    from app.core.constants import user_skills_ns
     from app.schema.agent_schema import SkillIn
     from app.services.resources import create_skill
     from app.services.workspace import materialize_skills
 
     monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
+    # A global (admin) skill must NOT leak into the user's workspace...
     await create_skill(
-        persistence.store, SkillIn(name="api-skill", description="d", content="body")
+        persistence.store, SkillIn(name="global-skill", description="d", content="g")
+    )
+    # ...while the user's own skill does.
+    await create_skill(
+        persistence.store,
+        SkillIn(name="api-skill", description="d", content="body"),
+        user_skills_ns("tester"),
     )
     await materialize_skills(persistence.store, "tester")
-    skill_file = tmp_path / "workspaces" / "tester" / "skills" / "api-skill" / "SKILL.md"
-    assert skill_file.exists()
-    text = skill_file.read_text()
-    assert "name: api-skill" in text and "body" in text
+    skill_dir = tmp_path / "workspaces" / "tester" / "skills"
+    assert (skill_dir / "api-skill" / "SKILL.md").exists()
+    assert "body" in (skill_dir / "api-skill" / "SKILL.md").read_text()
+    assert not (skill_dir / "global-skill").exists(), "global skills must be isolated"
 
     # the agent builds and runs fine with the workspace backend + skills source
     agent = build_agent(
@@ -430,7 +438,8 @@ async def test_skill_bundled_files_crud(persistence):
 
 
 async def test_skill_files_visible_to_backend(persistence, tmp_path, monkeypatch):
-    """Bundled files land in the workspace the agent reads (sync-down)."""
+    """Bundled files land in the workspace the agent reads (materialized)."""
+    from app.core.constants import user_skills_ns
     from app.schema.agent_schema import SkillFileIn, SkillIn
     from app.services.resources import create_skill
     from app.services.workspace import materialize_skills
@@ -444,6 +453,7 @@ async def test_skill_files_visible_to_backend(persistence, tmp_path, monkeypatch
             content="body",
             files=[SkillFileIn(path="scripts/run.py", content="print('hi')")],
         ),
+        user_skills_ns("tester"),
     )
     await materialize_skills(persistence.store, "tester")
     # SKILL.md + bundled file are both real files in the workspace.

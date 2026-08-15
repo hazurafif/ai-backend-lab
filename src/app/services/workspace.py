@@ -5,8 +5,9 @@ Layout under ``WORKSPACE_ROOT/<user_id>/``:
 
 - ``memories/`` — durable memory the agent reads/writes across threads
 - ``uploads/`` — chat uploads (written by the API, see services/uploads.py)
-- ``skills/`` — materialized from the store before each run (admin-owned
-  skills CRUD stays in Postgres); agent edits are overwritten next run
+- ``skills/`` — the **user's own skills** ("my skills", /skills API),
+  materialized before each run; the admin global pool is never served to
+  default agents (full isolation). Agent edits are overwritten next run
 
 The workspace root is **its own git repository**: every run end auto-commits
 (all changes, best-effort). Whether to **push** is the agent's decision — the
@@ -159,7 +160,14 @@ def _value_to_bytes(value: dict) -> bytes:
     return str(content).encode("utf-8")
 
 
-def _write_skill_files(files: list[tuple[Path, bytes]]) -> None:
+def _replace_skill_files(dest: Path, files: list[tuple[Path, bytes]]) -> None:
+    """Clear the skills dir and write the fresh materialization."""
+    if dest.exists():
+        for child in dest.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
     for target, data in files:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
@@ -168,16 +176,20 @@ def _write_skill_files(files: list[tuple[Path, bytes]]) -> None:
 async def materialize_skills(
     store: BaseStore, username: str, spec: AgentSpec | None = None
 ) -> None:
-    """Copy the agent's skills from the store into the workspace.
+    """Copy the agent's skills into the workspace.
 
-    Called before each run. `spec` selects the source: the global skills for
-    the builtin default agent, the agent's snapshot namespace for named
-    agents with a skill selection ([] = none). Always overwrites (skills are
-    admin-owned; agent edits are discarded next run).
+    Called before each run. The builtin default agent gets the **user's own
+    skills only** (full isolation — the admin global pool is never served to
+    everyone); named agents get their snapshot namespace ([] = none). The
+    target skills dir is cleared first so stale copies (e.g. from before a
+    config change) can't linger. Skills are always overwritten — they are
+    user/admin-owned; agent edits are discarded next run.
     """
     user = workspace_dir(username)
     if spec is None or spec.skills is None or spec.builtin:
-        ns = ("agent", "skills")
+        from ..core.constants import user_skills_ns
+
+        ns = user_skills_ns(username)
         dest = user / "skills"
     elif spec.skills_source:
         from ..core.constants import agent_skills_ns
@@ -193,4 +205,4 @@ async def materialize_skills(
         (dest / (item.key or "").lstrip("/"), _value_to_bytes(item.value))
         for item in await store.asearch(ns)
     ]
-    await asyncio.to_thread(_write_skill_files, files)
+    await asyncio.to_thread(_replace_skill_files, dest, files)
