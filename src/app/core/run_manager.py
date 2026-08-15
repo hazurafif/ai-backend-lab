@@ -4,7 +4,8 @@ Each run is an `ActiveRun`: an asyncio task that streams the agent and
 publishes events to per-subscriber queues (one per connected SSE client).
 Subscribers may come and go — the run keeps executing regardless, so a client
 disconnect ("new chat") never aborts the run; only `POST /threads/{id}/cancel`
-does (via the stop events in `core/run_registry.py`).
+does, by setting the run's stop event (the pump loop watches it and ends the
+run cleanly).
 
 Terminal events (`done`, `interrupt`) are delivered even to slow consumers by
 evicting the oldest queued delta; plain deltas are dropped when a consumer's
@@ -18,7 +19,6 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 
 from .exceptions import Conflict
-from .run_registry import runs
 
 
 @dataclass
@@ -29,6 +29,7 @@ class ActiveRun:
     username: str
     agent_name: str
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    stop: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
     subscribers: set[asyncio.Queue] = field(default_factory=set)
 
@@ -43,7 +44,7 @@ class RunManager:
 
     def start(self, thread_id: str, username: str, agent_name: str) -> ActiveRun:
         """Register a new run; Conflict when the thread already has an active one."""
-        if thread_id in self._runs or runs.is_running(thread_id):
+        if thread_id in self._runs:
             raise Conflict(detail=f"Thread '{thread_id}' already has an active run")
         active = ActiveRun(thread_id=thread_id, username=username, agent_name=agent_name)
         self._runs[thread_id] = active
@@ -52,6 +53,22 @@ class RunManager:
     def get(self, thread_id: str) -> ActiveRun | None:
         """The active run of a thread (None when none or already finished)."""
         return self._runs.get(thread_id)
+
+    def cancel(self, thread_id: str) -> bool:
+        """Signal a running thread to stop; False when nothing is running.
+
+        Idempotent guard: a second cancel on the same run returns False, so
+        callers surface 409 "no active run" instead of cancelling twice.
+        """
+        active = self._runs.get(thread_id)
+        if active is None or active.stop.is_set():
+            return False
+        active.stop.set()
+        return True
+
+    def is_running(self, thread_id: str) -> bool:
+        """True while a run is registered on the thread (started, not finished)."""
+        return thread_id in self._runs
 
     def subscribe(self, active: ActiveRun) -> asyncio.Queue:
         """Create a subscriber queue for one SSE client of `active`."""

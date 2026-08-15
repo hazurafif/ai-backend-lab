@@ -26,7 +26,7 @@ from pydantic import Field
 
 from app.core import config, database
 from app.core.constants import thread_metadata_ns
-from app.core.run_registry import runs
+from app.core.run_manager import run_manager
 from app.core.security import create_access_token
 from app.main import create_app
 from app.schema.agent_config_schema import AgentConfigIn
@@ -279,7 +279,7 @@ async def test_thread_usage_active_run(persistence):
     async with app.router.lifespan_context(app), await client_for(app, "alice") as client:
         await seed_thread("alice", "t1", [ai_message("a1", input_tokens=10, output_tokens=5)])
         try:
-            runs.register("t1")
+            run_manager.start("t1", "alice", "default")
             assert (await client.get("/threads/t1/usage")).json()["active_run"] is True
         finally:
-            runs.unregister("t1")
+            run_manager.finish("t1")

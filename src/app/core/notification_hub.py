@@ -7,7 +7,7 @@ owning user's channel. Each user has a small ring buffer of recent events
 and await-free: single-threaded asyncio gives publish/subscribe atomicity.
 
 Note: in-process only — events do not cross worker processes (same limitation
-as `run_registry` / `run_manager`).
+as `run_manager`).
 """
 
 from __future__ import annotations

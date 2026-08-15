@@ -33,7 +33,6 @@ from app.core.constants import thread_metadata_ns
 from app.core.database import persistence
 from app.core.notification_hub import hub
 from app.core.run_manager import run_manager
-from app.core.run_registry import runs
 from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent
@@ -108,7 +107,7 @@ async def test_run_continues_after_stream_close(memory_persistence):
             break
 
         # The run keeps processing in the background and completes.
-        await wait_until(lambda: not runs.is_running("bg-1"))
+        await wait_until(lambda: not run_manager.is_running("bg-1"))
         item = await persistence.store.aget(thread_metadata_ns("tester"), "bg-1")
         assert item is not None and item.value.get("status") == "completed", item
 
@@ -152,7 +151,7 @@ async def test_cancel_aborts_but_saves_partial_history(memory_persistence):
 
         done = [d for e, d in collected if e == "done"]
         assert done and done[-1].get("cancelled") is True, done
-        assert not runs.is_running("bg-cancel")
+        assert not run_manager.is_running("bg-cancel")
 
         # Partial history survives the abort (the tool-call message).
         history = await persistence.chat_history.list_messages("bg-cancel")
