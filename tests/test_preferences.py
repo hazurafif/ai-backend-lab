@@ -1,10 +1,13 @@
 """Offline tests for per-user preferences: store, endpoints, chat fallback.
 
-The web search toggle is persisted per user (`user_preferences` table /
-in-memory fallback) so the frontend can drop localStorage: PATCH
-/users/me/preferences stores it, chat requests that omit `enable_search`
+The web search toggle and the chat display toggles (hide thinking / hide
+tool calls) are persisted per user (`user_preferences` table / in-memory
+fallback) so the frontend can drop localStorage: PATCH
+/users/me/preferences stores them, chat requests that omit `enable_search`
 fall back to the stored value. Precedence: request field > stored
-preference > SEARXNG_ENABLED config.
+preference > SEARXNG_ENABLED config. The display toggles (`hide_reasoning`,
+`hide_tool_calls`) default to False (show) and are applied when each chat
+stream is drained (see `services/chat._hidden_events`).
 
 Covers:
   - store: get/set/clear semantics (memory mode)
@@ -157,7 +160,11 @@ async def test_get_preferences_returns_server_default_when_unset(monkeypatch):
 
             r = await http.get("/users/me/preferences", headers=headers)
             assert r.status_code == 200, r.text
-            assert r.json() == {"enable_search": config.settings.searxng_enabled}
+            assert r.json() == {
+                "enable_search": config.settings.searxng_enabled,
+                "hide_reasoning": False,
+                "hide_tool_calls": False,
+            }
 
             # explicit request-level defaults are not part of preferences
             r = await http.get("/users/me/preferences", headers={"Authorization": "Bearer bad"})
@@ -185,25 +192,64 @@ async def test_patch_preferences_sets_and_clears(monkeypatch):
                 "/users/me/preferences", json={"enable_search": False}, headers=headers
             )
             assert r.status_code == 200, r.text
-            assert r.json() == {"enable_search": False}
+            assert r.json() == {
+                "enable_search": False,
+                "hide_reasoning": False,
+                "hide_tool_calls": False,
+            }
             assert await persistence.preferences.get("alice", "enable_search") is False
 
-            # GET reflects the stored value
-            r = await http.get("/users/me/preferences", headers=headers)
-            assert r.json() == {"enable_search": False}
-
-            # explicit null clears back to the server default
+            # display toggles: hide reasoning and/or tool calls
             r = await http.patch(
-                "/users/me/preferences", json={"enable_search": None}, headers=headers
+                "/users/me/preferences",
+                json={"hide_reasoning": True, "hide_tool_calls": True},
+                headers=headers,
             )
             assert r.status_code == 200, r.text
-            assert r.json() == {"enable_search": True}
+            assert r.json() == {
+                "enable_search": False,
+                "hide_reasoning": True,
+                "hide_tool_calls": True,
+            }
+            assert await persistence.preferences.get("alice", "hide_reasoning") is True
+            assert await persistence.preferences.get("alice", "hide_tool_calls") is True
+
+            # GET reflects the stored values
+            r = await http.get("/users/me/preferences", headers=headers)
+            assert r.json() == {
+                "enable_search": False,
+                "hide_reasoning": True,
+                "hide_tool_calls": True,
+            }
+
+            # explicit null clears back to the defaults (search: server
+            # default, display toggles: show again)
+            r = await http.patch(
+                "/users/me/preferences",
+                json={
+                    "enable_search": None,
+                    "hide_reasoning": None,
+                    "hide_tool_calls": None,
+                },
+                headers=headers,
+            )
+            assert r.status_code == 200, r.text
+            assert r.json() == {
+                "enable_search": True,
+                "hide_reasoning": False,
+                "hide_tool_calls": False,
+            }
             assert await persistence.preferences.get("alice", "enable_search") is None
+            assert await persistence.preferences.get("alice", "hide_reasoning") is None
 
             # empty body is a no-op (omitted key untouched)
             r = await http.patch("/users/me/preferences", json={}, headers=headers)
             assert r.status_code == 200, r.text
-            assert r.json() == {"enable_search": True}
+            assert r.json() == {
+                "enable_search": True,
+                "hide_reasoning": False,
+                "hide_tool_calls": False,
+            }
     finally:
         await persistence.stop()
 

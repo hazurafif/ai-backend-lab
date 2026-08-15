@@ -316,7 +316,7 @@ async def thread_stream(
     while the run streams).
     """
     await _assert_thread_owner(thread_id, current_user["username"])
-    return sse_response(attach_stream(thread_id))
+    return sse_response(attach_stream(thread_id, current_user["username"]))
 
 
 @router.get("/notifications/stream")

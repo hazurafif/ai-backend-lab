@@ -224,7 +224,7 @@ async def test_attach_stream_and_same_thread_conflict(memory_persistence):
 
         # Attach to the active run and watch the answer stream live.
         deltas: list[str] = []
-        async for chunk in attach_stream("bg-attach"):
+        async for chunk in attach_stream("bg-attach", "tester"):
             ev, data = parse_sse_chunk(chunk)
             if ev == "message_delta":
                 deltas.append(data["delta"])

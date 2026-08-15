@@ -20,6 +20,22 @@ class PreferencesIn(BaseModel):
             "preference (server default applies again)."
         ),
     )
+    hide_reasoning: bool | None = Field(
+        default=None,
+        description=(
+            "Persisted display toggle: hide the model's thinking (reasoning) "
+            "from the chat stream. Set true/false to override the default "
+            "(show); null clears the preference (show again)."
+        ),
+    )
+    hide_tool_calls: bool | None = Field(
+        default=None,
+        description=(
+            "Persisted display toggle: hide tool-call activity from the chat "
+            "stream. Set true/false to override the default (show); null "
+            "clears the preference (show again)."
+        ),
+    )
 
 
 class PreferencesOut(BaseModel):
@@ -35,5 +51,21 @@ class PreferencesOut(BaseModel):
         description=(
             "Effective web search toggle: the stored per-user preference, "
             "else the SEARXNG_ENABLED server default"
+        ),
+    )
+    hide_reasoning: bool = Field(
+        default=False,
+        description=(
+            "Effective display preference: True hides the model's thinking "
+            "(reasoning_start/delta/end events + reasoning blocks) from the "
+            "chat stream; False (default) shows it."
+        ),
+    )
+    hide_tool_calls: bool = Field(
+        default=False,
+        description=(
+            "Effective display preference: True hides tool-call activity "
+            "(tool_start/delta/end events + tool messages) from the chat "
+            "stream; False (default) shows it."
         ),
     )

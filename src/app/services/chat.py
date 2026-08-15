@@ -4,6 +4,13 @@
 returns a live SSE subscription to it; it is the single entry point used by
 the `/chat` and `/api/chat` routers (and the AI SDK bridge). The SSE event
 contract below is normative — keep it in sync with the frontend consumers.
+
+Per-user display preferences (`hide_reasoning`, `hide_tool_calls`, stored via
+`GET/PATCH /users/me/preferences`) are applied per subscriber when the stream
+is drained: hidden event families (thinking deltas, tool-call lifecycle) are
+dropped and finalized `message` / `done.messages` payloads are scrubbed of
+reasoning blocks and tool-call fields. The persisted chat history always
+stays complete — the preferences only affect what streams to the client.
 """
 
 from __future__ import annotations
@@ -32,6 +39,11 @@ from ..services.workspace import git_commit, materialize_skills
 from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
+
+# SSE event families hidden by the per-user display preferences: thinking
+# (reasoning is a bracketed lifecycle: start -> delta* -> end) and tool calls.
+_REASONING_EVENTS = frozenset({"reasoning_start", "reasoning_delta", "reasoning_end"})
+_TOOL_EVENTS = frozenset({"tool_start", "tool_delta", "tool_end"})
 
 
 def _field(obj: Any, *names: str, default: Any = None) -> Any:
@@ -96,6 +108,65 @@ def _sse(event: str, data: dict) -> str:
     return (
         f"event: {event}\ndata: {json.dumps(_jsonable(data), ensure_ascii=False, default=str)}\n\n"
     )
+
+
+async def _hidden_events(username: str) -> frozenset[str]:
+    """SSE event names the user's display preferences hide from the stream.
+
+    `hide_reasoning` drops the thinking bracket (reasoning_start/delta/end),
+    `hide_tool_calls` drops the tool-call lifecycle (tool_start/delta/end).
+    Unknown users (guests, deleted accounts) have no stored preferences, so
+    nothing is hidden.
+    """
+    prefs = await persistence.preferences.get_all(username)
+    hidden: set[str] = set()
+    if prefs.get("hide_reasoning"):
+        hidden |= _REASONING_EVENTS
+    if prefs.get("hide_tool_calls"):
+        hidden |= _TOOL_EVENTS
+    return frozenset(hidden)
+
+
+def _scrub_message(message: dict, hidden: frozenset[str]) -> dict:
+    """Drop reasoning blocks / tool-call fields from a serialized message.
+
+    Applied to the finalized `message` events and the `done` payload's
+    `messages`; the message dicts keep their shape (langchain serialization)
+    so consumers can still render them, just without the hidden parts.
+    """
+    if not hidden:
+        return message
+    out = dict(message)
+    if hidden & _REASONING_EVENTS:
+        content = out.get("content")
+        if isinstance(content, list):
+            out["content"] = [
+                block
+                for block in content
+                if not (isinstance(block, dict) and block.get("type") == "reasoning")
+            ]
+        extra = out.get("additional_kwargs")
+        if isinstance(extra, dict) and "reasoning_content" in extra:
+            out["additional_kwargs"] = {k: v for k, v in extra.items() if k != "reasoning_content"}
+    if hidden & _TOOL_EVENTS:
+        out.pop("tool_calls", None)
+        out.pop("tool_call_chunks", None)
+        extra = out.get("additional_kwargs")
+        if isinstance(extra, dict) and "tool_calls" in extra:
+            out["additional_kwargs"] = {k: v for k, v in extra.items() if k != "tool_calls"}
+    return out
+
+
+def _scrub_messages(messages: list[dict], hidden: frozenset[str]) -> list[dict]:
+    """Scrub the `done` payload's message list: drop tool-result rows and clean the rest."""
+    if not hidden:
+        return messages
+    out: list[dict] = []
+    for message in messages:
+        if hidden & _TOOL_EVENTS and message.get("type") == "tool":
+            continue
+        out.append(_scrub_message(message, hidden))
+    return out
 
 
 async def _record_thread_metadata(
@@ -216,28 +287,50 @@ def agent_stream(
             agent_name=agent_name,
         )
     )
-    return _stream_subscription(active, queue)
+    return _stream_subscription(active, queue, username)
 
 
-def attach_stream(thread_id: str) -> AsyncIterator[str]:
+def attach_stream(thread_id: str, username: str) -> AsyncIterator[str]:
     """Attach a live SSE stream to an already-running thread.
 
     Raises Conflict when the thread has no active run (or it just finished) —
     the frontend falls back to GET /threads/{id}/messages in that case.
+    `username` is used to apply the user's display preferences
+    (`hide_reasoning` / `hide_tool_calls`) to the events.
     """
     active = run_manager.get(thread_id)
     if active is None or active.done.is_set():
         raise Conflict(detail=f"Thread '{thread_id}' has no active run")
     queue = run_manager.subscribe(active)
-    return _stream_subscription(active, queue)
+    return _stream_subscription(active, queue, username)
 
 
-async def _stream_subscription(active: ActiveRun, queue: asyncio.Queue) -> AsyncIterator[str]:
+async def _stream_subscription(
+    active: ActiveRun, queue: asyncio.Queue, username: str
+) -> AsyncIterator[str]:
     """Drain one subscriber queue into SSE chunks until the run finishes.
 
     Detaching (generator close, client disconnect) only unsubscribes — the
     run keeps going in the background.
+
+    The user's display preferences are resolved per subscriber: hidden event
+    families are dropped and finalized `message` / `done.messages` payloads
+    are scrubbed (see `_hidden_events` / `_scrub_message`).
     """
+    hidden = await _hidden_events(username)
+
+    def emit(item: dict) -> str | None:
+        """Serialize one queue item, filtered by the user's display preferences."""
+        event = item["event"]
+        if event in hidden:
+            return None
+        data = item["data"]
+        if event == "message" and isinstance(data.get("message"), dict):
+            data = {**data, "message": _scrub_message(data["message"], hidden)}
+        elif event == "done" and isinstance(data.get("messages"), list):
+            data = {**data, "messages": _scrub_messages(data["messages"], hidden)}
+        return _sse(event, data)
+
     try:
         while True:
             get_task = asyncio.create_task(queue.get())
@@ -249,18 +342,24 @@ async def _stream_subscription(active: ActiveRun, queue: asyncio.Queue) -> Async
                 task.cancel()
             if done_task not in done_tasks:
                 item = get_task.result()
-                yield _sse(item["event"], item["data"])
+                chunk = emit(item)
+                if chunk is not None:
+                    yield chunk
                 continue
             # Run finished: drain the terminal events queued before `done` set.
             if get_task in done_tasks:
                 item = get_task.result()
-                yield _sse(item["event"], item["data"])
+                chunk = emit(item)
+                if chunk is not None:
+                    yield chunk
             while True:
                 try:
                     item = queue.get_nowait()
                 except asyncio.QueueEmpty:
                     return
-                yield _sse(item["event"], item["data"])
+                chunk = emit(item)
+                if chunk is not None:
+                    yield chunk
     finally:
         run_manager.unsubscribe(active, queue)
 

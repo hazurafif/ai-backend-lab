@@ -2,9 +2,12 @@
 
 Preferences live in the durable `user_preferences` store (Postgres JSONB,
 in-memory fallback) and persist across sessions, so the frontend keeps the
-web search toggle server-side instead of localStorage. Chat requests simply
-omit `enable_search` to fall back to the stored value (explicit request
-fields still win, see `services/searxng.apply_search_preference`).
+web search toggle and the chat display toggles (hide thinking / hide tool
+calls) server-side instead of localStorage. Chat requests simply omit
+`enable_search` to fall back to the stored value (explicit request fields
+still win, see `services/searxng.apply_search_preference`); the display
+toggles are read from the store when each chat stream starts (see
+`services/chat._hidden_events`).
 """
 
 from __future__ import annotations
@@ -18,9 +21,13 @@ from ....schema.preferences_schema import PreferencesIn, PreferencesOut
 
 router = APIRouter(tags=["preferences"])
 
-# Preference keys whose default comes from the server config (stored wins).
+# Preference keys with their defaults: `_CONFIG_DEFAULTS` values come from
+# the server config (stored wins); plain display preferences default to False
+# (nothing hidden) unless the user stored a True.
 _CONFIG_DEFAULTS = {
     "enable_search": lambda: settings.searxng_enabled,
+    "hide_reasoning": lambda: False,
+    "hide_tool_calls": lambda: False,
 }
 
 

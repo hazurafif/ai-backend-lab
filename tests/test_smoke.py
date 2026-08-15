@@ -228,6 +228,81 @@ async def test_reasoning_streaming_pipeline(memory_persistence):
     assert stored and stored[-1]["content"][0]["type"] == "reasoning"
 
 
+async def test_hide_tool_calls_preference(memory_persistence):
+    """`hide_tool_calls` drops the tool event family and scrubs message payloads.
+
+    The per-user display preference (PATCH /users/me/preferences) filters the
+    SSE stream per subscriber: no tool_start/delta/end events, the finalized
+    `message` events carry no tool-call fields, and the `done` payload's
+    messages drop tool-result rows. The persisted chat history stays complete
+    — the durable record is never scrubbed.
+    """
+    await memory_persistence.preferences.set("tester", "hide_tool_calls", True)
+    agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
+    events = await collect_stream(agent, "tester", message="hi there")
+
+    names = [e for e, _ in events]
+    for hidden in ("tool_start", "tool_delta", "tool_end"):
+        assert hidden not in names, f"{hidden} must be hidden"
+    assert "message_delta" in names, "answer text still streams"
+
+    # Finalized message events are scrubbed of tool-call fields.
+    messages = [d["message"] for e, d in events if e == "message"]
+    assert messages, "missing message events"
+    assert all("tool_calls" not in m and "tool_call_chunks" not in m for m in messages)
+
+    # done.messages: tool-result rows dropped, tool-call AI row cleaned.
+    done = [d for e, d in events if e == "done"][-1]
+    assert not [m for m in done["messages"] if m.get("type") == "tool"], done["messages"]
+    ai_rows = [m for m in done["messages"] if m.get("type") == "ai"]
+    assert ai_rows and all("tool_calls" not in m for m in ai_rows), ai_rows
+
+    # The durable record keeps the full conversation (tool rows included).
+    rows = await memory_persistence.chat_history.list_messages(done["thread_id"])
+    assert any(m.get("type") == "tool" for m in rows), "history must keep tool rows"
+
+
+async def test_hide_reasoning_preference(memory_persistence):
+    """`hide_reasoning` drops the thinking bracket and scrubs reasoning blocks."""
+    await memory_persistence.preferences.set("tester", "hide_reasoning", True)
+    agent = build_reasoning_agent(
+        memory_persistence.checkpointer,
+        memory_persistence.store,
+        reasoning="Let me reason step by step: the answer is 42.",
+        answer="The answer is 42.",
+    )
+    events = await collect_stream(agent, "tester", message="think hard")
+
+    names = [e for e, _ in events]
+    assert not any(n.startswith("reasoning_") for n in names), names
+    text = "".join(d["delta"] for e, d in events if e == "message_delta")
+    assert text == "The answer is 42.", text
+
+    # Finalized message content keeps only the text block.
+    msg = next(d for e, d in events if e == "message")
+    content = msg["message"]["content"]
+    assert content and not [b for b in content if b.get("type") == "reasoning"], content
+
+    done = [d for e, d in events if e == "done"][-1]
+    ai = next(m for m in done["messages"] if m.get("type") == "ai")
+    assert not [b for b in ai["content"] if b.get("type") == "reasoning"], ai["content"]
+
+
+async def test_hide_preferences_are_per_user(memory_persistence):
+    """Another user without the preferences still sees the full stream."""
+    await memory_persistence.preferences.set("tester", "hide_tool_calls", True)
+    agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
+
+    hidden = await collect_stream(agent, "tester", message="hi there")
+    assert "tool_start" not in [e for e, _ in hidden]
+
+    # Fresh agent: the scripted model is a one-shot sequence per instance.
+    fresh = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
+    visible = await collect_stream(fresh, "someone-else", message="hi there")
+    names = [e for e, _ in visible]
+    assert "tool_start" in names and "tool_end" in names, names
+
+
 async def test_interrupt_and_resume(memory_persistence):
     agent = build_scripted_agent(
         memory_persistence.checkpointer,
