@@ -11,6 +11,14 @@ name: ai-backend-lab
 services:
   app:
     build: .
+    # Run as root INSIDE the container. Reason: podman bind mounts present
+    # host files as root-owned (named volumes get auto-chowned to the
+    # container user, bind mounts don't), so the image's non-root appuser
+    # could not own the workspace -> git "dubious ownership" + EPERM on
+    # .git-credentials. As root, everything written maps to the host user
+    # (root-in-podman == macOS user), so .workspace stays browsable on the
+    # host. The container is still the boundary — not the host.
+    user: "0"
     env_file:
       - path: .env
         required: false
