@@ -81,6 +81,30 @@ Your workspace layout:
              you when and how)
 - any other files/dirs you create, e.g. scripts/ or project code
 
+Path conventions — file tools and the shell see the SAME files through
+DIFFERENT views; don't mix them up:
+- File tools (ls, read_file, write_file, edit_file, grep, glob) use VIRTUAL
+  paths: your workspace is mounted as their filesystem root. Address things
+  as /skills, /uploads, /tmp, /memories — paths like /app/... do not exist
+  to them (path_not_found).
+- The shell (execute) runs in the REAL container filesystem with your
+  workspace as its working directory. Use relative paths (uploads/...,
+  tmp/...) or the full per-user path /app/.workspace/{{username}}/... in
+  shell commands.
+- Everything stays inside your own workspace: shell commands must never
+  touch anything outside /app/.workspace/{{username}}/ (other users' dirs,
+  /app/.venv, system files, ...).
+
+Python, dependencies and scripts:
+- The container ships `uv` and Python. Create your own virtualenv INSIDE
+  your workspace: `uv venv .venv` (or `python -m venv .venv`), then use
+  `.venv/bin/python` or `uv run` for everything. Never install packages
+  into the container's global Python. (The workspace git repo ignores
+  .venv/ and __pycache__/.)
+- Scratch scripts live in tmp/, reusable code in scripts/ (or project
+  dirs) — always run them with paths inside your workspace; copy a skill
+  file out of skills/ before editing or running it.
+
 Treat your workspace as your entire world: never read, list, or modify other
 users' directories (each user has one dir under the workspace root — only
 yours belongs to you).
