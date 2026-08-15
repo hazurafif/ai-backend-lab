@@ -177,13 +177,13 @@ async def test_skill_file_visible_to_backend(persistence, tmp_path, monkeypatch)
     """Skills written via the API land in the agent's workspace (sync-down)."""
     from app.schema.agent_schema import SkillIn
     from app.services.resources import create_skill
-    from app.services.workspace import sync_down
+    from app.services.workspace import materialize_skills
 
     monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
     await create_skill(
         persistence.store, SkillIn(name="api-skill", description="d", content="body")
     )
-    await sync_down(persistence.store, "tester")
+    await materialize_skills(persistence.store, "tester")
     skill_file = tmp_path / "workspaces" / "tester" / "skills" / "api-skill" / "SKILL.md"
     assert skill_file.exists()
     text = skill_file.read_text()
@@ -320,16 +320,25 @@ async def test_workspace_isolates_users_and_is_shell_visible(persistence, tmp_pa
     # execute ran with cwd = her dir and saw the file via the shell.
     tool_outputs = [d for e, d in events if e == "tool_end"]
     assert any("FOUND_IT" in str(d.get("output", {})) for d in tool_outputs)
-    # sync-up ran after the run: the file is in the store, durable. The
-    # stream may close before the background sync finishes — poll briefly.
-    item = None
+    # The run auto-committed the workspace to its git repo (best-effort,
+    # may finish after the stream closes — poll briefly).
+    import subprocess
+
+    def _git_log() -> str:
+        return subprocess.run(
+            ["git", "-C", str(tmp_path / "workspaces"), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    git_log = None
     for _ in range(100):
-        item = await persistence.store.aget(("alice",), "/script.py")
-        if item is not None:
+        git_log = await asyncio.to_thread(_git_log)
+        if git_log.strip():
             break
-        await asyncio.sleep(0.02)
-    assert item is not None
-    assert item.value["content"] == "print('hello from workspace')"
+        await asyncio.sleep(0.05)
+    assert git_log is not None and git_log.strip(), git_log
+    assert "run " in git_log
 
 
 async def test_skill_bundled_files_crud(persistence):
@@ -424,7 +433,7 @@ async def test_skill_files_visible_to_backend(persistence, tmp_path, monkeypatch
     """Bundled files land in the workspace the agent reads (sync-down)."""
     from app.schema.agent_schema import SkillFileIn, SkillIn
     from app.services.resources import create_skill
-    from app.services.workspace import sync_down
+    from app.services.workspace import materialize_skills
 
     monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspaces"))
     await create_skill(
@@ -436,7 +445,7 @@ async def test_skill_files_visible_to_backend(persistence, tmp_path, monkeypatch
             files=[SkillFileIn(path="scripts/run.py", content="print('hi')")],
         ),
     )
-    await sync_down(persistence.store, "tester")
+    await materialize_skills(persistence.store, "tester")
     # SKILL.md + bundled file are both real files in the workspace.
     skill_dir = tmp_path / "workspaces" / "tester" / "skills" / "multi-file"
     assert (skill_dir / "SKILL.md").exists()

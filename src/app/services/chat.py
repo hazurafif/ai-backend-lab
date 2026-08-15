@@ -29,7 +29,7 @@ from ..core.notification_hub import hub
 from ..core.run_manager import ActiveRun, run_manager
 from ..core.run_registry import runs
 from ..services import agent_configs
-from ..services.workspace import sync_down, sync_up
+from ..services.workspace import git_commit, materialize_skills
 from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
@@ -438,15 +438,15 @@ async def _run_agent(
 
     interrupted = {"flag": False}
     stop_event = runs.register(thread_id)
-    # Materialize the user's store files (memories, uploads, skills) into
-    # their real workspace dir; the agent works on real files only.
+    # Materialize the agent's skills into the workspace dir (the only
+    # store -> disk sync; memories/uploads are plain files on the volume).
     try:
         spec = await agent_configs.load_spec(persistence.store, agent_name, username)
-        await sync_down(persistence.store, username, spec)
+        await materialize_skills(persistence.store, username, spec)
     except Exception:
-        logger.exception("workspace sync-down failed for %s; running without it", username)
+        logger.exception("skills materialization failed for %s; running without it", username)
     try:
-        # Run with the user's identity in the runtime context: the store-backed
+        # Run with the user's identity in the runtime context: the workspace
         # filesystem backend and the knowledge base search tool scope per user.
         context = {"user_id": username}
         try:
@@ -566,12 +566,11 @@ async def _run_agent(
             run_manager.publish(active, "done", {"thread_id": thread_id, "messages": finalized})
     finally:
         # End the run lifecycle first (stream close, resume allowed), then
-        # persist the agent's workspace changes back to the store on every
-        # exit path (success, error, cancel, disconnect). Skills are never
-        # synced back; deletions are not propagated.
+        # version the workspace: every agent change is committed to the
+        # workspace's own git repo (best-effort; never fails the run).
         runs.unregister(thread_id)
         run_manager.finish(thread_id)
         try:
-            await sync_up(persistence.store, username)
+            await git_commit(f"run {thread_id} ({username})")
         except Exception:
-            logger.exception("workspace sync-up failed for %s", username)
+            logger.exception("workspace git commit failed for %s", username)

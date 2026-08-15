@@ -133,9 +133,21 @@ class Settings:
     # Root of the per-user workspace (the agent's only filesystem): real
     # files under <WORKSPACE_ROOT>/<user_id>/, mounted as a named volume in
     # compose (default ./ .workspace = container /app/.workspace). The repo
-    # stays clean; the store mirrors it via the workspace sync.
+    # stays clean; the volume is the source of truth.
     workspace_root: str = field(
         default_factory=lambda: os.environ.get("WORKSPACE_ROOT", ".workspace")
+    )
+
+    # --- Workspace git (versioning only; the volume is the source of truth) ---
+    # The workspace root is its own git repo, auto-committed after each run.
+    # Whether to PUSH is the agent's call (via the execute tool) — these
+    # settings only configure identity + credentials so a push can succeed:
+    # GIT_TOKEN + GIT_REMOTE_URL make `git push` work out of the box.
+    git_username: str = field(default_factory=lambda: os.environ.get("GIT_USERNAME", "ai-backend"))
+    git_email: str = field(default_factory=lambda: os.environ.get("GIT_EMAIL", "ai-backend@local"))
+    git_token: str | None = field(default_factory=lambda: os.environ.get("GIT_TOKEN") or None)
+    git_remote_url: str | None = field(
+        default_factory=lambda: os.environ.get("GIT_REMOTE_URL") or None
     )
 
     # --- Knowledge base (RAG) ---

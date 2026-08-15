@@ -36,6 +36,7 @@ from ....schema.auth_schema import (
     UserCreate,
     UserUpdate,
 )
+from ....services.workspace import ensure_user_workspace, remove_user_workspace
 
 router = APIRouter(tags=["auth"])
 
@@ -56,6 +57,7 @@ async def register_user(payload: UserCreate):
     )
     if user is None:
         raise Conflict(detail=f"Username '{payload.username}' is already taken")
+    ensure_user_workspace(payload.username)
     return user
 
 
@@ -182,6 +184,7 @@ async def create_user_by_admin(
     )
     if user is None:
         raise Conflict(detail=f"Username '{payload.username}' is already taken")
+    ensure_user_workspace(payload.username)
     return user
 
 
@@ -190,9 +193,27 @@ async def delete_user_by_admin(
     username: str,
     current_user: dict = Depends(get_admin_user),
 ):
-    """Admin: delete a user (their threads/history rows stay, orphaned)."""
+    """Admin: delete a user — their workspace dir, store data and chat
+    history rows are purged; the deletion is committed to the workspace git."""
     if username == current_user["username"]:
         raise BadRequest(detail="You cannot delete your own account")
     if not await persistence.users.delete_user(username):
         raise NotFound(detail=f"User '{username}' not found")
+    # Chat history rows first (thread ids come from the thread metadata ns).
+    thread_ids = [it.key or "" for it in await persistence.store.asearch(("threads", username))]
+    for thread_id in thread_ids:
+        await persistence.chat_history.delete_thread(thread_id)
+    # Purge store namespaces: memories/uploads, thread metadata, user agent
+    # configs + their skill snapshots, user skills.
+    for ns in (
+        (username,),
+        ("threads", username),
+        ("agents", username),
+        ("user", "skills", username),
+    ):
+        for item in await persistence.store.asearch(ns):
+            await persistence.store.adelete(ns, item.key or "")
+    for item in await persistence.store.asearch(("agent", "agent_skills", username)):
+        await persistence.store.adelete(("agent", "agent_skills", username), item.key or "")
+    remove_user_workspace(username)
     return None

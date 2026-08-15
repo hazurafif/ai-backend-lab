@@ -26,8 +26,11 @@ COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
 # 3) Non-root runtime user; per-user workspaces live under /app/.workspace
-#    (mounted as a named volume in compose so they survive app recreates).
-RUN useradd --create-home --uid 10001 appuser \
+#    (mounted as a named volume in compose so they survive app recreates),
+#    versioned by their own git repo (workspace auto-commits each run).
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/.workspace \
     && chown -R appuser:appuser /app
 

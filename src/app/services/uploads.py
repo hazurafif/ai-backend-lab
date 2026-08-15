@@ -1,10 +1,10 @@
-"""User file uploads for chat: saved to the store, read from the workspace.
+"""User file uploads for chat: saved into the user's workspace, read by the agent.
 
-Files posted to /chat and /api/chat (multipart) are written to the LangGraph
-store (Postgres in production) at the key the workspace sync maps to disk:
-``uploads/<name>`` under the user's workspace dir on the next run. The agent
-is told the virtual path (``/uploads/<name>``), which its file tools resolve
-into the real workspace file — no host-disk copy, no repo pollution.
+Files posted to /chat and /api/chat (multipart) are written directly to the
+user's workspace dir (``WORKSPACE_ROOT/<user_id>/uploads/``) — real files,
+versioned by the workspace's git repo, no Postgres involvement. The agent is
+told the virtual path (``/uploads/<name>``), which its file tools resolve
+into the real workspace file.
 
 File names are sanitized (basename only), files are size-capped, and
 oversized uploads are skipped with a note instead of failing the whole chat.
@@ -16,11 +16,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from deepagents.backends.store import StoreBackend
 from fastapi import UploadFile
 
 from ..core.config import settings
-from ..core.database import persistence
+from ..services.workspace import workspace_dir
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._ -]")
 
@@ -31,23 +30,8 @@ def sanitize_filename(name: str | None) -> str:
     return clean[:120] or "upload"
 
 
-def _persist_to_store(username: str, name: str, data: bytes) -> None:
-    """Write the upload into the store at the workspace-mapped key.
-
-    The workspace sync copies keys ``/<username>/<name>`` in the
-    ``(username,)`` namespace to ``uploads/<name>`` in the user's workspace
-    dir at run start, so the agent reads ``/uploads/<name>``. No-op when the
-    store is unavailable (e.g. persistence not started).
-    """
-    store = persistence.store
-    if store is None:
-        return
-    backend = StoreBackend(store=store, namespace=lambda _rt, u=username: (u,))
-    backend.upload_files([(f"/{username}/{name}", data)])
-
-
 async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
-    """Buffer one upload (size-capped) and persist it to the store.
+    """Buffer one upload (size-capped) and write it into the user's workspace.
 
     Returns metadata (``name``, ``path``, ``size``, ``content_type``) or
     ``{"error": ...}`` when the file was skipped (oversized). Colliding names
@@ -55,20 +39,15 @@ async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
     """
     name = sanitize_filename(upload.filename)
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    # Colliding names get a numeric suffix so re-uploads never clobber
-    # earlier files (dedupe against the store's upload keys).
-    upload_prefix = f"/{username}/"
-    existing = {
-        (it.key or "")[len(upload_prefix) :]
-        for it in await persistence.store.asearch((username,))
-        if (it.key or "").startswith(upload_prefix)
-    }
-    if name in existing:
+    dest_dir = workspace_dir(username) / "uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    if dest.exists():
         stem, suffix = name.rsplit(".", 1) if "." in name else (name, "")
         for i in range(1, 1000):
-            candidate = f"{stem} ({i}){('.' + suffix) if suffix else ''}"
-            if candidate not in existing:
-                name = candidate
+            candidate = dest_dir / f"{stem} ({i}){('.' + suffix) if suffix else ''}"
+            if not candidate.exists():
+                dest = candidate
                 break
     data = bytearray()
     try:
@@ -82,10 +61,10 @@ async def save_upload(username: str, upload: UploadFile) -> dict[str, Any]:
     finally:
         await upload.close()
     content = bytes(data)
-    _persist_to_store(username, name, content)
+    dest.write_bytes(content)
     return {
-        "name": name,
-        "path": f"/uploads/{name}",
+        "name": dest.name,
+        "path": f"/uploads/{dest.name}",
         "size": len(content),
         "content_type": upload.content_type or "",
     }

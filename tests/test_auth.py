@@ -6,6 +6,8 @@ admin seeding is exercised by `test_default_admin_seeded_on_first_start`.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from conftest import TEST_PASSWORD
@@ -259,6 +261,40 @@ async def test_admin_cannot_demote_or_disable_self(client, fresh_user_store):
     # A no-op self-update (role stays admin) is fine.
     r = await client.patch("/users/admin", json={"role": "admin"}, headers=headers)
     assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_user_create_and_delete_manage_workspace(
+    client, fresh_user_store, tmp_path, monkeypatch
+):
+    """Register creates .workspace/<user> (git-tracked); admin delete purges it."""
+    from app.services.workspace import workspace_dir, workspace_root
+
+    monkeypatch.setattr(config.settings, "workspace_root", str(tmp_path / "workspace"))
+    await client.post("/register", json={"username": "alice", "password": TEST_PASSWORD})
+    ws = workspace_dir("alice")
+    assert ws.is_dir()
+    assert (ws / ".gitkeep").exists()
+
+    # The workspace root is its own git repo, tracking the new user.
+    import subprocess
+
+    out = await asyncio.to_thread(
+        subprocess.run,
+        ["git", "-C", str(workspace_root()), "log", "--oneline"],
+        capture_output=True,
+        text=True,
+    )
+    assert "create workspace for user alice" in out.stdout
+
+    # Admin deletes the user -> dir + git history entry removed.
+    await persistence.users.create_user(
+        username="admin", hashed_password=get_password_hash("admin-pw"), role="admin"
+    )
+    token = await _login(client, "admin", "admin-pw")
+    r = await client.delete("/users/alice", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 204, r.text
+    assert not ws.exists()
 
 
 @pytest.mark.asyncio

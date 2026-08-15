@@ -115,6 +115,8 @@ def test_sanitize_filename():
 
 
 async def test_save_upload_writes_file_and_dedupes(memory_persistence):
+    from app.services.workspace import workspace_dir
+
     class FakeUpload:
         filename = "report.pdf"
         content_type = "application/pdf"
@@ -133,26 +135,20 @@ async def test_save_upload_writes_file_and_dedupes(memory_persistence):
     assert r1["name"] == "report.pdf"
     assert r1["size"] == len(b"%PDF-1.4 fake")
     assert r1["path"] == "/uploads/report.pdf"
-    # Stored, not on any host disk.
-    item = await memory_persistence.store.aget(("alice",), "/alice/report.pdf")
-    assert item is not None
-    assert item.value["content"] == "%PDF-1.4 fake"
+    # A real file in alice's workspace (versioned by its git repo).
+    uploaded = workspace_dir("alice") / "uploads" / "report.pdf"
+    assert uploaded.read_bytes() == b"%PDF-1.4 fake"
 
-    # Same name again -> numeric suffix, both kept in the store.
+    # Same name again -> numeric suffix, both kept.
     r2 = await uploads.save_upload("alice", FakeUpload())
     assert r2["name"] == "report (1).pdf"
     assert r2["path"] == "/uploads/report (1).pdf"
-    item2 = await memory_persistence.store.aget(("alice",), "/alice/report (1).pdf")
-    assert item2 is not None
+    assert (workspace_dir("alice") / "uploads" / "report (1).pdf").exists()
 
 
-async def test_upload_mirrored_to_store(memory_persistence):
-    """Uploads are readable via the /uploads/ backend route (store-backed).
-
-    The composite backend routes /uploads/ to the durable store, so the
-    agent's file tools resolve the upload at /uploads/<username>/<name> in
-    both execute and no-execute modes.
-    """
+async def test_upload_lands_in_workspace(memory_persistence):
+    """Uploads are real files in the user's workspace, readable by file tools."""
+    from app.services.workspace import workspace_dir
 
     class FakeUpload:
         filename = "data.csv"
@@ -171,13 +167,13 @@ async def test_upload_mirrored_to_store(memory_persistence):
     r = await uploads.save_upload("alice", FakeUpload())
     assert "error" not in r
 
-    # The mirror write lands at the routed store key: /uploads/<user>/<name>
-    # -> key /<user>/<name> in the (user,) namespace, which is exactly what
-    # the agent's file tools resolve during a chat run (runtime context
-    # carries the user_id).
-    item = await memory_persistence.store.aget(("alice",), "/alice/data.csv")
-    assert item is not None
-    assert item.value["content"] == "a,b\n1,2\n"
+    # The file tool path /uploads/<name> resolves into alice's workspace.
+    target = workspace_dir("alice") / "uploads" / "data.csv"
+    assert target.read_text() == "a,b\n1,2\n"
+
+    # Outside a graph run the backend user is anonymous; the sync-free model
+    # keeps the file purely on disk (no store mirror).
+    assert await memory_persistence.store.aget(("alice",), "/alice/data.csv") is None
 
     # Oversized uploads never reach the store.
     monkeypatch = pytest.MonkeyPatch()
@@ -198,8 +194,7 @@ async def test_upload_mirrored_to_store(memory_persistence):
     finally:
         monkeypatch.undo()
     assert "error" in r
-    item = await memory_persistence.store.aget(("bob",), "/bob/big.bin")
-    assert item is None
+    assert not (workspace_dir("bob") / "uploads" / "big.bin").exists()
 
 
 async def test_upload_over_cap_is_skipped_with_note(memory_persistence, monkeypatch):
