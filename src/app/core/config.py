@@ -90,7 +90,9 @@ class Settings:
     # --- Web search (SearXNG, self-hosted) ---
     # SEARXNG_URL unset -> the web_search tool is not registered at all.
     # SEARXNG_ENABLED=false -> tool exists but returns a "disabled" message.
-    # Per-request override: {"enable_search": false} in /chat and /api/chat bodies.
+    # Override chain: {"enable_search": bool} in /chat and /api/chat bodies,
+    # else the per-user stored preference (PATCH /users/me/preferences), else
+    # this config value.
     searxng_url: str | None = field(default_factory=lambda: os.environ.get("SEARXNG_URL") or None)
     searxng_enabled: bool = field(
         default_factory=lambda: os.environ.get("SEARXNG_ENABLED", "true").lower() == "true"

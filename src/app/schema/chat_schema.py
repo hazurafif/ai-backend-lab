@@ -24,7 +24,7 @@ class ChatRequest(BaseModel):
         default=None,
         description=(
             "Override the SearXNG web search toggle for this request "
-            "(None = use SEARXNG_ENABLED config)"
+            "(None = the user's stored preference, else SEARXNG_ENABLED config)"
         ),
     )
 
@@ -145,7 +145,7 @@ class AiSdkChatRequest(BaseModel):
         alias="enableSearch",
         description=(
             "Override the SearXNG web search toggle for this chat "
-            "(None = use SEARXNG_ENABLED config)"
+            "(None = the user's stored preference, else SEARXNG_ENABLED config)"
         ),
     )
     decision: dict | None = Field(

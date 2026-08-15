@@ -10,6 +10,13 @@ The tool queries a self-hosted SearXNG metasearch instance's JSON API
 3. **Per request**: `enable_search` (`/chat`) / `enableSearch` (`/api/chat`)
    field in the request body, applied via a contextvar read at tool call time —
    lets the frontend flip search per message.
+4. **Per user (persisted)**: the stored `enable_search` preference
+   (`GET/PATCH /users/me/preferences`, `user_preferences` table) applies when
+   the request omits the field — the frontend keeps the toggle server-side
+   instead of localStorage.
+
+Precedence: request field > stored per-user preference > `SEARXNG_ENABLED`
+config (see `apply_search_preference`).
 
 JSON format must be enabled on the instance (`search.formats: [html, json]`,
 see `searxng/settings.yml` mounted into the docker-compose service).
@@ -26,6 +33,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
+from ..core.database import persistence
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +48,19 @@ _search_override: ContextVar[bool | None] = ContextVar("searxng_search_override"
 def set_search_enabled(value: bool | None) -> None:
     """Override the SearXNG toggle for the current request (contextvar)."""
     _search_override.set(value)
+
+
+async def apply_search_preference(username: str, override: bool | None) -> None:
+    """Apply the effective toggle for a chat request: explicit field wins, else the user's stored preference.
+
+    Resolves the precedence chain (request body field > stored per-user
+    preference > SEARXNG_ENABLED config) into the per-request contextvar.
+    Unknown users (guests, deleted accounts) simply have no stored
+    preference and fall back to the config.
+    """
+    if override is None:
+        override = await persistence.preferences.get(username, "enable_search")
+    set_search_enabled(override)
 
 
 def search_allowed() -> bool:

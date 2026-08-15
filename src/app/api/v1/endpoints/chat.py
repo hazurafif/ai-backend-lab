@@ -38,7 +38,7 @@ from ....services.chat import (
     sse_response,
 )
 from ....services.connections import llm_model_name
-from ....services.searxng import set_search_enabled
+from ....services.searxng import apply_search_preference
 from ....services.title_generator import _fallback_title, generate_followups, generate_title
 from ....services.uploads import file_notes, save_uploads
 from ....util.date import now_iso
@@ -154,7 +154,7 @@ async def chat(
         request, current_user["username"]
     )
     agent = await _resolve_agent(request, agent_name, current_user["username"])
-    set_search_enabled(enable_search)
+    await apply_search_preference(current_user["username"], enable_search)
     return sse_response(
         agent_stream(
             agent,
@@ -181,13 +181,6 @@ async def ai_sdk_chat_endpoint(
     used (starter mode, matching the frontend which has no login yet).
     """
     is_multipart = request.headers.get("content-type", "").startswith("multipart/form-data")
-    if not is_multipart:
-        body = AiSdkChatRequest.model_validate(await request.json())
-        set_search_enabled(body.enable_search)
-        text = ai_sdk_chat.extract_user_message(body.messages)
-    else:
-        body = None
-        text = ""
 
     username = "guest"
     auth_header = request.headers.get("Authorization")
@@ -195,6 +188,14 @@ async def ai_sdk_chat_endpoint(
         token_data = decode_access_token(auth_header[7:])
         if token_data is not None and token_data.username:
             username = token_data.username
+
+    if not is_multipart:
+        body = AiSdkChatRequest.model_validate(await request.json())
+        await apply_search_preference(username, body.enable_search)
+        text = ai_sdk_chat.extract_user_message(body.messages)
+    else:
+        body = None
+        text = ""
 
     # Multipart: file uploads (AI SDK useChat attachments). `messages` is a
     # JSON-encoded form field; uploaded files are saved and their paths are
@@ -207,7 +208,7 @@ async def ai_sdk_chat_endpoint(
             raise HTTPException(status_code=422, detail="Invalid 'messages' form field") from None
         if not isinstance(messages, list):
             raise HTTPException(status_code=422, detail="Invalid 'messages' form field")
-        set_search_enabled(_parse_bool(form.get("enable_search")))
+        await apply_search_preference(username, _parse_bool(form.get("enable_search")))
         text = ai_sdk_chat.extract_user_message(messages)
         text = _augment_message(text, await save_uploads(username, _form_files(form)))
         if not text:
