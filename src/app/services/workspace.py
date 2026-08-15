@@ -1,24 +1,33 @@
-"""Per-user workspaces: real files on disk, versioned with git — the volume is
-the source of truth, git is versioning only.
+"""Per-user workspaces: the agent's only filesystem, plain host files under
+``WORKSPACE_ROOT/<user_id>/``, versioned with git.
 
-Layout under ``WORKSPACE_ROOT/<user_id>/``:
+The workflow is deliberately simple: **a system prompt + the host file
+system**. No virtual mounts, no store mirroring — the files on disk (a
+bind-mounted host dir in compose, so ``.workspace/<user>`` shows up on the
+host) are the source of truth, and the workspace root's own git repo is
+versioning only.
+
+Layout under ``WORKSPACE_ROOT/<user_id>/`` (scaffolded on user create):
 
 - ``memories/`` — durable memory the agent reads/writes across threads
-- ``uploads/`` — chat uploads (written by the API, see services/uploads.py)
 - ``skills/`` — the **user's own skills** ("my skills", /skills API),
   materialized before each run; the admin global pool is never served to
   default agents (full isolation). Agent edits are overwritten next run
+- ``uploads/`` — chat uploads (written by the API, see services/uploads.py)
+- ``tmp/`` — scratch space for the agent's scripts and intermediate files
 
 The workspace root is **its own git repository**: every run end auto-commits
-(all changes, best-effort). Whether to **push** is the agent's decision — the
-credentials are configured here (``GIT_TOKEN``/``GIT_REMOTE_URL``), never
-used programmatically. The token lives in ``.git-credentials`` inside the
-workspace repo, which is gitignored so it can never be committed.
+(all changes, best-effort). Whether to **push** is the agent's decision —
+git credentials are pre-configured here (``GIT_TOKEN``/``GIT_REMOTE_URL``,
+see ``ensure_git``), never used programmatically. The token lives in
+``.git-credentials`` inside the workspace repo, which is gitignored so it
+can never be committed. ``ensure_git`` runs at startup (lifespan), so the
+repo + credentials are ready in the container before the first run.
 
-Lifecycle: ``ensure_user_workspace`` (on user create) adds a tracked
-``.gitkeep``; ``remove_user_workspace`` (on user delete) removes the dir and
-commits. Git operations are best-effort (never fail a run when git is
-unavailable).
+Lifecycle: ``ensure_user_workspace`` (on user create) scaffolds the working
+dirs and adds tracked ``.gitkeep`` markers; ``remove_user_workspace`` (on
+user delete) removes the dir and commits. Git operations are best-effort
+(never fail a run when git is unavailable).
 """
 
 from __future__ import annotations
@@ -124,12 +133,30 @@ async def git_commit(message: str) -> None:
         logger.exception("workspace git commit failed")
 
 
+# The per-user working directories the agent knows from its system prompt.
+# Scaffolded on user create (each with a tracked .gitkeep) so the layout is
+# stable on disk — and visible on the host — even before any run. Keep in
+# sync with the "workspace layout" section of DEFAULT_SYSTEM_PROMPT.
+WORKSPACE_SUBDIRS = ("memories", "skills", "uploads", "tmp")
+
+
 def ensure_user_workspace(username: str) -> None:
-    """Create the user's workspace dir, tracked in git (user create)."""
+    """Create the user's workspace dir + working subdirs, tracked in git.
+
+    Scaffolds ``memories/``, ``skills/``, ``uploads/`` and ``tmp/`` (each
+    with a tracked ``.gitkeep``) so the agent's working directories exist on
+    the host right after user creation — no run needed to materialize them.
+    """
     d = workspace_dir(username)
-    marker = d / ".gitkeep"
-    if not marker.exists():
-        marker.write_text("")
+    root_marker = d / ".gitkeep"
+    if not root_marker.exists():
+        root_marker.write_text("")
+    for name in WORKSPACE_SUBDIRS:
+        sub = d / name
+        sub.mkdir(parents=True, exist_ok=True)
+        marker = sub / ".gitkeep"
+        if not marker.exists():
+            marker.write_text("")
     if _git("add", "-A") is not None:
         _git_commit(f"create workspace for user {username}")
 
@@ -171,6 +198,9 @@ def _replace_skill_files(dest: Path, files: list[tuple[Path, bytes]]) -> None:
     for target, data in files:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+    # Keep the dir git-tracked when it ends up empty (no skills yet).
+    if not any(dest.iterdir()) and not (dest / ".gitkeep").exists():
+        (dest / ".gitkeep").write_text("")
 
 
 async def materialize_skills(

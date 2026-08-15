@@ -26,8 +26,10 @@ COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
 # 3) Non-root runtime user; per-user workspaces live under /app/.workspace
-#    (mounted as a named volume in compose so they survive app recreates),
-#    versioned by their own git repo (workspace auto-commits each run).
+#    (bind-mounted from the host's ./.workspace in compose, so user dirs show
+#    up on the host), versioned by their own git repo (auto-commits each run).
+#    Git is installed so the agent can `git push` with the pre-configured
+#    credentials (GIT_TOKEN/GIT_REMOTE_URL → .git-credentials at startup).
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 appuser \

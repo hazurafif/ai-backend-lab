@@ -48,29 +48,43 @@ runs the app capped at 1 GB RAM.
 
 ## Storage model (what the agent sees)
 
-There is **one** filesystem: the per-user workspace. Every file-tool path and
-`execute` command resolves to real files under `WORKSPACE_ROOT/<user_id>/`
-(default `.workspace/` — a named volume in compose, so the repo stays clean
-and users stay isolated). No virtual mounts.
+Simple by design: **a system prompt + the host file system.** There is one
+filesystem — the per-user workspace. Every file-tool path and `execute`
+command resolves to real files under `WORKSPACE_ROOT/<user_id>/` (default
+`.workspace/`, bind-mounted into the container in compose — so
+`.workspace/<username>/` shows up on the host right after user creation).
+No virtual mounts, no store mirroring: the files on disk are the source of
+truth.
 
-Durability comes from the **workspace sync** (`services/workspace.py`):
-before each run the user's store files (Postgres) are materialized into the
-workspace dir; after the run the agent's changes are synced back.
+On user creation `ensure_user_workspace` scaffolds the working dirs (each
+git-tracked):
 
-| Workspace subdir | Store side | Sync policy |
-|---|---|---|
-| `memories/` | ns `(user,)` keys `/<name>` | down if missing on disk, always up |
-| `uploads/` | ns `(user,)` keys `/<user>/<name>` | always down, always up |
-| `skills/` | user's own skills ns (`("user","skills",<user>)`) | always down, **never** up (read-only) |
-| root files (e.g. `/script.py`) | ns `(user,)` keys `/<name>` | up only (materialize as memories/) |
+| Workspace subdir | Purpose |
+|---|---|
+| `memories/` | durable notes the agent keeps across conversations |
+| `skills/` | the user's own skills (`/skills` API), materialized before each run — read-only, agent edits are overwritten |
+| `uploads/` | files the user uploads in chat (`services/uploads.py`) |
+| `tmp/` | scratch space for the agent's scripts and intermediate files |
+| *(anything else)* | agent-created dirs/files, e.g. `scripts/`, project code |
+
+The agent knows this layout **only from its system prompt** (rendered per
+user, `{{username}}`) and from the per-user backend it's built with — each
+agent's file tools + shell are rooted in its own dir, so it never sees
+other users' workspaces.
+
+The workspace root is **its own git repo**, initialized at startup and
+auto-committed after every run. Git credentials (`GIT_TOKEN` +
+`GIT_REMOTE_URL`) are written to `.git-credentials` (gitignored) at startup,
+so the agent can `git push` from inside the container whenever it judges it
+useful.
 
 Rules of thumb:
 
 - **Everything is executable**: skills are real files under `skills/` — copy
   one out (or read it) and run it directly; file tools and `execute` agree.
-- **`memories/` and `uploads/` persist** via sync-up after every run (even
-  on error/cancel). `skills/` is admin-owned — agent edits to it are
-  discarded on the next run.
+- **`memories/`, `uploads/` and `tmp/` persist** on disk (auto-committed
+  after every run, even on error/cancel). `skills/` is user/admin-owned —
+  agent edits to it are discarded on the next run.
 - **Not a sandbox**: `execute` can reach any absolute path; per-user
   isolation is the *default* (cwd + file-tool roots), not a boundary — keep
   HITL (`INTERRUPT_ON_JSON='{"execute": true}'`) in trusted environments.

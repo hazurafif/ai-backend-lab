@@ -124,6 +124,7 @@ title, agent, status, at}):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -136,6 +137,7 @@ from .core.config import settings
 from .core.database import persistence
 from .services import resources
 from .services import settings as runtime_settings
+from .services import workspace as workspace_service
 from .services.agent import AgentRegistry, build_backend, build_extra_tools
 from .services.connections import llm_model_name, refresh_resolved_connections
 from .services.mcp import mcp_servers
@@ -178,6 +180,12 @@ def create_app(
         # to the same store (Postgres in production), so skills added via the
         # API are visible to the agent on the next run.
         app.state.backend = build_backend(store=persistence.store)
+        # Workspace git repo + credentials ready before the first run (best
+        # effort — versioning is never fatal).
+        try:
+            await asyncio.to_thread(workspace_service.ensure_git)
+        except Exception:
+            logger.exception("workspace git init failed")
         try:
             await mcp_servers.connect(store=persistence.store)
         except Exception:

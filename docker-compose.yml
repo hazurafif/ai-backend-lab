@@ -20,9 +20,13 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Per-user agent workspaces (real files, one dir per user). The store
-      # mirrors them via the workspace sync (services/workspace.py).
-      - workspaces:/app/.workspace
+      # Per-user agent workspaces (one real dir per user) are a BIND MOUNT of
+      # the host's ./.workspace — so .workspace/<username>/ shows up on the
+      # host right after user creation, and the workspace git repo (versioning
+      # only) lives in the same dir. The dir is gitignored in the app repo.
+      # Note: the container runs as uid 10001, so the host dir must be
+      # writable by that uid (chmod -R a+w .workspace if create fails).
+      - ./.workspace:/app/.workspace
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,5 +88,4 @@ services:
 
 volumes:
   pgdata:
-  workspaces:
   weaviate_data:
