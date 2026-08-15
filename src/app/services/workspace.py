@@ -153,6 +153,23 @@ async def git_commit(message: str) -> None:
 # sync with the "workspace layout" section of DEFAULT_SYSTEM_PROMPT.
 WORKSPACE_SUBDIRS = ("memories", "skills", "uploads", "tmp")
 
+# Starter memory file, auto-loaded into the system prompt before every run
+# (deepagents MemoryMiddleware via MEMORY_SOURCE). HTML comments are stripped
+# before injection, so the lines below are authoring notes only.
+_STARTER_MEMORY = """\
+<!-- This file is your long-term memory. It is loaded into your system prompt
+at the start of every run. Edit it with edit_file to persist what you learn
+about the user and how you should work. Keep it concise: only durable,
+high-signal facts and preferences. -->
+
+# Memory
+
+<!-- Add durable notes below, e.g.:
+- user prefers concise answers with code examples
+- project conventions: ...
+-->
+"""
+
 
 def ensure_user_workspace(username: str) -> None:
     """Create the user's workspace dir + working subdirs, tracked in git.
@@ -171,6 +188,10 @@ def ensure_user_workspace(username: str) -> None:
         marker = sub / ".gitkeep"
         if not marker.exists():
             marker.write_text("")
+    # Auto-loaded memory file (see MEMORY_SOURCE in core/constants.py).
+    memory_file = d / "memories" / "AGENTS.md"
+    if not memory_file.exists():
+        memory_file.write_text(_STARTER_MEMORY)
     if _git("add", "-A") is not None:
         _git_commit(f"create workspace for user {username}")
 
