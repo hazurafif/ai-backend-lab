@@ -47,11 +47,3 @@ class BadGateway(DetailedHTTPException):
 class ServiceUnavailable(DetailedHTTPException):
     STATUS_CODE = status.HTTP_503_SERVICE_UNAVAILABLE
     DETAIL = "Service unavailable"
-
-
-class NotAuthenticated(DetailedHTTPException):
-    STATUS_CODE = status.HTTP_401_UNAUTHORIZED
-    DETAIL = "User not authenticated"
-
-    def __init__(self) -> None:
-        super().__init__(headers={"WWW-Authenticate": "Bearer"})

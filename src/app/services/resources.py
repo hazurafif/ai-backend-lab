@@ -20,7 +20,6 @@ or `POST /agent/tools/reconnect`.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 
 from langgraph.store.base import BaseStore
 
@@ -34,6 +33,7 @@ from ..schema.agent_schema import (
     ToolServerIn,
     ToolServerOut,
 )
+from ..util.date import now_iso
 
 SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SKILL_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
@@ -64,10 +64,6 @@ async def migrate_global_skills(store: BaseStore, owner: str) -> int:
     return moved
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
 def _skill_file_key(name: str) -> str:
     return f"/{name}/SKILL.md"
 
@@ -89,8 +85,8 @@ def _skill_value(content: str) -> dict:
     return {
         "content": content,
         "encoding": "utf-8",
-        "created_at": _now_iso(),
-        "modified_at": _now_iso(),
+        "created_at": now_iso(),
+        "modified_at": now_iso(),
     }
 
 
