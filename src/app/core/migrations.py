@@ -41,8 +41,8 @@ async def run_migrations(pool: AsyncConnectionPool, migrations_dir: Path = MIGRA
     """Apply pending `*.sql` files from `migrations_dir` in filename order.
 
     Returns True when the schema is up to date (or nothing was pending), and
-    False when the migrations directory is missing (callers may fall back to
-    legacy inline DDL).
+    False when the migrations directory is missing (callers fall back to the
+    in-memory stores).
     """
     async with pool.connection() as conn:
         await conn.execute(_SCHEMA_MIGRATIONS_DDL)

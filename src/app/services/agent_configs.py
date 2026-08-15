@@ -27,7 +27,6 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any
 
 from langgraph.store.base import BaseStore
@@ -44,6 +43,7 @@ from ..core.constants import (
 )
 from ..schema.agent_config_schema import AgentConfigIn, AgentConfigOut
 from ..services import settings as runtime_settings
+from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -124,12 +124,8 @@ def default_spec() -> AgentSpec:
     )
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
 def _value(cfg: AgentConfigIn, *, owner: str, created_at: str | None = None) -> dict[str, Any]:
-    updated = _now_iso()
+    updated = now_iso()
     return {
         "name": cfg.name,
         "description": cfg.description,

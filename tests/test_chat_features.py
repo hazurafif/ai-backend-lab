@@ -30,7 +30,7 @@ from test_smoke import (
 
 from app.core import config
 from app.core.database import persistence
-from app.core.run_registry import runs
+from app.core.run_manager import run_manager
 from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent
@@ -243,24 +243,24 @@ async def test_cancel_aborts_running_stream(memory_persistence):
     # Wait until the run is registered (the thread_id is generated internally).
     thread_id = None
     for _ in range(200):
-        ids = list(runs._stops)
+        ids = list(run_manager._runs)
         if ids:
             thread_id = ids[0]
             break
         await asyncio.sleep(0.01)
     assert thread_id is not None, "run was never registered"
 
-    assert runs.cancel(thread_id)
+    assert run_manager.cancel(thread_id)
     await asyncio.wait_for(task, timeout=10)
 
     done = [d for e, d in collected if e == "done"]
     assert done, "expected a terminal done event"
     assert done[-1].get("cancelled") is True, done[-1]
-    assert not runs.is_running(thread_id), "run should be unregistered after cancel"
+    assert not run_manager.is_running(thread_id), "run should be unregistered after cancel"
 
 
 async def test_cancel_endpoint(memory_persistence):
-    runs.register("thread-cancel-me")
+    run_manager.start("thread-cancel-me", "tester", "default")
     app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
     try:
         async with app.router.lifespan_context(app):
@@ -287,7 +287,7 @@ async def test_cancel_endpoint(memory_persistence):
                 r = await client.post(f"/threads/{tid}/cancel", headers=headers)
                 assert r.status_code == 409, r.text
     finally:
-        runs.unregister("thread-cancel-me")
+        run_manager.finish("thread-cancel-me")
 
 
 # ---------------------------------------------------------------------------

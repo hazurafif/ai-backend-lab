@@ -10,10 +10,8 @@ is unset (no Postgres available), we fall back to `InMemorySaver` +
 development.
 
 SQL schema lives in `migrations/*.sql` (applied at startup by
-`core/migrations.py`); `CHAT_MESSAGES_DDL` below is a legacy fallback used
-only when the migrations folder is missing. On first start with an empty
-users store, a default admin account is seeded (see
-`Persistence.ensure_default_admin`).
+`core/migrations.py`). On first start with an empty users store, a default
+admin account is seeded (see `Persistence.ensure_default_admin`).
 """
 
 from __future__ import annotations
@@ -38,24 +36,6 @@ from .migrations import run_migrations
 from .security import get_password_hash
 
 logger = logging.getLogger(__name__)
-
-
-# Legacy fallback for `chat_messages` when the migrations folder is missing
-# (mirrors migrations/0002_create_chat_messages.sql).
-CHAT_MESSAGES_DDL = """\
-CREATE TABLE IF NOT EXISTS chat_messages (
-    id          BIGSERIAL PRIMARY KEY,
-    thread_id   TEXT NOT NULL,
-    username    TEXT NOT NULL,
-    message_id  TEXT NOT NULL,
-    role        TEXT NOT NULL,
-    content     JSONB NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (thread_id, message_id)
-);
-CREATE INDEX IF NOT EXISTS ix_chat_messages_thread
-    ON chat_messages (thread_id, created_at);
-"""
 
 
 class UserStore:
@@ -1103,32 +1083,32 @@ class Persistence:
 
     async def start(self) -> None:
         pool: AsyncConnectionPool | None = None
-        postgres_ready = False
         if settings.database_uri:
             try:
                 pool = AsyncConnectionPool(conninfo=settings.database_uri, open=False)
                 await pool.open()
-                # Apply migrations/*.sql (users, chat_messages, ...).
+                # Apply migrations/*.sql (users, chat_messages, ...). A missing
+                # migrations dir means no schema: treat Postgres as unavailable
+                # and fall back to the in-memory stores below (the legacy inline
+                # chat DDL fallback is gone).
                 if await run_migrations(pool):
-                    postgres_ready = True
+                    # AsyncPostgresSaver / PostgresStore are async context managers.
+                    self._saver_cm = AsyncPostgresSaver.from_conn_string(settings.database_uri)
+                    self.checkpointer = await self._saver_cm.__aenter__()
+                    await self.checkpointer.setup()  # create tables
+
+                    self._store_cm = AsyncPostgresStore.from_conn_string(settings.database_uri)
+                    self.store = await self._store_cm.__aenter__()
+                    await self.store.setup()
+
+                    self.backend_name = "postgres"
+                    logger.info(
+                        "Persistence: Postgres (checkpointer + store + chat history + users) connected"
+                    )
                 else:
-                    # No migrations folder: keep the legacy inline chat DDL.
-                    async with pool.connection() as conn:
-                        await conn.execute(CHAT_MESSAGES_DDL)
-
-                # AsyncPostgresSaver / PostgresStore are async context managers.
-                self._saver_cm = AsyncPostgresSaver.from_conn_string(settings.database_uri)
-                self.checkpointer = await self._saver_cm.__aenter__()
-                await self.checkpointer.setup()  # create tables
-
-                self._store_cm = AsyncPostgresStore.from_conn_string(settings.database_uri)
-                self.store = await self._store_cm.__aenter__()
-                await self.store.setup()
-
-                self.backend_name = "postgres"
-                logger.info(
-                    "Persistence: Postgres (checkpointer + store + chat history + users) connected"
-                )
+                    logger.error("Migrations dir not found; falling back to in-memory stores")
+                    await pool.close()
+                    pool = None
             except Exception:
                 logger.exception(
                     "Failed to connect to Postgres (%s); falling back to in-memory",
@@ -1139,12 +1119,21 @@ class Persistence:
                         await pool.close()
                 pool = None
 
-        await self.users.start(pool, postgres_ready)
-        await self.chat_history.start(pool)
-        await self.kb.start(pool)
-        await self.connections.start(pool)
-        await self.settings.start(pool)
-        if pool is None:
+        if pool is not None:
+            await self.users.start(pool, True)
+            await self.chat_history.start(pool)
+            await self.kb.start(pool)
+            await self.connections.start(pool)
+            await self.settings.start(pool)
+        else:
+            # Postgres unavailable (no DATABASE_URI, missing migrations dir, or
+            # a failed connection): every store degrades to in-memory so the
+            # app still boots for local development.
+            await self.users.start(None, False)
+            await self.chat_history.start(None)
+            await self.kb.start(None)
+            await self.connections.start(None)
+            await self.settings.start(None)
             self.checkpointer = InMemorySaver()
             self.store = InMemoryStore()
             self.backend_name = "memory"

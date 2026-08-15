@@ -27,7 +27,6 @@ from ..core.database import persistence
 from ..core.exceptions import Conflict
 from ..core.notification_hub import hub
 from ..core.run_manager import ActiveRun, run_manager
-from ..core.run_registry import runs
 from ..services import agent_configs
 from ..services.workspace import git_commit, materialize_skills
 from ..util.date import now_iso
@@ -437,7 +436,7 @@ async def _run_agent(
                 pass
 
     interrupted = {"flag": False}
-    stop_event = runs.register(thread_id)
+    stop_event = active.stop
     # Materialize the agent's skills into the workspace dir (the only
     # store -> disk sync; memories/uploads are plain files on the volume).
     try:
@@ -568,7 +567,6 @@ async def _run_agent(
         # End the run lifecycle first (stream close, resume allowed), then
         # version the workspace: every agent change is committed to the
         # workspace's own git repo (best-effort; never fails the run).
-        runs.unregister(thread_id)
         run_manager.finish(thread_id)
         try:
             await git_commit(f"run {thread_id} ({username})")

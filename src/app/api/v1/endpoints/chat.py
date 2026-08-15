@@ -13,7 +13,7 @@ from ....core.database import persistence
 from ....core.dependencies import get_current_user
 from ....core.exceptions import NotFound, ServiceUnavailable
 from ....core.notification_hub import hub
-from ....core.run_registry import runs
+from ....core.run_manager import run_manager
 from ....core.security import decode_access_token
 from ....schema.chat_schema import (
     AiSdkChatRequest,
@@ -39,7 +39,7 @@ from ....services.chat import (
 )
 from ....services.connections import llm_model_name
 from ....services.searxng import set_search_enabled
-from ....services.title_generator import generate_followups, generate_title
+from ....services.title_generator import _fallback_title, generate_followups, generate_title
 from ....services.uploads import file_notes, save_uploads
 from ....util.date import now_iso
 
@@ -296,7 +296,7 @@ async def cancel_thread(
 ):
     """Abort the active run of a thread; the SSE stream ends with a `done` event carrying `cancelled: true`."""
     await _assert_thread_owner(thread_id, current_user["username"])
-    if not runs.cancel(thread_id):
+    if not run_manager.cancel(thread_id):
         raise HTTPException(status_code=409, detail="Thread has no active run")
     return {"status": "cancelled", "thread_id": thread_id}
 
@@ -416,17 +416,6 @@ async def _upsert_title(thread_id: str, username: str, value: dict, agent_name: 
     await persistence.store.aput(thread_metadata_ns(username), thread_id, value)
 
 
-def _default_title(messages: list) -> str | None:
-    """The auto title the chat service sets on first message (truncation)."""
-    from ....services.title_generator import _message_text
-
-    for m in messages:
-        text = _message_text(m)
-        if text:
-            return text.strip()[:80]
-    return None
-
-
 @router.post("/threads/{thread_id}/title", response_model=ThreadOut)
 async def generate_thread_title(
     request: Request,
@@ -468,7 +457,7 @@ async def thread_followup(
     messages, value, agent_name, model = await _title_payload(request, thread_id, username)
 
     current = value.get("title")
-    needs_title = force or not current or current == _default_title(messages)
+    needs_title = force or not current or current == _fallback_title(messages)
     if needs_title:
         title = await generate_title(model, messages)
         value["title"] = title
@@ -624,5 +613,5 @@ async def thread_usage(
         context=session_stats.build_context(
             session_stats.current_context_input_tokens(history), model
         ),
-        active_run=runs.is_running(thread_id),
+        active_run=run_manager.is_running(thread_id),
     )
