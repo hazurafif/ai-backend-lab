@@ -331,9 +331,9 @@ async def test_http_chat_enable_search_field(monkeypatch):
             assert "Web search is disabled" in r.text
 
             # fresh agent: the scripted model is a one-shot sequence
-            app.state.agent = build_search_agent(
-                persistence.checkpointer, persistence.store, client=client
-            )
+            _agent = build_search_agent(persistence.checkpointer, persistence.store, client=client)
+            app.state.agent = _agent
+            app.state.agents.set_static_default(_agent)
             r = await http.post(
                 "/chat",
                 json={"message": "search please", "enable_search": True},

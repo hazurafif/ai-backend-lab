@@ -133,7 +133,7 @@ async def test_skill_crud(persistence):
         )
         assert r.status_code == 201, r.text
         created = r.json()
-        assert created["path"] == "/skills/web-research/SKILL.md"
+        assert created["path"] == "/skills/@tester/web-research/SKILL.md"
 
         # duplicate -> 409
         r = await http.post(

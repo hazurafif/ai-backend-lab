@@ -42,6 +42,28 @@ SKILL_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Z
 SKILLS_NS = ("agent", "skills")
 
 
+async def migrate_global_skills(store: BaseStore, owner: str) -> int:
+    """Move legacy global skills into a user's own namespace (one-time).
+
+    Skills are fully per-user now; the old admin-global pool is folded into
+    `owner`'s own skills (skipping names that already exist there) and the
+    global namespace is cleared. Returns the number of skills moved.
+    """
+    from ..core.constants import user_skills_ns
+
+    target = user_skills_ns(owner)
+    moved = 0
+    for item in await store.asearch(SKILLS_NS):
+        key = item.key or ""
+        if await store.aget(target, key) is not None:
+            continue
+        await store.aput(target, key, item.value)
+        moved += 1
+    for item in await store.asearch(SKILLS_NS):
+        await store.adelete(SKILLS_NS, item.key or "")
+    return moved
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 

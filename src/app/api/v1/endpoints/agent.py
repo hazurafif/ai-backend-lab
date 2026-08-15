@@ -6,8 +6,9 @@ run); tool server changes apply on restart or POST /agent/tools/reconnect.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from ....core.constants import user_skills_ns
 from ....core.database import persistence
 from ....core.dependencies import get_admin_user, get_current_user
 from ....core.exceptions import Conflict, NotFound, ServiceUnavailable
@@ -19,30 +20,61 @@ from ....services.mcp import mcp_servers
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
+def _skill_owner(current_user: dict, username: str | None) -> str:
+    """Target user for a skill operation: caller by default; admins may pass
+    ?username= to manage another user's skills."""
+    me = current_user.get("username", "admin")
+    if username is None or username == me:
+        return me
+    if current_user.get("role") != "admin":
+        from ....core.exceptions import PermissionDenied
+
+        raise PermissionDenied(detail="Only admins can manage other users' skills")
+    return username
+
+
 # ---------------------------------------------------------------------------
-# skills
+# skills (admin-managed, per-user scoped)
 # ---------------------------------------------------------------------------
 
 
 @router.get("/skills", response_model=list[SkillOut])
-async def list_skills(current_user: dict = Depends(get_current_user)):
-    """Read-only listing for any authenticated user (pick global skills for agent configs)."""
-    return await resources.list_skills(persistence.store)
+async def list_skills(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+    username: str | None = Query(default=None),
+):
+    """List a user's skills (default: the caller's own; other users: admin)."""
+    target = _skill_owner(current_user, username)
+    return await resources.list_skills(persistence.store, user_skills_ns(target))
 
 
 @router.post("/skills", response_model=SkillOut, status_code=201)
-async def create_skill(body: SkillIn, request: Request, _: dict = Depends(get_admin_user)):
-    if await resources.get_skill(persistence.store, body.name):
+async def create_skill(
+    body: SkillIn,
+    request: Request,
+    admin_user: dict = Depends(get_admin_user),
+    username: str | None = Query(default=None),
+):
+    target = _skill_owner(admin_user, username)
+    ns = user_skills_ns(target)
+    if await resources.get_skill(persistence.store, body.name, ns):
         raise Conflict(f"Skill '{body.name}' already exists")
-    out = await resources.create_skill(persistence.store, body)
+    out = await resources.create_skill(persistence.store, body, ns)
     request.app.state.agents.invalidate()
     return out
 
 
 @router.get("/skills/{name}", response_model=SkillOut)
-async def get_skill(name: str, current_user: dict = Depends(get_current_user)):
-    """Read-only lookup for any authenticated user."""
-    skill = await resources.get_skill(persistence.store, name)
+async def get_skill(
+    name: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+    username: str | None = Query(default=None),
+):
+    """Read-only lookup (default: caller's own skills; other users: admin)."""
+    target = _skill_owner(current_user, username)
+    skill = await resources.get_skill(persistence.store, name, user_skills_ns(target))
     if skill is None:
         raise NotFound("Skill not found")
     return skill
@@ -50,10 +82,15 @@ async def get_skill(name: str, current_user: dict = Depends(get_current_user)):
 
 @router.put("/skills/{name}", response_model=SkillOut)
 async def update_skill(
-    name: str, body: SkillIn, request: Request, _: dict = Depends(get_admin_user)
+    name: str,
+    body: SkillIn,
+    request: Request,
+    admin_user: dict = Depends(get_admin_user),
+    username: str | None = Query(default=None),
 ):
+    target = _skill_owner(admin_user, username)
     try:
-        out = await resources.update_skill(persistence.store, name, body)
+        out = await resources.update_skill(persistence.store, name, body, user_skills_ns(target))
     except KeyError:
         raise NotFound("Skill not found") from None
     request.app.state.agents.invalidate()
@@ -61,20 +98,33 @@ async def update_skill(
 
 
 @router.delete("/skills/{name}", status_code=204)
-async def delete_skill(name: str, request: Request, _: dict = Depends(get_admin_user)):
-    if not await resources.delete_skill(persistence.store, name):
+async def delete_skill(
+    name: str,
+    request: Request,
+    admin_user: dict = Depends(get_admin_user),
+    username: str | None = Query(default=None),
+):
+    target = _skill_owner(admin_user, username)
+    if not await resources.delete_skill(persistence.store, name, user_skills_ns(target)):
         raise NotFound("Skill not found")
     request.app.state.agents.invalidate()
 
 
 @router.delete("/skills/{name}/files/{file_path:path}", status_code=204)
 async def delete_skill_file(
-    name: str, file_path: str, request: Request, _: dict = Depends(get_admin_user)
+    name: str,
+    file_path: str,
+    request: Request,
+    admin_user: dict = Depends(get_admin_user),
+    username: str | None = Query(default=None),
 ):
     """Delete one bundled skill file (scripts/, references/, assets/, ...)."""
     if not resources.SKILL_FILE_PATH_RE.fullmatch(file_path) or file_path.lower() == "skill.md":
         raise HTTPException(status_code=422, detail="Invalid skill file path")
-    if not await resources.delete_skill_file(persistence.store, name, file_path):
+    target = _skill_owner(admin_user, username)
+    if not await resources.delete_skill_file(
+        persistence.store, name, file_path, user_skills_ns(target)
+    ):
         raise NotFound("Skill file not found")
     request.app.state.agents.invalidate()
 

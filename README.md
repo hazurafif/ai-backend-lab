@@ -125,7 +125,7 @@ Main surface — the full endpoint table and the SSE contract live in
 ## Feature highlights
 
 - **Agent configs** — `{"name": "research", "model": "anthropic:claude-sonnet-4-5", "skills": [...], "tools": [...], "thinking": "xhigh"}`; resolution: your own → global → builtin `default`. Graphs are built lazily and cached; conversations survive rebuilds.
-- **Skills** — skill-creator layout (`SKILL.md` + bundled files) in the durable store; per-user ("my skills", `/skills`) and admin-global (`/agent/skills`) scopes. The builtin default agent sees **only the user's own skills** — the admin global pool is never served automatically (full isolation); named agent configs can still reference skills explicitly.
+- **Skills** — skill-creator layout (`SKILL.md` + bundled files) in the durable store, **fully per-user**: `/skills` (self-service) and `/agent/skills?username=` (admin management). The default agent sees only the user's own skills; named agent configs can attach the user's skills explicitly.
 - **Knowledge bases** — `POST /knowledge/{id}/files` (multipart, per-file `path` for folders) or `/zip`; per-user quota, `?alpha=` hybrid tuning, reranking (`KB_RERANK_MODEL`), query rewrite, retrieval eval via `scripts/kb_eval.py`. See [./docs/knowledge-base-plan.md](./docs/knowledge-base-plan.md) and [./docs/rag-techniques-research.md](./docs/rag-techniques-research.md).
 - **HITL** — `event: interrupt` → approval UI → `POST /threads/{id}/resume` with `approve` / `edit` / `reject` / `respond`.
 - **Sharing** — `POST /threads/{id}/share` → public read-only link at `/shared/{token}` (no auth).

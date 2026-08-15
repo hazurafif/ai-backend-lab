@@ -300,9 +300,9 @@ async def test_ai_sdk_chat_endpoint(memory_persistence):
     app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
 
     async with app.router.lifespan_context(app):
-        app.state.agent = build_scripted_agent(
-            memory_persistence.checkpointer, memory_persistence.store
-        )
+        _agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
+        app.state.agent = _agent
+        app.state.agents.set_static_default(_agent)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -385,9 +385,9 @@ async def test_http_end_to_end(memory_persistence):
     app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
 
     async with app.router.lifespan_context(app):
-        app.state.agent = build_scripted_agent(
-            memory_persistence.checkpointer, memory_persistence.store
-        )
+        _agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
+        app.state.agent = _agent
+        app.state.agents.set_static_default(_agent)
         # get_current_user validates against the users store.
         await memory_persistence.users.create_user(username="tester", hashed_password="x")
         token = create_access_token(data={"sub": "tester"})

@@ -285,46 +285,47 @@ async def test_default_agent_keeps_env_behavior(persistence):
 async def test_agent_skills_snapshot_and_isolation(persistence):
     model = RecordingModel()
     app = make_app(persistence, model=model)
-    async with app.router.lifespan_context(app):
-        # admin creates a global skill
-        async with await client_for(app, "boss", role="admin") as admin:
-            r = await admin.post(
-                "/agent/skills",
-                json={
-                    "name": "sql-guru",
-                    "description": "SQL expertise",
-                    "content": "You are an SQL expert. Prefer indexes.",
-                },
-            )
-            assert r.status_code == 201, r.text
+    async with (
+        app.router.lifespan_context(app),
+        await client_for(app, "alice") as client,
+    ):
+        # alice creates her OWN skill (skills are fully per-user)
+        r = await client.post(
+            "/skills",
+            json={
+                "name": "sql-guru",
+                "description": "SQL expertise",
+                "content": "You are an SQL expert. Prefer indexes.",
+            },
+        )
+        assert r.status_code == 201, r.text
 
-        async with await client_for(app, "alice") as client:
-            # agent with the skill attached
-            r = await client.post("/agents", json=agent_payload("dba", skills=["sql-guru"]))
-            assert r.status_code == 201, r.text
+        # agent with the skill attached
+        r = await client.post("/agents", json=agent_payload("dba", skills=["sql-guru"]))
+        assert r.status_code == 201, r.text
 
-            # snapshot exists in the agent's namespace (not only global)
-            ns = agent_skills_ns("alice", "dba")
-            items = [it for it in await persistence.store.asearch(ns)]
-            assert items, "agent skill namespace is empty"
-            md = next(it for it in items if it.key == "/sql-guru/SKILL.md")
-            assert "SQL expert" in md.value["content"]
+        # snapshot exists in the agent's namespace (not only global)
+        ns = agent_skills_ns("alice", "dba")
+        items = [it for it in await persistence.store.asearch(ns)]
+        assert items, "agent skill namespace is empty"
+        md = next(it for it in items if it.key == "/sql-guru/SKILL.md")
+        assert "SQL expert" in md.value["content"]
 
-            # agent without skills must NOT see the global skill
-            r = await client.post("/agents", json=agent_payload("plain", skills=[]))
-            assert r.status_code == 201, r.text
+        # agent without skills must NOT see the global skill
+        r = await client.post("/agents", json=agent_payload("plain", skills=[]))
+        assert r.status_code == 201, r.text
 
-            model.system_prompts.clear()
-            r = await client.post("/chat", json={"message": "hi", "agent": "dba"})
-            assert r.status_code == 200
-            dba_prompts = list(model.system_prompts)
-            assert any("sql-guru" in p for p in dba_prompts), dba_prompts
+        model.system_prompts.clear()
+        r = await client.post("/chat", json={"message": "hi", "agent": "dba"})
+        assert r.status_code == 200
+        dba_prompts = list(model.system_prompts)
+        assert any("sql-guru" in p for p in dba_prompts), dba_prompts
 
-            model.system_prompts.clear()
-            r = await client.post("/chat", json={"message": "hi", "agent": "plain"})
-            assert r.status_code == 200
-            plain_prompts = list(model.system_prompts)
-            assert all("sql-guru" not in p for p in plain_prompts), plain_prompts
+        model.system_prompts.clear()
+        r = await client.post("/chat", json={"message": "hi", "agent": "plain"})
+        assert r.status_code == 200
+        plain_prompts = list(model.system_prompts)
+        assert all("sql-guru" not in p for p in plain_prompts), plain_prompts
 
 
 # ---------------------------------------------------------------------------
@@ -422,10 +423,13 @@ async def test_registry_cache_and_invalidate(persistence):
             except KeyError:
                 pass
 
-            # default agent resolves for any user
+            # default agent resolves per user (system prompt is rendered
+            # with the username), cached per user, shared across repeats
             d1 = await registry.resolve("default", "alice")
-            d2 = await registry.resolve("default", "bob")
-            assert d1 is d2
+            d2 = await registry.resolve("default", "alice")
+            d3 = await registry.resolve("default", "bob")
+            assert d1 is d2, "same user must reuse the cached graph"
+            assert d1 is not d3, "different users get their own rendered prompt"
 
 
 # ---------------------------------------------------------------------------
@@ -500,20 +504,12 @@ async def test_agent_can_reference_user_skill(persistence):
         md = await persistence.store.aget(ns, "/sql-guru/SKILL.md")
         assert md is not None and "SQL expert" in md.value["content"]
 
-        # the user skill shadows a global skill with the same name
-        async with await client_for(app, "boss", role="admin") as admin:
-            await admin.post("/agent/skills", json=skill_payload("sql-guru", "global version"))
-        r = await client.put("/agents/dba", json=agent_payload("dba", skills=["sql-guru"]))
-        assert r.status_code == 200, r.text
-        md = await persistence.store.aget(agent_skills_ns("alice", "dba"), "/sql-guru/SKILL.md")
-        assert "SQL expert" in md.value["content"], "user skill must shadow the global one"
-
-        # ...while another user (no own skill) gets the global version
+        # ...another user (no own skill of that name) cannot reference it:
+        # skills are fully per-user, there is no global fallback.
         async with await client_for(app, "bob") as bob:
             r = await bob.post("/agents", json=agent_payload("dba2", skills=["sql-guru"]))
-            assert r.status_code == 201, r.text
-        md = await persistence.store.aget(agent_skills_ns("bob", "dba2"), "/sql-guru/SKILL.md")
-        assert "global version" in md.value["content"]
+            assert r.status_code == 400, r.text
+            assert "Unknown skill" in r.json()["detail"]
 
         # run it: the skill reaches the system prompt
         model.system_prompts.clear()
@@ -552,3 +548,25 @@ async def test_agent_dry_run_test_endpoint(persistence):
 
         # unknown agent -> 404
         assert (await client.post("/agents/ghost/test")).status_code == 404
+
+
+async def test_system_prompt_renders_username_per_user(persistence):
+    """The {{username}} placeholder is replaced with the real user per run."""
+    from app.services.agent_configs import load_spec
+
+    alice = await load_spec(persistence.store, "default", "alice")
+    assert alice.system_prompt is not None
+    assert "{{username}}" not in alice.system_prompt
+    assert ".workspace/alice" in alice.system_prompt
+
+    budi = await load_spec(persistence.store, "default", "budi")
+    assert ".workspace/budi" in budi.system_prompt
+    assert ".workspace/alice" not in budi.system_prompt
+
+    # The model actually receives the rendered prompt during a chat.
+    model = RecordingModel()
+    app = make_app(persistence, model=model)
+    async with app.router.lifespan_context(app), await client_for(app, "alice") as client:
+        r = await client.post("/chat", json={"message": "hi"})
+        assert r.status_code == 200, r.text
+    assert any(".workspace/alice" in p for p in model.system_prompts), model.system_prompts

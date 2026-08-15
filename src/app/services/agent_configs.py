@@ -36,7 +36,6 @@ from ..core.config import settings
 from ..core.constants import (
     DEFAULT_AGENT_NAME,
     GLOBAL_AGENTS_NS,
-    GLOBAL_SKILLS_NS,
     SKILLS_SOURCE,
     agent_skills_ns,
     agent_skills_source,
@@ -188,18 +187,23 @@ def _validate_tools(tools: list[str] | None, known_servers: list[str]) -> None:
 
 
 async def _skill_source(
-    store: BaseStore, skill: str, username: str, *, allow_user_skills: bool
+    store: BaseStore, skill: str, username: str, *, allow_user_skills: bool = True
 ) -> tuple[tuple[str, ...], str]:
-    """Where a referenced skill lives: the user's own skills first, then global.
+    """Where a referenced skill lives: the user's own skills only.
 
+    Skills are fully per-user — there is no global pool to fall back to.
     Returns (namespace, key) or raises ValueError when the skill is unknown.
+    `allow_user_skills=False` (global agent configs) always raises: a shared
+    agent cannot reference a per-user skill.
     """
-    if allow_user_skills:
-        user_ns = user_skills_ns(username)
-        if await store.aget(user_ns, _skill_file_key(skill)) is not None:
-            return user_ns, _skill_file_key(skill)
-    if await store.aget(GLOBAL_SKILLS_NS, _skill_file_key(skill)) is not None:
-        return GLOBAL_SKILLS_NS, _skill_file_key(skill)
+    if not allow_user_skills:
+        raise ValueError(
+            "Global agent configs cannot reference skills — skills are per-user "
+            "(create a user-scoped agent to attach skills)"
+        )
+    user_ns = user_skills_ns(username)
+    if await store.aget(user_ns, _skill_file_key(skill)) is not None:
+        return user_ns, _skill_file_key(skill)
     raise ValueError(f"Unknown skill '{skill}'")
 
 
@@ -266,14 +270,36 @@ async def get_config(store: BaseStore, name: str, username: str) -> AgentConfigO
     return _to_out(item.value) if item is not None else None
 
 
+def _render_prompt(prompt: str | None, username: str) -> str | None:
+    """Substitute per-user placeholders in a system prompt.
+
+    Supported: ``{{username}}`` (and the aliases ``{{user}}`` /
+    ``{{user_id}}``). Rendered at spec-load time so each user's graph gets
+    its own prompt (the registry fingerprint covers it).
+    """
+    if not prompt:
+        return prompt
+    return (
+        prompt.replace("{{username}}", username)
+        .replace("{{user}}", username)
+        .replace("{{user_id}}", username)
+    )
+
+
 async def load_spec(store: BaseStore, name: str, username: str) -> AgentSpec | None:
     """Resolve a build-ready spec (user agent -> global agent -> builtin default)."""
     if name == DEFAULT_AGENT_NAME:
-        return default_spec()
+        spec = default_spec()
+        spec.system_prompt = _render_prompt(spec.system_prompt, username)
+        return spec
     item = await store.aget(user_agents_ns(username), name)
     if item is None:
         item = await store.aget(GLOBAL_AGENTS_NS, name)
-    return _spec_from_value(item.value) if item is not None else None
+    if item is None:
+        return None
+    spec = _spec_from_value(item.value)
+    spec.system_prompt = _render_prompt(spec.system_prompt, username)
+    return spec
 
 
 async def list_configs(

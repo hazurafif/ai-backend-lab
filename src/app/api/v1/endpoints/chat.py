@@ -73,14 +73,13 @@ async def _assert_thread_owner(thread_id: str, username: str) -> None:
 async def _resolve_agent(request: Request, name: str | None, username: str) -> CompiledStateGraph:
     """Resolve the compiled graph for an agent config (404 when unknown).
 
-    The built-in 'default' agent is served by `app.state.agent` (lifespan-
-    built, and overridable in tests); named agents come from the registry.
-    An unconfigured model (no DEEPAGENTS_MODEL, no default llm connection)
-    is a 503, not a 500.
+    Always goes through the registry: the system prompt is rendered per user
+    ({{username}} placeholders), so the default agent graph is per-user too
+    (registry cache keyed by the rendered fingerprint). An unconfigured
+    model (no DEEPAGENTS_MODEL, no default llm connection) is a 503, not a
+    500.
     """
     name = name or "default"
-    if name == "default" and request.app.state.agent is not None:
-        return request.app.state.agent
     try:
         return await request.app.state.agents.resolve(name, username)
     except KeyError:

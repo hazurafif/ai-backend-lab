@@ -515,3 +515,14 @@ class AgentRegistry:
     def invalidate(self) -> None:
         """Drop cached graphs; the next request rebuilds from current resources."""
         self._cache.clear()
+
+    def set_static_default(self, graph: CompiledStateGraph | None) -> None:
+        """Test hook: every resolve() returns this graph (or None to disable).
+
+        Replaces the static default passed at construction (e.g. when the
+        graph must be built with persistence instances that only exist after
+        startup). Chats resolve through the registry, so tests swapping only
+        `app.state.agent` must also call this for the chat path.
+        """
+        self._static_default = graph
+        self._cache.clear()

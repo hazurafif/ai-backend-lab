@@ -134,6 +134,7 @@ from langgraph.graph.state import CompiledStateGraph
 from .api.v1.routes import api_router
 from .core.config import settings
 from .core.database import persistence
+from .services import resources
 from .services import settings as runtime_settings
 from .services.agent import AgentRegistry, build_backend, build_extra_tools
 from .services.connections import llm_model_name, refresh_resolved_connections
@@ -161,6 +162,18 @@ def create_app(
         # Load runtime app settings (execute tool toggle, connection policy)
         # so DB values override .env from the first request on.
         await runtime_settings.refresh_app_settings()
+        # One-time migration: legacy global skills fold into the admin's own
+        # namespace (skills are fully per-user now).
+        try:
+            moved = await resources.migrate_global_skills(
+                persistence.store, settings.default_admin_username
+            )
+            if moved:
+                logger.info(
+                    "migrated %d legacy global skills to %s", moved, settings.default_admin_username
+                )
+        except Exception:
+            logger.exception("global-skill migration failed")
         # Shared durable filesystem backend: agent and /agent/* CRUD API write
         # to the same store (Postgres in production), so skills added via the
         # API are visible to the agent on the next run.
