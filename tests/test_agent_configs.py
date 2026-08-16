@@ -569,3 +569,124 @@ async def test_system_prompt_renders_username_per_user(persistence):
         r = await client.post("/chat", json={"message": "hi"})
         assert r.status_code == 200, r.text
     assert any(".workspace/alice" in p for p in model.system_prompts), model.system_prompts
+
+
+# ---------------------------------------------------------------------------
+# per-agent connection binding (multi-source model selection)
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_config_connection_round_trip(persistence):
+    """Agent configs carry a `connection` field through create/list/get/update."""
+    app = make_app(persistence, model=RecordingModel())
+    async with app.router.lifespan_context(app), await client_for(app, "alice") as client:
+        r = await client.post("/agents", json=agent_payload("research", connection="gemini"))
+        assert r.status_code == 201, r.text
+        assert r.json()["connection"] == "gemini"
+
+        r = await client.get("/agents/research")
+        assert r.status_code == 200 and r.json()["connection"] == "gemini"
+
+        r = await client.get("/agents")
+        assert any(c["name"] == "research" and c["connection"] == "gemini" for c in r.json())
+
+        # update keeps/replaces the binding
+        r = await client.put("/agents/research", json=agent_payload("research"))
+        assert r.status_code == 200 and r.json()["connection"] is None
+
+    # The spec round-trip preserves the binding.
+    from app.services.agent_configs import load_spec
+
+    spec = await load_spec(persistence.store, "research", "alice")
+    assert spec is not None and spec.connection is None
+
+
+async def test_resolve_model_uses_named_connection(persistence, monkeypatch):
+    """A named connection's base_url/token route the model (not the default's)."""
+    from app.services.agent_configs import AgentSpec
+
+    await persistence.connections.create(
+        {
+            "name": "default-src",
+            "kind": "llm",
+            "base_url": "https://default.test/v1",
+            "api_token": "sk-default",
+            "extra": {"model": "openai:gpt-4o-mini"},
+            "is_default": True,
+        }
+    )
+    await persistence.connections.create(
+        {
+            "name": "gemini",
+            "kind": "llm",
+            "base_url": "https://gemini.test/v1",
+            "api_token": "sk-gemini",
+            "extra": {"model": "gemini-2.5-pro"},
+            "is_default": False,
+        }
+    )
+    from app.services import connections as connection_service
+
+    await connection_service.refresh_resolved_connections()
+
+    captured: dict[str, Any] = {}
+
+    def fake_init(model_name: str, **kwargs):
+        captured["model"] = model_name
+        captured["kwargs"] = kwargs
+        return RecordingModel()
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init)
+
+    registry = AgentRegistry(
+        checkpointer=persistence.checkpointer,
+        store=persistence.store,
+        backend=build_backend(store=persistence.store),
+    )
+
+    # Bound to the non-default source -> its base_url + token are used.
+    spec = AgentSpec(
+        name="research",
+        model="gemini-2.5-pro",
+        connection="gemini",
+        system_prompt=None,
+        skills=None,
+        tools=None,
+        temperature=None,
+        interrupt_on=None,
+        thinking=None,
+    )
+    await registry._resolve_model(spec)
+    assert captured["model"] == "gemini-2.5-pro"
+    assert captured["kwargs"]["base_url"] == "https://gemini.test/v1"
+    assert captured["kwargs"]["api_key"] == "sk-gemini"
+
+    # Unbound -> the default connection is used.
+    spec.connection = None
+    await registry._resolve_model(spec)
+    assert captured["kwargs"]["base_url"] == "https://default.test/v1"
+    assert captured["kwargs"]["api_key"] == "sk-default"
+
+
+async def test_resolve_model_rejects_unknown_connection(persistence):
+    """A config referencing a missing connection fails loudly (503 at chat time)."""
+    from app.services.agent_configs import AgentSpec
+
+    registry = AgentRegistry(
+        checkpointer=persistence.checkpointer,
+        store=persistence.store,
+        backend=build_backend(store=persistence.store),
+    )
+    spec = AgentSpec(
+        name="research",
+        model="gemini-2.5-pro",
+        connection="ghost",
+        system_prompt=None,
+        skills=None,
+        tools=None,
+        temperature=None,
+        interrupt_on=None,
+        thinking=None,
+    )
+    with pytest.raises(ValueError, match="unknown llm connection 'ghost'"):
+        await registry._resolve_model(spec)

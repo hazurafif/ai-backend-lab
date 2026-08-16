@@ -206,7 +206,7 @@ async def test_agent_build_uses_admin_connection(persistence):
         thinking=None,
         builtin=True,
     )
-    model = registry._resolve_model(spec)
+    model = await registry._resolve_model(spec)
     assert isinstance(model, BaseChatModel)
     assert getattr(model, "openai_api_base", None) == "https://api.example.com/v1"
     assert model.openai_api_key.get_secret_value() == "sk-admin-key-1234"  # type: ignore[attr-defined]

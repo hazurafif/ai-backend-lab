@@ -238,7 +238,7 @@ async def test_agent_model_uses_llm_connection(persistence):
         thinking=None,
         builtin=True,
     )
-    model = registry._resolve_model(spec)
+    model = await registry._resolve_model(spec)
     assert isinstance(model, BaseChatModel)
     assert getattr(model, "openai_api_base", None) == "http://localhost:9999/v1"
     assert model.openai_api_key.get_secret_value() == "sk-conn-token"
@@ -246,7 +246,7 @@ async def test_agent_model_uses_llm_connection(persistence):
     await database.persistence.connections.delete("openai")
     await connection_service.refresh_resolved_connections()
     with pytest.raises(ValueError, match="No default 'llm' connection"):
-        registry._resolve_model(spec)
+        await registry._resolve_model(spec)
 
 
 async def test_embeddings_uses_embeddings_connection(monkeypatch):
@@ -271,3 +271,171 @@ async def test_embeddings_uses_embeddings_connection(monkeypatch):
     await database.persistence.connections.delete("emb")
     await connection_service.refresh_resolved_connections()
     assert isinstance(build_embeddings(), LocalEmbeddings)
+
+
+# ---------------------------------------------------------------------------
+# model discovery (GET /connections/models)
+# ---------------------------------------------------------------------------
+
+
+def _models_handler(url: str) -> httpx.Response:
+    if "gemini" in url:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "gemini-2.5-pro", "created": 100, "owned_by": "google"},
+                    {"id": "gemini-2.5-flash", "created": 101, "owned_by": "google"},
+                ]
+            },
+        )
+    return httpx.Response(
+        200,
+        json={
+            "data": [
+                {"id": "openai:deepseek-v4-flash", "created": 200, "owned_by": "opencode"},
+                {"id": "openai:deepseek-v4-pro", "created": 201, "owned_by": "opencode"},
+            ]
+        },
+    )
+
+
+async def test_discover_models_aggregates_all_llm_sources():
+    """Every saved llm connection is queried; models are grouped per source."""
+    await database.persistence.connections.create(
+        {
+            "name": "opencode",
+            "kind": "llm",
+            "base_url": "https://opencode.test/v1",
+            "api_token": "sk-1",
+            "extra": {"model": "openai:deepseek-v4-flash"},
+            "is_default": True,
+        }
+    )
+    await database.persistence.connections.create(
+        {
+            "name": "gemini",
+            "kind": "llm",
+            "base_url": "https://gemini.test/v1",
+            "api_token": "sk-2",
+            "extra": {},
+            "is_default": False,
+        }
+    )
+    # Non-llm connections are never queried.
+    await database.persistence.connections.create(
+        {
+            "name": "emb-a",
+            "kind": "embeddings",
+            "base_url": "http://localhost:9999/v1",
+            "api_token": "sk-3",
+            "extra": {"model": "qwen-72b"},
+            "is_default": True,
+        }
+    )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: _models_handler(str(request.url)))
+    )
+    try:
+        sources = await connection_service.discover_models(client=client)
+    finally:
+        await client.aclose()
+
+    by_name = {s["connection"]: s for s in sources}
+    assert set(by_name) == {"opencode", "gemini"}, sources
+    assert by_name["opencode"]["is_default"] is True
+    assert by_name["opencode"]["error"] is None
+    assert [m["id"] for m in by_name["opencode"]["models"]] == [
+        "openai:deepseek-v4-flash",
+        "openai:deepseek-v4-pro",
+    ]
+    assert [m["id"] for m in by_name["gemini"]["models"]] == [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ]
+
+
+async def test_discover_models_reports_source_errors():
+    """A failing source is reported with `error`; the other sources still work."""
+    await database.persistence.connections.create(
+        {
+            "name": "broken",
+            "kind": "llm",
+            "base_url": "https://broken.test/v1",
+            "api_token": "sk-1",
+            "extra": {},
+            "is_default": False,
+        }
+    )
+    await database.persistence.connections.create(
+        {
+            "name": "nourl",
+            "kind": "llm",
+            "base_url": None,
+            "api_token": "sk-2",
+            "extra": {},
+            "is_default": False,
+        }
+    )
+    await database.persistence.connections.create(
+        {
+            "name": "ok",
+            "kind": "llm",
+            "base_url": "https://ok.test/v1",
+            "api_token": "sk-3",
+            "extra": {},
+            "is_default": False,
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "broken" in str(request.url):
+            return httpx.Response(500, text="boom")
+        if "ok" in str(request.url):
+            return httpx.Response(200, json={"data": [{"id": "fine-model"}]})
+        raise AssertionError("nourl must not be queried")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        sources = await connection_service.discover_models(client=client)
+    finally:
+        await client.aclose()
+
+    by_name = {s["connection"]: s for s in sources}
+    assert "Server error" in by_name["broken"]["error"]
+    assert by_name["broken"]["models"] == []
+    assert "no base_url" in by_name["nourl"]["error"]
+    assert by_name["ok"]["error"] is None
+    assert [m["id"] for m in by_name["ok"]["models"]] == ["fine-model"]
+
+
+async def test_models_endpoint_admin_only(monkeypatch):
+    """GET /connections/models aggregates sources for admins; 403 for users."""
+    import app.services.connections as connections_service_mod
+
+    async def fake_discover():
+        return [
+            {
+                "connection": "opencode",
+                "base_url": "https://opencode.test/v1",
+                "is_default": True,
+                "models": [{"id": "openai:deepseek-v4-flash"}],
+                "error": None,
+            }
+        ]
+
+    monkeypatch.setattr(connections_service_mod, "discover_models", fake_discover)
+
+    admin_client, _ = await client_for(role="admin")
+    async with admin_client:
+        r = await admin_client.get("/connections/models")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body[0]["connection"] == "opencode"
+        assert body[0]["models"][0]["id"] == "openai:deepseek-v4-flash"
+
+    user_client, _ = await client_for(role="user")
+    async with user_client:
+        r = await user_client.get("/connections/models")
+        assert r.status_code == 403, r.text

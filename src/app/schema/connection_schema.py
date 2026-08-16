@@ -66,3 +66,21 @@ class ConnectionOut(BaseModel):
     is_default: bool = False
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class ModelOut(BaseModel):
+    """One model id exposed by a connection's OpenAI-compatible /models endpoint."""
+
+    id: str
+    created: int | None = None
+    owned_by: str | None = None
+
+
+class ModelsSourceOut(BaseModel):
+    """A connection's model list (best-effort: `error` when its endpoint failed)."""
+
+    connection: str
+    base_url: str | None = None
+    is_default: bool = False
+    models: list[ModelOut] = Field(default_factory=list)
+    error: str | None = None

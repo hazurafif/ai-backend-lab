@@ -64,6 +64,7 @@ class AgentSpec:
     temperature: float | None
     interrupt_on: dict[str, bool] | None
     thinking: str | None  # reasoning-effort level: none..minimal..max
+    connection: str | None = None  # saved llm connection name; None = the default
     owner: str = _SYSTEM_OWNER
     builtin: bool = False
     description: str | None = None
@@ -92,6 +93,7 @@ class AgentSpec:
             payload = json.dumps(
                 [
                     self.model,
+                    self.connection,
                     self.system_prompt,
                     self.skills,
                     self.tools,
@@ -136,6 +138,7 @@ def _value(cfg: AgentConfigIn, *, owner: str, created_at: str | None = None) -> 
         "name": cfg.name,
         "description": cfg.description,
         "model": cfg.model,
+        "connection": cfg.connection,
         "system_prompt": cfg.system_prompt,
         "skills": cfg.skills,
         "tools": cfg.tools,
@@ -163,6 +166,7 @@ def _spec_from_value(value: dict[str, Any]) -> AgentSpec:
         temperature=value.get("temperature"),
         interrupt_on=value.get("interrupt_on"),
         thinking=value.get("thinking"),
+        connection=value.get("connection"),
         owner=value.get("owner") or _GLOBAL_OWNER,
         description=value.get("description"),
         created_at=value.get("created_at"),

@@ -176,17 +176,17 @@ async def test_resolve_model_passes_reasoning_effort(persistence):
         store=persistence.store,
         backend=build_backend(store=persistence.store),
     )
-    model = registry._resolve_model(_spec("xhigh"))
+    model = await registry._resolve_model(_spec("xhigh"))
     assert model.reasoning_effort == "xhigh"  # type: ignore[attr-defined]
     assert model.model_name == "gpt-5.2"
 
     # combined with temperature (gpt-4o family keeps the top-level param)
-    model = registry._resolve_model(_spec("max", temperature=0.3, model="openai:gpt-4o-mini"))
+    model = await registry._resolve_model(_spec("max", temperature=0.3, model="openai:gpt-4o-mini"))
     assert model.reasoning_effort == "max"  # type: ignore[attr-defined]
     assert model.temperature == 0.3
 
     # explicit spec model wins over the connection's model
-    model = registry._resolve_model(_spec(None, model="openai:gpt-4o-mini"))
+    model = await registry._resolve_model(_spec(None, model="openai:gpt-4o-mini"))
     assert model.model_name == "gpt-4o-mini"
 
 
@@ -208,7 +208,7 @@ async def test_resolve_model_thinking_with_connection(persistence):
         store=persistence.store,
         backend=build_backend(store=persistence.store),
     )
-    model = registry._resolve_model(_spec("high"))
+    model = await registry._resolve_model(_spec("high"))
     assert model.reasoning_effort == "high"  # type: ignore[attr-defined]
     assert model.openai_api_base == BASE_URL  # type: ignore[attr-defined]
     assert model.openai_api_key.get_secret_value() == API_KEY  # type: ignore[attr-defined]
@@ -242,13 +242,13 @@ async def test_resolve_model_declares_text_only_profile(persistence):
         backend=build_backend(store=persistence.store),
     )
 
-    model = registry._resolve_model(_spec(None, model="openai:deepseek-v4-flash"))
+    model = await registry._resolve_model(_spec(None, model="openai:deepseek-v4-flash"))
     assert isinstance(model, BaseChatModel)
     assert model.profile is not None
     for field in ("image_inputs", "audio_inputs", "video_inputs", "pdf_inputs"):
         assert model.profile[field] is False
 
-    vision = registry._resolve_model(_spec(None, model="openai:gpt-4o"))
+    vision = await registry._resolve_model(_spec(None, model="openai:gpt-4o"))
     assert vision.profile is not None
     assert vision.profile["image_inputs"] is True
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from ..schema.connection_schema import ConnectionKind
 
 # Kinds resolved into the cache; consumers read these synchronously.
@@ -74,6 +76,82 @@ def llm_model_name() -> str | None:
     return extra.get("model") or None
 
 
+async def fetch_models(
+    conn: dict, *, request_timeout: float | None = 8.0, client: httpx.AsyncClient | None = None
+) -> list[dict]:
+    """Model ids of one connection via its OpenAI-compatible `GET {base_url}/models`.
+
+    Raises on missing base_url, non-2xx responses and network errors; callers
+    (e.g. `discover_models`) surface per-source failures as `error` entries.
+    `client` is a test hook (httpx.MockTransport) — headers still come from
+    the connection row.
+    """
+    base_url = (conn.get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise ValueError("connection has no base_url")
+    headers: dict[str, str] = {}
+    token = conn.get("api_token")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    owns_client = client is None
+    client = client or httpx.AsyncClient(timeout=request_timeout, headers=headers)
+    try:
+        resp = await client.get(f"{base_url}/models")
+        resp.raise_for_status()
+        data = resp.json()
+    finally:
+        if owns_client:
+            await client.aclose()
+    out: list[dict] = []
+    for model in data.get("data") or []:
+        if not isinstance(model, dict) or not model.get("id"):
+            continue
+        out.append(
+            {"id": model["id"], "created": model.get("created"), "owned_by": model.get("owned_by")}
+        )
+    return out
+
+
+async def discover_models(client: httpx.AsyncClient | None = None) -> list[dict]:
+    """Aggregate model lists from every saved llm connection (best-effort).
+
+    Queries each `llm` connection's /models endpoint; a failing source is
+    reported as `{"error": ...}` instead of failing the whole call, so the
+    frontend can render a picker across all configured sources (opencode,
+    gemini, openrouter, ...) and show per-source health.
+    """
+    from ..core.database import persistence
+
+    rows = await persistence.connections.list()
+    sources: list[dict] = []
+    for row in rows:
+        if row.get("kind") != "llm":
+            continue
+        entry: dict[str, Any] = {
+            "connection": row["name"],
+            "base_url": row.get("base_url"),
+            "is_default": bool(row.get("is_default")),
+            "models": [],
+            "error": None,
+        }
+        try:
+            entry["models"] = await fetch_models(row, client=client)
+        except Exception as exc:
+            entry["error"] = str(exc)
+        sources.append(entry)
+    return sources
+
+
+def model_kwargs_from(conn: dict) -> dict[str, Any]:
+    """init_chat_model kwargs (base_url + api_key) for a specific connection row."""
+    kwargs: dict[str, Any] = {}
+    if conn.get("base_url"):
+        kwargs["base_url"] = conn["base_url"]
+    if conn.get("api_token"):
+        kwargs["api_key"] = conn["api_token"]
+    return kwargs
+
+
 def mask_token(token: str | None) -> str | None:
     """Mask an api_token for API responses: first 4 + last 4 chars.
 
@@ -96,9 +174,12 @@ def to_out(row: dict) -> dict:
 
 
 __all__ = [
+    "discover_models",
+    "fetch_models",
     "llm_model_kwargs",
     "llm_model_name",
     "mask_token",
+    "model_kwargs_from",
     "refresh_resolved_connections",
     "resolved_connection",
     "resolved_embeddings",

@@ -51,6 +51,16 @@ class AgentConfigIn(BaseModel):
             "'anthropic:claude-sonnet-4-5', 'google_genai:gemini-2.5-flash'"
         ),
     )
+    connection: str | None = Field(
+        default=None,
+        description=(
+            "Saved llm connection (see /connections) serving this agent's "
+            "model — its base_url + api_token route the completions. None = "
+            "the default llm connection. Combined with the aggregated model "
+            "list (GET /connections/models) this lets each agent pick a model "
+            "from any configured source."
+        ),
+    )
     system_prompt: str | None = Field(
         default=None, description="Agent instructions; None = fall back to the default prompt"
     )
@@ -100,6 +110,12 @@ class AgentConfigOut(BaseModel):
             "Provider:model string. None on the builtin default agent when "
             "no default llm connection is saved — its extra.model is used "
             "then (there is no env fallback)."
+        ),
+    )
+    connection: str | None = Field(
+        default=None,
+        description=(
+            "Saved llm connection serving this agent's model; None = the default llm connection."
         ),
     )
     system_prompt: str | None = None

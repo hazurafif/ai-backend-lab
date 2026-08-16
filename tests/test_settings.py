@@ -202,13 +202,13 @@ async def test_resolve_model_requires_db_connection(persistence):
         builtin=True,
     )
     with pytest.raises(ValueError, match="No default 'llm' connection"):
-        _registry(persistence)._resolve_model(spec)
+        await _registry(persistence)._resolve_model(spec)
 
     # No env fallback exists: even a saved model cannot build without a
     # connection (spec model + connection credentials are one unit).
     spec.model = "openai:gpt-4o-mini"
     with pytest.raises(ValueError, match="No default 'llm' connection"):
-        _registry(persistence)._resolve_model(spec)
+        await _registry(persistence)._resolve_model(spec)
 
 
 async def test_resolve_model_uses_db_connection_when_present(persistence):
@@ -240,7 +240,7 @@ async def test_resolve_model_uses_db_connection_when_present(persistence):
         thinking=None,
         builtin=True,
     )
-    model: BaseChatModel = _registry(persistence)._resolve_model(spec)
+    model: BaseChatModel = await _registry(persistence)._resolve_model(spec)
     assert isinstance(model, BaseChatModel)
     assert getattr(model, "openai_api_base", None) == "https://api.example.com/v1"
     assert model.openai_api_key.get_secret_value() == "sk-db-token"  # type: ignore[attr-defined]
@@ -277,14 +277,14 @@ async def test_resolve_model_uses_connection_model_when_spec_has_none(persistenc
         thinking=None,
         builtin=True,
     )
-    model: BaseChatModel = _registry(persistence)._resolve_model(spec)
+    model: BaseChatModel = await _registry(persistence)._resolve_model(spec)
     assert isinstance(model, BaseChatModel)
     assert getattr(model, "openai_api_base", None) == "https://api.example.com/v1"
     assert model.model_name == "deepseek-v4-flash"
 
     # An explicit spec model still wins over the connection's model.
     spec.model = "openai:gpt-4o-mini"
-    model = _registry(persistence)._resolve_model(spec)
+    model = await _registry(persistence)._resolve_model(spec)
     assert model.model_name == "gpt-4o-mini"
 
 
@@ -310,7 +310,7 @@ async def test_resolve_model_requires_model_when_unconfigured(persistence, monke
         builtin=True,
     )
     with pytest.raises(ValueError, match="No model configured"):
-        _registry(persistence)._resolve_model(spec)
+        await _registry(persistence)._resolve_model(spec)
 
 
 async def test_app_starts_without_model_then_configures_at_runtime(persistence, monkeypatch):

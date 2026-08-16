@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from ....core.database import persistence
 from ....core.dependencies import get_admin_user
 from ....core.exceptions import Conflict, NotFound
-from ....schema.connection_schema import ConnectionIn, ConnectionOut
+from ....schema.connection_schema import ConnectionIn, ConnectionOut, ModelsSourceOut
 from ....services import connections as connection_service
 from ....services.kb.vectorstore import reset_vector_store
 
@@ -26,6 +26,20 @@ async def _mutated(request: Request, kind: str) -> None:
     request.app.state.agents.invalidate()
     if kind in ("embeddings", "weaviate"):
         reset_vector_store()  # next KB build reads the new connection
+
+
+@router.get("/models", response_model=list[ModelsSourceOut])
+async def list_available_models(_: dict = Depends(get_admin_user)):
+    """Model ids available on every saved llm connection, aggregated per source.
+
+    Queries each connection's OpenAI-compatible `GET {base_url}/models`
+    endpoint (auth header from the connection's token). A failing source is
+    reported with `error` instead of failing the whole request, so the
+    frontend can build one model picker across all sources (opencode,
+    gemini, openrouter, ...) and show per-source health. Declared before
+    `/{name}` so 'models' is never matched as a connection name.
+    """
+    return await connection_service.discover_models()
 
 
 @router.get("", response_model=list[ConnectionOut])

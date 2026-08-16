@@ -57,7 +57,7 @@ from ..core.database import persistence
 from ..schema.agent_schema import SkillFileIn, SkillIn
 from ..services import resources
 from ..services import settings as runtime_settings
-from ..services.connections import llm_model_kwargs, llm_model_name
+from ..services.connections import llm_model_kwargs, llm_model_name, model_kwargs_from
 from ..services.kb.tool import build_kb_search_tool
 from ..services.searxng import build_search_tool
 from .agent_configs import AgentSpec, load_spec
@@ -581,7 +581,7 @@ class AgentRegistry:
             self._cache.move_to_end(key)
             return cached
         tools = await self._select_tools(spec, username)
-        model = self._resolve_model(spec)
+        model = await self._resolve_model(spec)
         graph = build_agent(
             checkpointer=self._checkpointer,
             store=self._store,
@@ -623,22 +623,36 @@ class AgentRegistry:
                     selected.append(by_name[tool_name])
         return selected
 
-    def _resolve_model(self, spec: AgentSpec) -> str | BaseChatModel:
+    async def _resolve_model(self, spec: AgentSpec) -> str | BaseChatModel:
+        """The chat model for an agent spec (per-agent connection binding).
+
+        When the spec names a saved `connection`, its base_url + api_token
+        route the completions (so a model picked from any source in
+        `GET /connections/models` works); otherwise the default llm
+        connection is used. There is no env fallback — without a saved
+        connection the agent refuses to build (never silently env-defaults).
+        """
         if self._model_factory is not None:
             return self._model_factory(spec.model, spec.temperature)
-        # The saved `llm` connection (base URL + API token, see /connections,
-        # admin-managed) is the ONLY credential source — there is no .env
-        # fallback. Without it the agent refuses to build so it never silently
-        # runs on env credentials.
-        kwargs = llm_model_kwargs()
+        conn = None
+        if spec.connection:
+            conn = await persistence.connections.get(spec.connection)
+            if conn is None or conn.get("kind") != "llm":
+                raise ValueError(
+                    f"Agent '{spec.name}' references unknown llm connection "
+                    f"'{spec.connection}' — save it via POST /connections first"
+                )
+        kwargs = model_kwargs_from(conn) if conn is not None else llm_model_kwargs()
         if spec.temperature is not None:
             kwargs["temperature"] = spec.temperature
         if spec.thinking is not None:
             kwargs["reasoning_effort"] = spec.thinking
-        # Model name: the spec's explicit model wins; otherwise the default
-        # llm connection's extra.model; otherwise nothing is configured and
-        # the agent refuses to build (no silent default model).
-        model_name = spec.model or llm_model_name()
+        # Model name: the spec's explicit model wins; otherwise the bound
+        # connection's extra.model; otherwise nothing is configured and the
+        # agent refuses to build (no silent default model).
+        model_name = (
+            spec.model or ((conn or {}).get("extra") or {}).get("model") or llm_model_name()
+        )
         if model_name is None:
             raise ValueError(
                 "No model configured: save a default llm connection carrying "
@@ -679,7 +693,7 @@ class AgentRegistry:
         spec = await load_spec(self._store, name, username)
         if spec is None:
             raise KeyError(name)
-        return self._resolve_model(spec)
+        return await self._resolve_model(spec)
 
     def update_mcp_tools(
         self,
