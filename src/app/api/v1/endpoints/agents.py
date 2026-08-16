@@ -14,8 +14,7 @@ from ....core.database import persistence
 from ....core.dependencies import get_current_user
 from ....core.exceptions import BadRequest, Conflict, NotFound, PermissionDenied
 from ....schema.agent_config_schema import AgentConfigIn, AgentConfigOut
-from ....services import agent_configs
-from ....services.mcp import mcp_servers
+from ....services import agent_configs, resources
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -40,7 +39,9 @@ async def create_agent(
             persistence.store,
             body,
             current_user["username"],
-            known_servers=mcp_servers.names,
+            known_servers=await resources.stored_tool_server_names(
+                persistence.store, current_user["username"]
+            ),
         )
     except KeyError as exc:
         raise Conflict(f"Name already taken: {exc.args[0]}") from None
@@ -102,7 +103,9 @@ async def update_agent(
             name,
             body,
             current_user["username"],
-            known_servers=mcp_servers.names,
+            known_servers=await resources.stored_tool_server_names(
+                persistence.store, current_user["username"]
+            ),
         )
     except KeyError:
         raise NotFound(f"Agent '{name}' not found") from None

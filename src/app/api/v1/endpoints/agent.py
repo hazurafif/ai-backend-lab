@@ -1,7 +1,14 @@
 """Agent resource routes: skills + MCP tool server CRUD, persisted in the store.
 
+Everything is per-user: skills live under the caller's own skills namespace
+and MCP tool servers under the caller's own MCP namespace (see
+`services/resources`). The legacy /agent/tools paths are kept for backwards
+compatibility — they now address the caller's own servers; the canonical
+per-user CRUD is /mcp/servers.
+
 Skills apply on the next agent run (SkillsMiddleware reads the backend per
-run); tool server changes apply on restart or POST /agent/tools/reconnect.
+run); tool server changes apply on the next connect (lazy per user) or
+POST /agent/tools/reconnect.
 """
 
 from __future__ import annotations
@@ -11,10 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ....core.constants import user_skills_ns
 from ....core.database import persistence
 from ....core.dependencies import get_admin_user, get_current_user
-from ....core.exceptions import Conflict, NotFound, ServiceUnavailable
-from ....schema.agent_schema import SkillIn, SkillOut, ToolServerIn, ToolServerOut
+from ....core.exceptions import Conflict, NotFound
+from ....schema.agent_schema import SkillIn, SkillOut
 from ....services import resources
-from ....services.agent import AgentRegistry, build_extra_tools
 from ....services.mcp import mcp_servers
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -130,78 +136,89 @@ async def delete_skill_file(
 
 
 # ---------------------------------------------------------------------------
-# MCP tool servers
+# MCP tool servers (per-user: the caller's own servers; canonical CRUD at
+# /mcp/servers — these legacy paths keep working, scoped to the caller)
 # ---------------------------------------------------------------------------
 
 
-@router.get("/tools", response_model=list[ToolServerOut])
-async def list_tool_servers(_: dict = Depends(get_admin_user)):
-    return await resources.list_tool_servers(persistence.store)
+@router.get("/tools", response_model=list)
+async def list_tool_servers(current_user: dict = Depends(get_current_user)):
+    return await resources.list_tool_servers(persistence.store, current_user["username"])
 
 
-@router.post("/tools", response_model=ToolServerOut, status_code=201)
+@router.post("/tools", response_model=dict, status_code=201)
 async def create_tool_server(
-    body: ToolServerIn, request: Request, _: dict = Depends(get_admin_user)
+    body: dict, request: Request, current_user: dict = Depends(get_current_user)
 ):
-    if await resources.get_tool_server(persistence.store, body.name):
-        raise Conflict(f"Tool server '{body.name}' already exists")
-    out = await resources.create_tool_server(persistence.store, body)
+    from pydantic import ValidationError
+
+    from ....schema.agent_schema import ToolServerIn
+
+    try:
+        server = ToolServerIn.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from None
+    if await resources.get_tool_server(persistence.store, current_user["username"], server.name):
+        raise Conflict(f"Tool server '{server.name}' already exists")
+    out = await resources.create_tool_server(persistence.store, current_user["username"], server)
+    await mcp_servers.invalidate(current_user["username"])
     request.app.state.agents.invalidate()
-    return out
+    return out.model_dump()
 
 
-@router.get("/tools/{name}", response_model=ToolServerOut)
-async def get_tool_server(name: str, _: dict = Depends(get_admin_user)):
-    server = await resources.get_tool_server(persistence.store, name)
+@router.get("/tools/{name}", response_model=dict)
+async def get_tool_server(name: str, current_user: dict = Depends(get_current_user)):
+    server = await resources.get_tool_server(persistence.store, current_user["username"], name)
     if server is None:
         raise NotFound("Tool server not found")
-    return server
+    return server.model_dump()
 
 
-@router.put("/tools/{name}", response_model=ToolServerOut)
+@router.put("/tools/{name}", response_model=dict)
 async def update_tool_server(
-    name: str, body: ToolServerIn, request: Request, _: dict = Depends(get_admin_user)
+    name: str, body: dict, request: Request, current_user: dict = Depends(get_current_user)
 ):
+    from pydantic import ValidationError
+
+    from ....schema.agent_schema import ToolServerIn
+
     try:
-        out = await resources.update_tool_server(persistence.store, name, body)
+        server = ToolServerIn.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from None
+    try:
+        out = await resources.update_tool_server(
+            persistence.store, current_user["username"], name, server
+        )
     except KeyError:
         raise NotFound("Tool server not found") from None
+    await mcp_servers.invalidate(current_user["username"])
     request.app.state.agents.invalidate()
-    return out
+    return out.model_dump()
 
 
 @router.delete("/tools/{name}", status_code=204)
-async def delete_tool_server(name: str, request: Request, _: dict = Depends(get_admin_user)):
-    if not await resources.delete_tool_server(persistence.store, name):
+async def delete_tool_server(
+    name: str, request: Request, current_user: dict = Depends(get_current_user)
+):
+    if not await resources.delete_tool_server(persistence.store, current_user["username"], name):
         raise NotFound("Tool server not found")
+    await mcp_servers.invalidate(current_user["username"])
     request.app.state.agents.invalidate()
 
 
 @router.post("/tools/reconnect")
-async def reconnect_tools(request: Request, _: dict = Depends(get_admin_user)):
-    """Reconnect MCP servers from the store and rebuild the agent (live).
+async def reconnect_tools(request: Request, current_user: dict = Depends(get_current_user)):
+    """Reconnect the caller's MCP servers from their stored config (live).
 
     Unreachable servers are recorded per-server (not fatal) so the healthy
-    ones still load; the response reports them under `failed`. Total failure
-    to rebuild the agent (e.g. no model configured yet) is a 503, not a 500.
+    ones still load; the response reports them under `failed`. Cached agent
+    graphs are dropped so the next run picks up the new tool set.
     """
-    try:
-        await mcp_servers.connect(store=persistence.store)
-    except Exception as exc:
-        raise ServiceUnavailable(f"MCP connect failed: {exc}") from None
-    registry: AgentRegistry = request.app.state.agents
-    registry.update_mcp_tools(mcp_servers.tools, mcp_servers.tools_by_server)
-    registry.update_extra_tools(build_extra_tools() or None)
-    try:
-        request.app.state.agent = await registry.resolve("default", "anonymous")
-    except ValueError as exc:
-        # Reconnect succeeded but no model is configured yet — keep the
-        # server usable (chats 503 until a connection exists).
-        request.app.state.agent = None
-        raise ServiceUnavailable(str(exc)) from None
-    request.app.state.backend = registry.backend
+    instance = await mcp_servers.connect(current_user["username"], persistence.store)
+    request.app.state.agents.invalidate()
     return {
-        "connected": [n for n in mcp_servers.names if n not in mcp_servers.failed],
-        "tools": len(mcp_servers.tools),
-        "failed": mcp_servers.failed,
+        "connected": [n for n in instance.names if n not in instance.failed],
+        "tools": len(instance.tools),
+        "failed": instance.failed,
     }

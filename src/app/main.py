@@ -83,11 +83,31 @@ Endpoints:
                                     configured MCP server (server_hint or fan-out;
                                     CallToolResult passthrough: 200 with isError,
                                     502 transport, 404 no match)
-  GET|POST /connections            -> provider connections CRUD (admin; base URL +
-                                    API token saved instead of .env; the agent LLM
-                                    and KB embeddings resolve the default `llm` /
+  GET  /users/me/setup             -> the user's setup state (admin-managed
+                                    llm connection read-only + effective
+                                    model + the user's preferences and MCP
+                                    servers) — frontend startup screen
+  POST /users/me/onboarding       -> one-shot setup of per-user data:
+                                    preferences + MCP tool servers (the
+                                    completions API itself is admin-only)
+  GET|POST /connections           -> provider connections CRUD (admin-only,
+                                    global: base URL + API token saved
+                                    instead of .env; the agent LLM and KB
+                                    embeddings resolve the default `llm` /
                                     `embeddings` connection)
   GET|PUT|DELETE /connections/{name}-> connection detail / replace / delete
+  GET  /users/me/preferences      -> per-user preferences (web search toggle,
+                                    hide thinking / hide tool calls), stored
+                                    in the DB (GET/PATCH /users/me/preferences)
+  GET|POST /mcp/servers           -> per-user MCP tool server CRUD (each user
+                                    configures their own MCP connections; the
+                                    agent + tools proxy only see the caller's
+                                    servers; POST /mcp/servers/reconnect
+                                    reconnects them live)
+  GET|PUT|DELETE /mcp/servers/{name}
+  GET|POST /agent/tools           -> legacy alias of the per-user MCP server
+                                    CRUD (scoped to the caller; reconnect at
+                                    POST /agent/tools/reconnect)
   GET|PUT /settings                -> runtime app settings (admin; execute tool
                                     toggle + HITL interrupt_on + connection
                                     policy, DB overrides .env)
@@ -158,14 +178,16 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await persistence.start()
-        # Resolve saved provider connections (default llm/embeddings) so the
-        # agent model + KB embeddings use them instead of .env credentials.
+        # Resolve saved provider connections (default llm/embeddings, admin-
+        # managed and global) so the agent model + KB embeddings use them
+        # instead of .env credentials.
         await refresh_resolved_connections()
         # Load runtime app settings (execute tool toggle, connection policy)
         # so DB values override .env from the first request on.
         await runtime_settings.refresh_app_settings()
-        # One-time migration: legacy global skills fold into the admin's own
-        # namespace (skills are fully per-user now).
+        # One-time migrations: legacy global skills + MCP tool servers fold
+        # into the default admin's own namespace (skills and MCP servers are
+        # fully per-user now).
         try:
             moved = await resources.migrate_global_skills(
                 persistence.store, settings.default_admin_username
@@ -174,8 +196,17 @@ def create_app(
                 logger.info(
                     "migrated %d legacy global skills to %s", moved, settings.default_admin_username
                 )
+            moved = await resources.migrate_global_tool_servers(
+                persistence.store, settings.default_admin_username
+            )
+            if moved:
+                logger.info(
+                    "migrated %d legacy global MCP tool servers to %s",
+                    moved,
+                    settings.default_admin_username,
+                )
         except Exception:
-            logger.exception("global-skill migration failed")
+            logger.exception("global-resource migration failed")
         # Shared durable filesystem backend: agent and /agent/* CRUD API write
         # to the same store (Postgres in production), so skills added via the
         # API are visible to the agent on the next run.
@@ -186,21 +217,23 @@ def create_app(
             await asyncio.to_thread(workspace_service.ensure_git)
         except Exception:
             logger.exception("workspace git init failed")
-        try:
-            await mcp_servers.connect(store=persistence.store)
-        except Exception:
-            logger.exception("MCP connect failed; continuing without MCP tools")
         search_tool = build_extra_tools()  # list: web_search + kb search tool (when configured)
+
+        async def user_mcp(username: str) -> tuple[list, dict]:
+            """Per-user MCP tools: lazily connect the user's own servers."""
+            instance = await mcp_servers.get(username, persistence.store)
+            return instance.tools, instance.tools_by_server
+
         # Agent registry: lazy graph factory keyed by agent config (model +
-        # system prompt + skills + tools). `agent` (tests) becomes the static
-        # default; every resolve() then returns that graph.
+        # system prompt + skills + tools) AND username (BYOK model creds +
+        # per-user MCP tools). `agent` (tests) becomes the static default;
+        # every resolve() then returns that graph.
         app.state.agents = agent_registry or AgentRegistry(
             checkpointer=persistence.checkpointer,
             store=persistence.store,
             backend=app.state.backend,
-            mcp_tools=mcp_servers.tools,
+            mcp_provider=user_mcp,
             extra_tools=search_tool or None,
-            tools_by_server=mcp_servers.tools_by_server,
             static_default=agent,
         )
         # Registries injected from outside (tests) may hold pre-start
@@ -217,18 +250,16 @@ def create_app(
         try:
             app.state.agent = await app.state.agents.resolve("default", "anonymous")
             logger.info(
-                "Agent ready: model=%s persistence=%s mcp=%s searxng=%s execute=%s",
+                "Agent ready: model=%s persistence=%s execute=%s",
                 settings.model or llm_model_name(),
                 persistence.backend_name,
-                mcp_servers.names or "none",
-                "enabled" if search_tool else "not configured",
                 "enabled" if runtime_settings.execute_enabled() else "disabled",
             )
         except ValueError as exc:
             app.state.agent = None
             logger.warning(
                 "Agent not configured yet (%s) — the app is up; chats return 503 "
-                "until a default llm connection (POST /connections) or "
+                "until a default llm connection (POST /connections, admin) or "
                 "DEEPAGENTS_MODEL is set.",
                 exc,
             )

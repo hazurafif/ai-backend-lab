@@ -529,7 +529,7 @@ async def test_tool_server_crud_and_store_first_config(persistence):
     # config loading: store wins over env/file; disabled entries skipped
     from app.services.resources import load_tool_server_configs
 
-    cfg = await load_tool_server_configs(persistence.store)
+    cfg = await load_tool_server_configs(persistence.store, "tester")
     assert list(cfg) == ["cli-tool"], cfg
     assert cfg["cli-tool"]["command"] == "other-tool"
 

@@ -3,18 +3,21 @@
 Everything is persisted in the LangGraph store — Postgres-backed in production
 (`DATABASE_URI` set), in-memory in dev — under well-known namespaces:
 
-- `("agent", "skills")`      — key `/<name>/SKILL.md` = raw markdown file,
-  plus optional bundled files at `/<name>/<relative path>` (scripts/,
-  references/, assets/, ... — the skill-creator layout), all in the same
-  `{"content": ..., "encoding": "utf-8"}` shape StoreBackend uses, so the
-  agent's SkillsMiddleware reads exactly what the API writes and its
-  filesystem tools (ls/read/write/execute) see the whole skill folder.
-- `("agent", "mcp_servers")` — key `<name>`, value = MCP server config dict
-  (same shape as `mcp_servers.json`; `enabled: false` entries are skipped).
+- `("user", "skills", <username>)`      — a user's own skills: key
+  `/<name>/SKILL.md` = raw markdown file, plus optional bundled files at
+  `/<name>/<relative path>` (scripts/, references/, assets/, ... — the
+  skill-creator layout), all in the same `{"content": ..., "encoding":
+  "utf-8"}` shape StoreBackend uses, so the agent's SkillsMiddleware reads
+  exactly what the API writes and its filesystem tools
+  (ls/read/write/execute) see the whole skill folder.
+- `("user", "mcp_servers", <username>)` — the user's own MCP server
+  configs: key `<name>`, value = MCP server config dict (same shape as
+  `mcp_servers.json`; `enabled: false` entries are skipped). Each user
+  brings their own MCP connections — nothing is shared between users.
 
 Skills become visible to the agent on the next run (SkillsMiddleware reads the
-backend per run — no agent rebuild). MCP server changes apply after a restart
-or `POST /agent/tools/reconnect`.
+backend per run — no agent rebuild). MCP server changes apply on the next
+connect (lazy per user: first chat / tools call / explicit reconnect).
 """
 
 from __future__ import annotations
@@ -23,8 +26,11 @@ import re
 
 from langgraph.store.base import BaseStore
 
-from ..core.config import settings
-from ..core.constants import SKILLS_SOURCE, TOOL_SERVERS_NS
+from ..core.constants import (
+    SKILLS_SOURCE,
+    TOOL_SERVERS_NS,
+    user_mcp_servers_ns,
+)
 from ..schema.agent_schema import (
     SkillFileIn,
     SkillFileOut,
@@ -61,6 +67,27 @@ async def migrate_global_skills(store: BaseStore, owner: str) -> int:
         moved += 1
     for item in await store.asearch(SKILLS_NS):
         await store.adelete(SKILLS_NS, item.key or "")
+    return moved
+
+
+async def migrate_global_tool_servers(store: BaseStore, owner: str) -> int:
+    """Move legacy global MCP server configs into a user's own namespace (one-time).
+
+    MCP tool servers are fully per-user now; the old admin-global pool is
+    folded into `owner`'s own servers (skipping names that already exist
+    there) and the global namespace is cleared. Returns the number moved.
+    """
+    from ..core.constants import user_mcp_servers_ns
+
+    target = user_mcp_servers_ns(owner)
+    moved = 0
+    for item in await store.asearch(TOOL_SERVERS_NS):
+        if await store.aget(target, item.key or "") is not None:
+            continue
+        await store.aput(target, item.key or "", item.value)
+        moved += 1
+    for item in await store.asearch(TOOL_SERVERS_NS):
+        await store.adelete(TOOL_SERVERS_NS, item.key or "")
     return moved
 
 
@@ -233,51 +260,69 @@ async def delete_skill_file(
 
 
 # ---------------------------------------------------------------------------
-# MCP tool servers
+# MCP tool servers (per-user: each user configures their own connections)
 # ---------------------------------------------------------------------------
 
 
-async def list_tool_servers(store: BaseStore) -> list[ToolServerOut]:
-    items = await store.asearch(TOOL_SERVERS_NS)
+def _tool_server_ns(username: str) -> tuple[str, ...]:
+    return user_mcp_servers_ns(username)
+
+
+async def list_tool_servers(store: BaseStore, username: str) -> list[ToolServerOut]:
+    """All MCP tool servers of one user, by name."""
+    ns = _tool_server_ns(username)
+    items = await store.asearch(ns)
     servers = [ToolServerOut(name=it.key, **it.value) for it in items if it.value]
     servers.sort(key=lambda s: s.name)
     return servers
 
 
-async def get_tool_server(store: BaseStore, name: str) -> ToolServerOut | None:
-    item = await store.aget(TOOL_SERVERS_NS, name)
+async def get_tool_server(store: BaseStore, username: str, name: str) -> ToolServerOut | None:
+    """One of the user's MCP tool servers, or None when unknown."""
+    item = await store.aget(_tool_server_ns(username), name)
     if item is None:
         return None
     return ToolServerOut(name=name, **item.value)
 
 
-async def create_tool_server(store: BaseStore, server: ToolServerIn) -> ToolServerOut:
-    await store.aput(TOOL_SERVERS_NS, server.name, server.config())
+async def stored_tool_server_names(store: BaseStore, username: str) -> list[str]:
+    """Names of the user's configured MCP tool servers (config, not live tools)."""
+    return [s.name for s in await list_tool_servers(store, username)]
+
+
+async def create_tool_server(
+    store: BaseStore, username: str, server: ToolServerIn
+) -> ToolServerOut:
+    """Add an MCP tool server to the user's config; raises KeyError when taken."""
+    if await store.aget(_tool_server_ns(username), server.name) is not None:
+        raise KeyError(server.name)
+    await store.aput(_tool_server_ns(username), server.name, server.config())
     return ToolServerOut(name=server.name, **server.config())
 
 
-async def update_tool_server(store: BaseStore, name: str, server: ToolServerIn) -> ToolServerOut:
-    existing = await store.aget(TOOL_SERVERS_NS, name)
-    if existing is None:
+async def update_tool_server(
+    store: BaseStore, username: str, name: str, server: ToolServerIn
+) -> ToolServerOut:
+    """Replace one of the user's MCP tool servers; raises KeyError when unknown."""
+    if await store.aget(_tool_server_ns(username), name) is None:
         raise KeyError(name)
-    await store.aput(TOOL_SERVERS_NS, server.name, server.config())
+    await store.aput(_tool_server_ns(username), server.name, server.config())
     return ToolServerOut(name=server.name, **server.config())
 
 
-async def delete_tool_server(store: BaseStore, name: str) -> bool:
-    item = await store.aget(TOOL_SERVERS_NS, name)
+async def delete_tool_server(store: BaseStore, username: str, name: str) -> bool:
+    """Remove one of the user's MCP tool servers; False when unknown."""
+    item = await store.aget(_tool_server_ns(username), name)
     if item is None:
         return False
-    await store.adelete(TOOL_SERVERS_NS, name)
+    await store.adelete(_tool_server_ns(username), name)
     return True
 
 
-async def load_tool_server_configs(store: BaseStore) -> dict:
-    """MCP server configs for the agent: store first, env/file fallback."""
-    items = await store.asearch(TOOL_SERVERS_NS)
-    if items:
-        return {it.key: it.value for it in items if it.value and it.value.get("enabled", True)}
-    return settings.load_mcp_servers()
+async def load_tool_server_configs(store: BaseStore, username: str) -> dict:
+    """MCP server configs of one user (fresh per user — no global fallback)."""
+    items = await store.asearch(_tool_server_ns(username))
+    return {it.key: it.value for it in items if it.value and it.value.get("enabled", True)}
 
 
 # Re-exported so the /skills/ source path used by callers stays in one place.
@@ -295,6 +340,9 @@ __all__ = [
     "list_skills",
     "list_tool_servers",
     "load_tool_server_configs",
+    "migrate_global_skills",
+    "migrate_global_tool_servers",
+    "stored_tool_server_names",
     "update_skill",
     "update_tool_server",
 ]

@@ -351,48 +351,47 @@ async def test_agent_tool_selection(persistence):
         tools_by_server={"srv-a": ["tool_a"], "srv-b": ["tool_b"]},
         extra_tools=[search],
     )
-    # endpoint-side tool validation reads the live mcp_servers config; seed it
-    # inside the lifespan (connect() would otherwise overwrite it)
-    from app.services.mcp import mcp_servers
+    # endpoint-side tool validation reads the user's stored MCP server
+    # configs; seed srv-a/srv-b for alice inside the lifespan (persistence
+    # re-initializes on entry; static tools stay registry-side)
+    from app.core.constants import user_mcp_servers_ns
 
-    saved_config = mcp_servers._config
-    try:
-        async with app.router.lifespan_context(app):
-            mcp_servers._config = {"srv-a": {}, "srv-b": {}}
-            async with await client_for(app, "alice") as client:
-                # default agent: all tools
-                r = await client.post("/chat", json={"message": "hi"})
-                assert r.status_code == 200
-                assert set(model.bound_tools) >= {"tool_a", "tool_b", "web_search"}
+    ns = user_mcp_servers_ns("alice")
+    async with app.router.lifespan_context(app):
+        await persistence.store.aput(ns, "srv-a", {"transport": "stdio", "command": "echo"})
+        await persistence.store.aput(ns, "srv-b", {"transport": "stdio", "command": "echo"})
+        async with await client_for(app, "alice") as client:
+            # default agent: all tools
+            r = await client.post("/chat", json={"message": "hi"})
+            assert r.status_code == 200
+            assert set(model.bound_tools) >= {"tool_a", "tool_b", "web_search"}
 
-                # selected server only
-                r = await client.post("/agents", json=agent_payload("slim", tools=["srv-a"]))
-                assert r.status_code == 201, r.text
-                model.bound_tools.clear()
-                r = await client.post("/chat", json={"message": "hi", "agent": "slim"})
-                assert r.status_code == 200
-                assert "tool_a" in model.bound_tools, model.bound_tools
-                assert "tool_b" not in model.bound_tools, model.bound_tools
+            # selected server only
+            r = await client.post("/agents", json=agent_payload("slim", tools=["srv-a"]))
+            assert r.status_code == 201, r.text
+            model.bound_tools.clear()
+            r = await client.post("/chat", json={"message": "hi", "agent": "slim"})
+            assert r.status_code == 200
+            assert "tool_a" in model.bound_tools, model.bound_tools
+            assert "tool_b" not in model.bound_tools, model.bound_tools
 
-                # web_search pseudo-tool
-                r = await client.post("/agents", json=agent_payload("webby", tools=["web_search"]))
-                assert r.status_code == 201, r.text
-                model.bound_tools.clear()
-                r = await client.post("/chat", json={"message": "hi", "agent": "webby"})
-                assert r.status_code == 200
-                assert "web_search" in model.bound_tools, model.bound_tools
-                assert "tool_a" not in model.bound_tools, model.bound_tools
+            # web_search pseudo-tool
+            r = await client.post("/agents", json=agent_payload("webby", tools=["web_search"]))
+            assert r.status_code == 201, r.text
+            model.bound_tools.clear()
+            r = await client.post("/chat", json={"message": "hi", "agent": "webby"})
+            assert r.status_code == 200
+            assert "web_search" in model.bound_tools, model.bound_tools
+            assert "tool_a" not in model.bound_tools, model.bound_tools
 
-                # no tools
-                r = await client.post("/agents", json=agent_payload("bare", tools=[]))
-                assert r.status_code == 201, r.text
-                model.bound_tools.clear()
-                r = await client.post("/chat", json={"message": "hi", "agent": "bare"})
-                assert r.status_code == 200
-                assert "tool_a" not in model.bound_tools, model.bound_tools
-                assert "web_search" not in model.bound_tools, model.bound_tools
-    finally:
-        mcp_servers._config = saved_config
+            # no tools
+            r = await client.post("/agents", json=agent_payload("bare", tools=[]))
+            assert r.status_code == 201, r.text
+            model.bound_tools.clear()
+            r = await client.post("/chat", json={"message": "hi", "agent": "bare"})
+            assert r.status_code == 200
+            assert "tool_a" not in model.bound_tools, model.bound_tools
+            assert "web_search" not in model.bound_tools, model.bound_tools
 
 
 # ---------------------------------------------------------------------------

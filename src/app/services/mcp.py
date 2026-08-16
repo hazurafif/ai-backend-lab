@@ -1,10 +1,9 @@
 """MCP client: connects the agent to MCP servers (e.g. built with gofastmcp).
 
-Server config is a dict of name -> connection. Sources, in priority order:
-
-1. The durable store namespace ("agent", "mcp_servers") — managed via the
-   /agent/tools CRUD API (Postgres-backed in production).
-2. `MCP_SERVERS_JSON` env var or `mcp_servers.json` (see the example file).
+Server config is a dict of name -> connection, **per user**: each user's
+servers live in their own store namespace (`("user", "mcp_servers",
+<username>)`, managed via the per-user /mcp/servers CRUD and /agent/tools
+APIs). Nothing is shared between users — fresh, private config per user.
 
 Config shape:
 
@@ -25,8 +24,9 @@ Config shape:
 - streamable_http: for gofastmcp (Go) servers deployed as web services
 - stdio: for gofastmcp binaries run as subprocesses
 
-Tools are fetched once at startup (or via POST /agent/tools/reconnect) and
-passed to `create_deep_agent(tools=...)`.
+Tools are fetched lazily per user (first agent build / tools call / explicit
+reconnect) and passed to `create_deep_agent(tools=...)` via the registry's
+per-user MCP provider.
 
 `MCPServers.call_tool` is the MCP apps tools proxy (POST /mcp/tools/call):
 prefab renderers forward `tools/call` messages here and the backend invokes
@@ -35,7 +35,7 @@ included). Tool names arrive in FastMCP's hashed app-tool form
 (`<12 lowercase hex>_<name>`) and are passed through verbatim — FastMCP
 resolves the hash server-side via `get_tool_by_hash`, so the proxy never
 needs to know the mapping. With no `server_hint` the call fans out across
-configured servers; a server that doesn't know the name reports
+the user's configured servers; a server that doesn't know the name reports
 tool-not-found and the next server is tried (first hit wins).
 """
 
@@ -94,6 +94,7 @@ class MCPServers:
     def __init__(self) -> None:
         self._config: dict[str, dict[str, Any]] = {}
         self._client: MultiServerMCPClient | None = None
+        self._connected = False
         # server name -> cached, multiplexed ClientSession (lazy, proxy only)
         self._sessions: dict[str, ClientSession] = {}
         # Per-server owner tasks + close events: anyio cancel scopes are
@@ -110,24 +111,32 @@ class MCPServers:
         self.tools_by_server: dict[str, list[str]] = {}
 
     @property
+    def connected(self) -> bool:
+        """Whether connect() ran at least once (configs may still be empty)."""
+        return self._connected
+
+    @property
     def names(self) -> list[str]:
         return list(self._config)
 
-    async def connect(self, store: BaseStore | None = None) -> list[BaseTool]:
-        """Connect to all configured MCP servers and fetch their tools.
+    async def connect(
+        self, store: BaseStore | None = None, *, username: str = "anonymous"
+    ) -> list[BaseTool]:
+        """Connect to the user's configured MCP servers and fetch their tools.
 
-        Config comes from the durable store when it has entries (CRUD API),
-        otherwise from env/file (`MCP_SERVERS_JSON` / `mcp_servers.json`).
-        Tools are fetched per server so `tools_by_server` can attribute tool
-        names to their server (tool names themselves are not prefixed).
-        Wrapper keys (e.g. the CRUD API's `enabled` flag) are stripped so
-        configs can be handed straight to create_session.
+        Config comes from the user's own store namespace (per-user CRUD API),
+        never from other users or env. Re-connecting replaces the previous
+        configuration. Tools are fetched per server so `tools_by_server` can
+        attribute tool names to their server (tool names themselves are not
+        prefixed). Wrapper keys (e.g. the CRUD API's `enabled` flag) are
+        stripped so configs can be handed straight to create_session.
         """
-        raw_config = (
-            await load_tool_server_configs(store)
-            if store is not None
-            else settings.load_mcp_servers()
-        )
+        if store is not None:
+            raw_config = await load_tool_server_configs(store, username)
+        else:
+            # Standalone use (scripts, tests, ad-hoc clients): env/file config.
+            raw_config = settings.load_mcp_servers()
+        self._connected = True
         self._config = {
             name: {k: v for k, v in cfg.items() if k != "enabled"}
             for name, cfg in raw_config.items()
@@ -331,6 +340,59 @@ class MCPServers:
         self.tools = []
         self.tools_by_server = {}
         self._client = None
+        self._config = {}
+        self._connected = False
 
 
-mcp_servers = MCPServers()
+class MCPRegistry:
+    """Per-user MCPServers instances, lazily connected and cached.
+
+    Each user's MCP servers are a separate `MCPServers` instance (their own
+    config, sessions, tools). Instances are created on first use and dropped
+    by `invalidate(username)` after CRUD mutations, so the next access
+    reconnects from the user's current config.
+    """
+
+    def __init__(self) -> None:
+        self._instances: dict[str, MCPServers] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, username: str, store: BaseStore | None = None) -> MCPServers:
+        """The user's MCPServers instance (created on first use).
+
+        When `store` is given and the instance was never connected, connects
+        it from the user's stored config first.
+        """
+        instance = self._instances.get(username)
+        if instance is None:
+            async with self._lock:
+                instance = self._instances.get(username)
+                if instance is None:
+                    instance = MCPServers()
+                    self._instances[username] = instance
+        if store is not None and not instance.connected:
+            await instance.connect(store=store, username=username)
+        return instance
+
+    async def connect(self, username: str, store: BaseStore) -> MCPServers:
+        """(Re)connect the user's MCP servers from their stored config (reconnect)."""
+        instance = await self.get(username, store=None)
+        await instance.connect(store=store, username=username)
+        return instance
+
+    async def invalidate(self, username: str) -> None:
+        """Close and drop the user's MCP instance (after CRUD mutations)."""
+        instance = self._instances.pop(username, None)
+        if instance is not None:
+            with suppress(Exception):
+                await instance.close()
+
+    async def close(self) -> None:
+        """Close every user's MCP instance (app shutdown)."""
+        for instance in list(self._instances.values()):
+            with suppress(Exception):
+                await instance.close()
+        self._instances.clear()
+
+
+mcp_servers = MCPRegistry()
