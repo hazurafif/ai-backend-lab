@@ -31,9 +31,11 @@ class PreferencesIn(BaseModel):
     hide_tool_calls: bool | None = Field(
         default=None,
         description=(
-            "Persisted display toggle: hide tool-call activity from the chat "
-            "stream. Set true/false to override the default (show); null "
-            "clears the preference (show again)."
+            "Persisted display toggle: hide tool-call cards from the chat "
+            'stream. The tool OUTPUT still streams (marked "hidden" on the '
+            "tool events) so citation sources stay clickable — only the card "
+            "UI is suppressed. Set true/false to override the default (show); "
+            "null clears the preference (show again)."
         ),
     )
 
@@ -64,8 +66,9 @@ class PreferencesOut(BaseModel):
     hide_tool_calls: bool = Field(
         default=False,
         description=(
-            "Effective display preference: True hides tool-call activity "
-            "(tool_start/delta/end events + tool messages) from the chat "
-            "stream; False (default) shows it."
+            "Effective display preference: True hides the tool-call cards "
+            '(tool_start/delta/end events carry "hidden": true; the output '
+            "still streams and tool messages stay in history so citations "
+            "remain clickable); False (default) shows them."
         ),
     )

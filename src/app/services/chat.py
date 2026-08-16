@@ -7,10 +7,19 @@ contract below is normative — keep it in sync with the frontend consumers.
 
 Per-user display preferences (`hide_reasoning`, `hide_tool_calls`, stored via
 `GET/PATCH /users/me/preferences`) are applied per subscriber when the stream
-is drained: hidden event families (thinking deltas, tool-call lifecycle) are
-dropped and finalized `message` / `done.messages` payloads are scrubbed of
-reasoning blocks and tool-call fields. The persisted chat history always
-stays complete — the preferences only affect what streams to the client.
+is drained:
+
+- `hide_reasoning` drops the thinking bracket (reasoning_start/delta/end) and
+  scrubs reasoning blocks from finalized messages.
+- `hide_tool_calls` hides the tool-call **card**, not the data: the tool
+  lifecycle still streams but every tool event carries `"hidden": true` so
+  frontends suppress the UI while still receiving the tool output (e.g. the
+  web_search result list) — citations like [1] stay clickable. Finalized
+  `message` / `done.messages` payloads keep tool-call fields and tool rows
+  for the same reason.
+
+The persisted chat history always stays complete — the preferences only
+affect what streams to the client.
 """
 
 from __future__ import annotations
@@ -110,63 +119,51 @@ def _sse(event: str, data: dict) -> str:
     )
 
 
-async def _hidden_events(username: str) -> frozenset[str]:
-    """SSE event names the user's display preferences hide from the stream.
+async def _hidden_prefs(username: str) -> tuple[bool, bool]:
+    """The user's display preferences as (hide_reasoning, hide_tool_calls).
 
-    `hide_reasoning` drops the thinking bracket (reasoning_start/delta/end),
-    `hide_tool_calls` drops the tool-call lifecycle (tool_start/delta/end).
     Unknown users (guests, deleted accounts) have no stored preferences, so
     nothing is hidden.
     """
     prefs = await persistence.preferences.get_all(username)
-    hidden: set[str] = set()
-    if prefs.get("hide_reasoning"):
-        hidden |= _REASONING_EVENTS
-    if prefs.get("hide_tool_calls"):
-        hidden |= _TOOL_EVENTS
-    return frozenset(hidden)
+    return bool(prefs.get("hide_reasoning")), bool(prefs.get("hide_tool_calls"))
 
 
-def _scrub_message(message: dict, hidden: frozenset[str]) -> dict:
-    """Drop reasoning blocks / tool-call fields from a serialized message.
+def _scrub_message(message: dict, hide_reasoning: bool) -> dict:
+    """Drop reasoning blocks from a serialized message.
 
     Applied to the finalized `message` events and the `done` payload's
-    `messages`; the message dicts keep their shape (langchain serialization)
-    so consumers can still render them, just without the hidden parts.
+    `messages`. Tool-call fields and tool rows are intentionally KEPT even
+    when tool calls are hidden: the frontend hides the card itself, and the
+    tool output (web_search sources) must stay resolvable so citation links
+    keep working.
     """
-    if not hidden:
+    if not hide_reasoning:
         return message
     out = dict(message)
-    if hidden & _REASONING_EVENTS:
-        content = out.get("content")
-        if isinstance(content, list):
-            out["content"] = [
-                block
-                for block in content
-                if not (isinstance(block, dict) and block.get("type") == "reasoning")
-            ]
-        extra = out.get("additional_kwargs")
-        if isinstance(extra, dict) and "reasoning_content" in extra:
-            out["additional_kwargs"] = {k: v for k, v in extra.items() if k != "reasoning_content"}
-    if hidden & _TOOL_EVENTS:
-        out.pop("tool_calls", None)
-        out.pop("tool_call_chunks", None)
-        extra = out.get("additional_kwargs")
-        if isinstance(extra, dict) and "tool_calls" in extra:
-            out["additional_kwargs"] = {k: v for k, v in extra.items() if k != "tool_calls"}
+    content = out.get("content")
+    if isinstance(content, list):
+        out["content"] = [
+            block
+            for block in content
+            if not (isinstance(block, dict) and block.get("type") == "reasoning")
+        ]
+    extra = out.get("additional_kwargs")
+    if isinstance(extra, dict) and "reasoning_content" in extra:
+        out["additional_kwargs"] = {k: v for k, v in extra.items() if k != "reasoning_content"}
     return out
 
 
-def _scrub_messages(messages: list[dict], hidden: frozenset[str]) -> list[dict]:
-    """Scrub the `done` payload's message list: drop tool-result rows and clean the rest."""
-    if not hidden:
+def _scrub_messages(messages: list[dict], hide_reasoning: bool) -> list[dict]:
+    """Scrub the `done` payload's message list (reasoning blocks only).
+
+    Tool-result rows and tool-call fields stay in the payload so citation
+    sources remain resolvable after the run; hiding the tool card is a
+    frontend concern (the live tool events carry `"hidden": true`).
+    """
+    if not hide_reasoning:
         return messages
-    out: list[dict] = []
-    for message in messages:
-        if hidden & _TOOL_EVENTS and message.get("type") == "tool":
-            continue
-        out.append(_scrub_message(message, hidden))
-    return out
+    return [_scrub_message(message, hide_reasoning) for message in messages]
 
 
 async def _record_thread_metadata(
@@ -313,22 +310,29 @@ async def _stream_subscription(
     Detaching (generator close, client disconnect) only unsubscribes — the
     run keeps going in the background.
 
-    The user's display preferences are resolved per subscriber: hidden event
-    families are dropped and finalized `message` / `done.messages` payloads
-    are scrubbed (see `_hidden_events` / `_scrub_message`).
+    The user's display preferences are resolved per subscriber:
+    `hide_reasoning` drops the thinking bracket; `hide_tool_calls` marks the
+    tool-call lifecycle `"hidden": true` (the data still streams so tool
+    output — e.g. web_search sources — keeps citations clickable). Finalized
+    `message` / `done.messages` payloads keep tool fields and only have
+    reasoning blocks scrubbed.
     """
-    hidden = await _hidden_events(username)
+    hide_reasoning, hide_tool_calls = await _hidden_prefs(username)
 
     def emit(item: dict) -> str | None:
         """Serialize one queue item, filtered by the user's display preferences."""
         event = item["event"]
-        if event in hidden:
+        if hide_reasoning and event in _REASONING_EVENTS:
             return None
         data = item["data"]
+        if hide_tool_calls and event in _TOOL_EVENTS:
+            # Hide the card, not the data: the output keeps streaming so
+            # citation sources stay resolvable; frontends suppress the UI.
+            data = {**data, "hidden": True}
         if event == "message" and isinstance(data.get("message"), dict):
-            data = {**data, "message": _scrub_message(data["message"], hidden)}
+            data = {**data, "message": _scrub_message(data["message"], hide_reasoning)}
         elif event == "done" and isinstance(data.get("messages"), list):
-            data = {**data, "messages": _scrub_messages(data["messages"], hidden)}
+            data = {**data, "messages": _scrub_messages(data["messages"], hide_reasoning)}
         return _sse(event, data)
 
     try:

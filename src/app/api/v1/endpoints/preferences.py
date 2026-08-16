@@ -7,7 +7,7 @@ calls) server-side instead of localStorage. Chat requests simply omit
 `enable_search` to fall back to the stored value (explicit request fields
 still win, see `services/searxng.apply_search_preference`); the display
 toggles are read from the store when each chat stream starts (see
-`services/chat._hidden_events`).
+`services/chat._hidden_prefs`).
 """
 
 from __future__ import annotations

@@ -229,33 +229,38 @@ async def test_reasoning_streaming_pipeline(memory_persistence):
 
 
 async def test_hide_tool_calls_preference(memory_persistence):
-    """`hide_tool_calls` drops the tool event family and scrubs message payloads.
+    """`hide_tool_calls` hides the tool card, not the data.
 
-    The per-user display preference (PATCH /users/me/preferences) filters the
-    SSE stream per subscriber: no tool_start/delta/end events, the finalized
-    `message` events carry no tool-call fields, and the `done` payload's
-    messages drop tool-result rows. The persisted chat history stays complete
-    — the durable record is never scrubbed.
+    The per-user display preference (PATCH /users/me/preferences) marks the
+    tool lifecycle events `"hidden": true` instead of dropping them: the
+    tool output (e.g. web_search sources) keeps streaming so citation links
+    stay clickable, and finalized `message` / `done.messages` payloads keep
+    tool-call fields and tool rows for the same reason. The persisted chat
+    history stays complete — the durable record is never scrubbed.
     """
     await memory_persistence.preferences.set("tester", "hide_tool_calls", True)
     agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
     events = await collect_stream(agent, "tester", message="hi there")
 
-    names = [e for e, _ in events]
-    for hidden in ("tool_start", "tool_delta", "tool_end"):
-        assert hidden not in names, f"{hidden} must be hidden"
-    assert "message_delta" in names, "answer text still streams"
+    # The tool lifecycle still streams, marked hidden.
+    starts = [d for e, d in events if e == "tool_start"]
+    assert starts, "tool_start must still stream (data needed for citations)"
+    assert all(d.get("hidden") is True for d in starts), starts
+    ends = [d for e, d in events if e == "tool_end"]
+    assert ends and all(d.get("hidden") is True for d in ends), ends
+    assert all(d.get("hidden") is True for e, d in events if e == "tool_delta")
+    assert "message_delta" in [e for e, _ in events], "answer text still streams"
 
-    # Finalized message events are scrubbed of tool-call fields.
+    # Finalized message events KEEP tool-call fields (citations resolvable).
     messages = [d["message"] for e, d in events if e == "message"]
     assert messages, "missing message events"
-    assert all("tool_calls" not in m and "tool_call_chunks" not in m for m in messages)
+    assert any("tool_calls" in m or "tool_call_chunks" in m for m in messages)
 
-    # done.messages: tool-result rows dropped, tool-call AI row cleaned.
+    # done.messages keeps tool-result rows and tool-call fields.
     done = [d for e, d in events if e == "done"][-1]
-    assert not [m for m in done["messages"] if m.get("type") == "tool"], done["messages"]
+    assert [m for m in done["messages"] if m.get("type") == "tool"], done["messages"]
     ai_rows = [m for m in done["messages"] if m.get("type") == "ai"]
-    assert ai_rows and all("tool_calls" not in m for m in ai_rows), ai_rows
+    assert ai_rows and any("tool_calls" in m for m in ai_rows), ai_rows
 
     # The durable record keeps the full conversation (tool rows included).
     rows = await memory_persistence.chat_history.list_messages(done["thread_id"])
@@ -294,13 +299,14 @@ async def test_hide_preferences_are_per_user(memory_persistence):
     agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
 
     hidden = await collect_stream(agent, "tester", message="hi there")
-    assert "tool_start" not in [e for e, _ in hidden]
+    starts = [d for e, d in hidden if e == "tool_start"]
+    assert starts and all(d.get("hidden") is True for d in starts), starts
 
     # Fresh agent: the scripted model is a one-shot sequence per instance.
     fresh = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
     visible = await collect_stream(fresh, "someone-else", message="hi there")
-    names = [e for e, _ in visible]
-    assert "tool_start" in names and "tool_end" in names, names
+    starts = [d for e, d in visible if e == "tool_start"]
+    assert starts and all("hidden" not in d for d in starts), starts
 
 
 async def test_interrupt_and_resume(memory_persistence):
@@ -424,6 +430,83 @@ async def test_ai_sdk_chat_endpoint(memory_persistence):
             # no user message -> 422
             r = await client.post("/api/chat", json={"id": "x", "messages": []})
             assert r.status_code == 422, r.text
+
+
+async def test_ai_sdk_hide_tool_calls_keeps_tool_output(memory_persistence):
+    """AI SDK path (POST /api/chat): hide_tool_calls hides the card, not the data.
+
+    The tool lifecycle still translates to native tool-input-*/tool-output-*
+    chunks so the web_search output (citation sources) reaches the frontend
+    even when the user hides tool calls.
+    """
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+
+    async with app.router.lifespan_context(app):
+        # Persistence re-initializes on lifespan entry: set prefs + user after.
+        await memory_persistence.preferences.set("tester", "hide_tool_calls", True)
+        await memory_persistence.users.create_user(username="tester", hashed_password="x")
+        token = create_access_token(data={"sub": "tester"})
+        _agent = build_scripted_agent(memory_persistence.checkpointer, memory_persistence.store)
+        app.state.agent = _agent
+        app.state.agents.set_static_default(_agent)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            r = await client.post(
+                "/api/chat",
+                json={"id": "chat-hide-tools", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert r.status_code == 200, r.text
+            chunks = parse_sdk_data_lines(r.text)
+            types = [c["type"] for c in chunks]
+            # Tool DATA keeps flowing (citations stay clickable)...
+            assert "tool-input-start" in types, types
+            outputs = [c for c in chunks if c["type"] == "tool-output-available"]
+            assert outputs, "tool output must still stream under hide_tool_calls"
+            # ...and no reasoning is involved here.
+            assert not any(t.startswith("reasoning") for t in types), types
+            assert "text-delta" in types, types
+
+
+async def test_ai_sdk_hide_reasoning_drops_thinking(memory_persistence):
+    """AI SDK path (POST /api/chat): hide_reasoning drops the thinking bracket.
+
+    The reasoning_start/delta/end events never reach the bridge, so no
+    reasoning-* chunks are emitted on the data stream.
+    """
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+
+    async with app.router.lifespan_context(app):
+        # Persistence re-initializes on lifespan entry: set prefs + user after.
+        await memory_persistence.preferences.set("tester", "hide_reasoning", True)
+        await memory_persistence.users.create_user(username="tester", hashed_password="x")
+        token = create_access_token(data={"sub": "tester"})
+        _agent = build_reasoning_agent(
+            memory_persistence.checkpointer,
+            memory_persistence.store,
+            reasoning="Let me think step by step",
+            answer="The answer is 42.",
+        )
+        app.state.agent = _agent
+        app.state.agents.set_static_default(_agent)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            r = await client.post(
+                "/api/chat",
+                json={"id": "chat-hide-reason", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert r.status_code == 200, r.text
+            chunks = parse_sdk_data_lines(r.text)
+            types = [c["type"] for c in chunks]
+            assert not any(t.startswith("reasoning") for t in types), types
+            # The answer still streams.
+            text = "".join(c.get("delta", "") for c in chunks if c["type"] == "text-delta")
+            assert text == "The answer is 42.", text
 
 
 async def test_chat_history_persisted_without_duplicates(memory_persistence):

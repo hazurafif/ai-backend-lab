@@ -119,9 +119,12 @@ SSE events (event: <name>, data: <json>):
   reasoning_delta {"id", "delta"}                           thinking/reasoning token chunk
   reasoning_end   {"id"}                                    thinking/reasoning turn finished
   message         {"id", "message"}                         finalized message (langchain serialized)
-  tool_start      {"id", "name", "args"}                    tool call started
-  tool_delta      {"id", "name", "delta"}                   tool output chunk
-  tool_end        {"id", "name", "output", "is_error"}      tool call finished
+  tool_start      {"id", "name", "args", "hidden"?}      tool call started ("hidden": true
+                                    when the user hides tool calls — the
+                                    output still streams so citations work)
+  tool_delta      {"id", "name", "delta", "hidden"?}       tool output chunk
+  tool_end        {"id", "name", "output", "is_error",   tool call finished
+                   "error"?, "hidden"?}
   subagent        {"name", "status", "output"?, "error"?}   delegated task lifecycle
   subagent_delta  {"subagent", "delta"}                     subagent token chunk
   interrupt       {"thread_id", "interrupts"[{value, when}]} run paused for human input

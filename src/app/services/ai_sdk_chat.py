@@ -115,6 +115,10 @@ async def sdk_stream(
                 yield _chunk({"type": "text-end", "id": ms_id})
         elif name == "tool_start":
             # Native AI SDK tool chunks -> typed `tool-<name>` UI parts.
+            # With `hide_tool_calls` the producer marks these events
+            # `"hidden": true` instead of dropping them — the output must
+            # keep streaming so citation sources (web_search results) stay
+            # resolvable; hiding the card is the frontend's call.
             tool_id = data.get("id")
             tool_name = data.get("name")
             args = data.get("args") or {}
