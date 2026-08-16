@@ -14,11 +14,11 @@ Namespaces:
   config references them; the agent's SkillsMiddleware reads this namespace
   via a `/skills/<owner>/<name>/` backend route)
 
-The built-in `default` agent is synthesized from `DEEPAGENTS_MODEL` (or the
-default `llm` connection's `extra.model` when unset) + `SYSTEM_PROMPT` env
-settings and cannot be created or deleted through the API. When neither model
-source exists, chats return 503 with setup instructions — the app always
-starts and the model is configured in-app later.
+The built-in `default` agent is synthesized from the default `llm`
+connection's `extra.model` + `SYSTEM_PROMPT` env settings and cannot be
+created or deleted through the API. There is no env fallback: without a
+saved llm connection, chats return 503 with setup instructions — the app
+always starts and the model is configured in-app later.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from ..core.constants import (
 )
 from ..schema.agent_config_schema import AgentConfigIn, AgentConfigOut
 from ..services import settings as runtime_settings
+from ..services.connections import llm_model_name
 from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
@@ -108,10 +109,15 @@ class AgentSpec:
 
 
 def default_spec() -> AgentSpec:
-    """The built-in agent, seeded from env settings (never stored)."""
+    """The built-in agent, seeded from env settings (never stored).
+
+    `model` stays None: there is no env fallback — the builtin agent's model
+    comes only from the admin-managed default `llm` connection
+    (`extra.model`, resolved at build time by AgentRegistry._resolve_model).
+    """
     return AgentSpec(
         name=DEFAULT_AGENT_NAME,
-        model=settings.model,
+        model=None,
         system_prompt=settings.system_prompt,
         skills=None,
         tools=None,
@@ -120,7 +126,7 @@ def default_spec() -> AgentSpec:
         thinking=None,
         owner=_SYSTEM_OWNER,
         builtin=True,
-        description="Built-in agent (DEEPAGENTS_MODEL + SYSTEM_PROMPT env settings)",
+        description="Built-in agent (default llm connection model + SYSTEM_PROMPT env settings)",
     )
 
 
@@ -249,7 +255,7 @@ async def get_config(store: BaseStore, name: str, username: str) -> AgentConfigO
         return _to_out(
             {
                 "name": DEFAULT_AGENT_NAME,
-                "model": settings.model,
+                "model": llm_model_name(),
                 "system_prompt": settings.system_prompt,
                 "skills": None,
                 "tools": None,

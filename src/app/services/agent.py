@@ -453,11 +453,10 @@ class AgentRegistry:
     def _resolve_model(self, spec: AgentSpec) -> str | BaseChatModel:
         if self._model_factory is not None:
             return self._model_factory(spec.model, spec.temperature)
-        # A saved `llm` connection (base URL + API token, see /connections,
-        # admin-managed) overrides .env credentials for the provider. When no
-        # default llm connection exists, env fallback is opt-in (PUT /settings
-        # connections.fallback_env=true); otherwise this fails loudly so the
-        # agent never silently runs on .env credentials.
+        # The saved `llm` connection (base URL + API token, see /connections,
+        # admin-managed) is the ONLY credential source — there is no .env
+        # fallback. Without it the agent refuses to build so it never silently
+        # runs on env credentials.
         kwargs = llm_model_kwargs()
         if spec.temperature is not None:
             kwargs["temperature"] = spec.temperature
@@ -469,21 +468,18 @@ class AgentRegistry:
         model_name = spec.model or llm_model_name()
         if model_name is None:
             raise ValueError(
-                "No model configured: set DEEPAGENTS_MODEL, or save a default "
-                "llm connection carrying the model, e.g. POST /connections "
+                "No model configured: save a default llm connection carrying "
+                "the model, e.g. POST /connections "
                 '{"name": "zen", "kind": "llm", "base_url": "https://.../v1", '
                 '"api_token": "sk-...", "extra": {"model": '
                 '"openai:deepseek-v4-flash"}, "is_default": true}'
             )
         if not kwargs:
-            if not runtime_settings.connection_fallback_env():
-                raise ValueError(
-                    "No default 'llm' connection configured — create one via "
-                    "POST /connections (kind=llm, is_default=true), or allow env "
-                    'credentials via PUT /settings {"connections": '
-                    '{"fallback_env": true}}'
-                )
-            return model_name
+            raise ValueError(
+                "No default 'llm' connection configured — create one via "
+                "POST /connections (kind=llm, is_default=true, base_url + "
+                "api_token); env credentials are never used."
+            )
         from langchain.chat_models import init_chat_model
 
         model = init_chat_model(model_name, **kwargs)

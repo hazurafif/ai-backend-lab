@@ -76,7 +76,7 @@ async def _resolve_agent(request: Request, name: str | None, username: str) -> C
     Always goes through the registry: the system prompt is rendered per user
     ({{username}} placeholders), so the default agent graph is per-user too
     (registry cache keyed by the rendered fingerprint). An unconfigured
-    model (no DEEPAGENTS_MODEL, no default llm connection) is a 503, not a
+    model (no default llm connection) is a 503, not a
     500.
     """
     name = name or "default"
@@ -568,8 +568,7 @@ async def _thread_history(request: Request, thread_id: str) -> list[dict]:
     agent = request.app.state.agent
     if agent is None:
         raise ServiceUnavailable(
-            "Agent not configured — save a default llm connection "
-            "(POST /connections) or set DEEPAGENTS_MODEL"
+            "Agent not configured — save a default llm connection (POST /connections)"
         )
     snapshot = await agent.aget_state({"configurable": {"thread_id": thread_id}})
     if snapshot is None or not snapshot.values.get("messages"):

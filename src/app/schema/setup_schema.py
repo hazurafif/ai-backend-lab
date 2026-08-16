@@ -49,7 +49,7 @@ class SetupOut(BaseModel):
     )
     model: str | None = Field(
         default=None,
-        description="Effective model of the builtin default agent (connection model, else env)",
+        description="Effective model of the builtin default agent (the llm connection's model)",
     )
     agent: AgentConfigOut | None = Field(
         default=None,

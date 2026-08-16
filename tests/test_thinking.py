@@ -158,9 +158,19 @@ def _spec(thinking: str | None, **overrides) -> AgentSpec:
     return AgentSpec(**values)
 
 
-async def test_resolve_model_passes_reasoning_effort(persistence, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # gitguardian:ignore
-    monkeypatch.setenv("OPENAI_BASE_URL", BASE_URL)
+async def test_resolve_model_passes_reasoning_effort(persistence):
+    """thinking + temperature flow into the chat model from the connection."""
+    await database.persistence.connections.create(
+        {
+            "name": "zen",
+            "kind": "llm",
+            "base_url": BASE_URL,
+            "api_token": API_KEY,
+            "extra": {"model": "openai:gpt-5.2"},
+            "is_default": True,
+        }
+    )
+    await connections.refresh_resolved_connections()
     registry = AgentRegistry(
         checkpointer=persistence.checkpointer,
         store=persistence.store,
@@ -175,8 +185,9 @@ async def test_resolve_model_passes_reasoning_effort(persistence, monkeypatch):
     assert model.reasoning_effort == "max"  # type: ignore[attr-defined]
     assert model.temperature == 0.3
 
-    # without thinking (and without temperature) the string passes through
-    assert registry._resolve_model(_spec(None)) == "openai:gpt-5.2"
+    # explicit spec model wins over the connection's model
+    model = registry._resolve_model(_spec(None, model="openai:gpt-4o-mini"))
+    assert model.model_name == "gpt-4o-mini"
 
 
 async def test_resolve_model_thinking_with_connection(persistence):

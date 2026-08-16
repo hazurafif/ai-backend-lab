@@ -242,10 +242,11 @@ async def test_agent_model_uses_llm_connection(persistence):
     assert isinstance(model, BaseChatModel)
     assert getattr(model, "openai_api_base", None) == "http://localhost:9999/v1"
     assert model.openai_api_key.get_secret_value() == "sk-conn-token"
-    # a plain string (env-driven) when no llm connection is saved
+    # No env fallback: without a connection the model refuses to build.
     await database.persistence.connections.delete("openai")
     await connection_service.refresh_resolved_connections()
-    assert registry._resolve_model(spec) == "openai:gpt-4o-mini"
+    with pytest.raises(ValueError, match="No default 'llm' connection"):
+        registry._resolve_model(spec)
 
 
 async def test_embeddings_uses_embeddings_connection(monkeypatch):

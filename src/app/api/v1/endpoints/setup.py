@@ -44,7 +44,7 @@ async def _effective_preferences(username: str) -> PreferencesOut:
 async def _setup_out(username: str) -> SetupOut:
     """The user's setup state (connection info is the admin-managed default)."""
     conn = connections.resolved_llm()
-    model = settings.model or connections.llm_model_name()
+    model = connections.llm_model_name()
     agent = await agent_configs.get_config(persistence.store, "default", username)
     servers = await resources.list_tool_servers(persistence.store, username)
     return SetupOut(

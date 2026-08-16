@@ -1,14 +1,13 @@
-"""Offline tests for the embeddings factory: MLX/Qwen3-Embedding path.
+"""Offline tests for the embeddings factory.
 
 Verifies:
 
-  - EMBEDDINGS_MLX_URL (env fallback) resolves to OpenAIEmbeddings against a
-    local mlx_lm.server serving Qwen3-Embedding-0.6B, winning over
-    OPENAI_API_KEY
+  - a saved `embeddings` connection resolves to OpenAIEmbeddings against the
+    connection's base URL (no env involved)
   - InstructionAwareEmbeddings prefixes queries (not documents) with Qwen's
     "Instruct: ..." instruction for qwen3-embedding models
   - explicit EMBEDDINGS_QUERY_INSTRUCTION override and "" disable
-  - missing connection + no env fallback -> deterministic local embedder
+  - no connection -> deterministic local embedder (no env fallback exists)
 """
 
 from __future__ import annotations
@@ -26,24 +25,7 @@ from app.services.kb.embeddings import (
     build_embeddings,
 )
 
-MLX_URL = "http://127.0.0.1:8080/v1"
 MLX_MODEL = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
-
-
-def test_mlx_env_beats_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(connection_service, "resolved_embeddings", lambda: None)
-    monkeypatch.setattr(embeddings_module.settings, "embeddings_mlx_url", MLX_URL)
-    monkeypatch.setattr(embeddings_module.settings, "embeddings_mlx_model", MLX_MODEL)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")  # must lose to MLX
-
-    embeddings = build_embeddings()
-
-    assert isinstance(embeddings, InstructionAwareEmbeddings)
-    inner = embeddings._inner
-    assert isinstance(inner, OpenAIEmbeddings)
-    assert inner.model == MLX_MODEL
-    assert inner.openai_api_base == MLX_URL
-    assert inner.openai_api_key.get_secret_value() == "mlx-local"
 
 
 def test_instruction_wrapper_prefixes_queries_only() -> None:
@@ -72,9 +54,31 @@ def test_query_instruction_override_and_disable(monkeypatch: pytest.MonkeyPatch)
     assert _query_instruction(MLX_MODEL) is None
 
 
-def test_no_mlx_and_no_openai_falls_back_to_local(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_saved_connection_resolves_openai_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        connection_service,
+        "resolved_embeddings",
+        lambda: {
+            "base_url": "http://localhost:9999/emb",
+            "api_token": "sk-emb-token",
+        },
+    )
+
+    embeddings = build_embeddings()
+
+    assert isinstance(embeddings, OpenAIEmbeddings)
+    assert embeddings.model == "text-embedding-3-small"
+    assert embeddings.openai_api_base == "http://localhost:9999/emb"
+    assert embeddings.openai_api_key.get_secret_value() == "sk-emb-token"
+
+
+def test_no_connection_falls_back_to_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No connection + env keys present -> deterministic local embedder.
+
+    There is no env fallback: OPENAI_API_KEY / EMBEDDINGS_MLX_URL are never
+    consulted, so the local embedder is the only offline path.
+    """
     monkeypatch.setattr(connection_service, "resolved_embeddings", lambda: None)
-    monkeypatch.setattr(embeddings_module.settings, "embeddings_mlx_url", None)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-be-ignored")  # gitguardian:ignore
 
     assert isinstance(build_embeddings(), LocalEmbeddings)

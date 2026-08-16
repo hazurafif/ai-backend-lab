@@ -25,7 +25,7 @@ async def health():
         "status": "ok",
         "persistence": persistence.backend_name,
         "mcp_servers": instance.names,
-        "model": settings.model or llm_model_name(),
+        "model": llm_model_name(),
         "llm_connection": (resolved_llm() or {}).get("name"),
         "llm_connection_model": llm_model_name(),
         "interrupt_on": runtime_settings.interrupt_on(),

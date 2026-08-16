@@ -109,8 +109,8 @@ Endpoints:
                                     CRUD (scoped to the caller; reconnect at
                                     POST /agent/tools/reconnect)
   GET|PUT /settings                -> runtime app settings (admin; execute tool
-                                    toggle + HITL interrupt_on + connection
-                                    policy, DB overrides .env)
+                                    toggle + HITL interrupt_on, DB overrides
+                                    .env)
   GET  /health                    -> status
 
 SSE events (event: <name>, data: <json>):
@@ -182,8 +182,8 @@ def create_app(
         # managed and global) so the agent model + KB embeddings use them
         # instead of .env credentials.
         await refresh_resolved_connections()
-        # Load runtime app settings (execute tool toggle, connection policy)
-        # so DB values override .env from the first request on.
+        # Load runtime app settings (execute tool toggle, HITL gating) so DB
+        # values override .env from the first request on.
         await runtime_settings.refresh_app_settings()
         # One-time migrations: legacy global skills + MCP tool servers fold
         # into the default admin's own namespace (skills and MCP servers are
@@ -251,7 +251,7 @@ def create_app(
             app.state.agent = await app.state.agents.resolve("default", "anonymous")
             logger.info(
                 "Agent ready: model=%s persistence=%s execute=%s",
-                settings.model or llm_model_name(),
+                llm_model_name(),
                 persistence.backend_name,
                 "enabled" if runtime_settings.execute_enabled() else "disabled",
             )
@@ -259,8 +259,7 @@ def create_app(
             app.state.agent = None
             logger.warning(
                 "Agent not configured yet (%s) — the app is up; chats return 503 "
-                "until a default llm connection (POST /connections, admin) or "
-                "DEEPAGENTS_MODEL is set.",
+                "until a default llm connection (POST /connections, admin) is set.",
                 exc,
             )
         yield
