@@ -1,6 +1,6 @@
 # Riset: Pendekatan Baru untuk Authoring & Persisten Skill
 
-Status: **RISET — belum diimplementasikan.** Menjawab pertanyaan operasional
+Status: **TERIMPLEMENTASI (pendekatan B).** Riset yang melahirkan pendekatan B; implementasinya di `services/workspace.py` (`sync_skills_to_store` + snapshot generasi/hash di `materialize_skills`), dipanggil `services/chat.py` di akhir run, dengan `tests/test_workspace_sync.py` dan E2E `test_agent_writes_skill_directly_into_skills_dir`. Menjawab pertanyaan operasional
 "kenapa agent membuat skill di `tmp/` bukan `skills/`?", lalu memetakan
 pilihan pendekatan baru untuk alur authoring skill. Bacaan pendamping:
 `docs/skill-import-plan.md` (import eksternal — gap #2/#3 relevan di sini),
@@ -140,42 +140,35 @@ Mengapa bukan yang lain:
 
 ---
 
-## 5. Catatan implementasi (untuk B — bila lanjut)
+## 5. Implementasi (pendekatan B — SELESAI)
 
 Lokasi: `src/app/services/workspace.py` (di samping `materialize_skills` /
 `git_commit`), dipanggil dari `services/chat.py` di hook run-end yang sama
-dengan `git_commit` (baris ~733).
+dengan `git_commit` (blok `finally`).
 
-1. **Snapshot saat materialize (store→disk).** Saat `materialize_skills`
-   menulis cermin, catat hash tiap file (`<path> → sha256`) per user
-   (mis. cache modul, bersamaan dengan `_workspace_lock(username)` yang
-   sudah ada).
-2. **Writeback di run-end (disk→store).** Setelah run selesai, diff
-   `skills/` vs snapshot:
-   - file baru/berubah → `resources.create_skill` / `update_skill` (validasi
-     frontmatter = boundary validation ala YantrikDB; `name`/`description`
-     wajib; path/name regex),
-   - folder skill dihapus → `resources.delete_skill` (hanya jika memang ada
-     di store — bedakan "dihapus" vs "belum termaterialisasi").
-   - hash update hanya untuk yang berubah → clobber-edits antarrun minimal.
-3. **Reuse resoures.* yang sudah ada** → store write + `agents.invalidate()`
-   otomatis (cache graph dibuang, run berikutnya baca fresh). Tanpa rebuild.
-4. **Retire/alias `publish_skill`.** Bisa dihapus (tulis langsung = persist),
-   atau dipertahankan sebagai *fallback eksplisit* untuk draft di luar
-   `skills/` (`tmp/`, `scripts/`). Rekomendasi: pertahankan dulu, dokumentasi
-   ulang bahwa folder utamanya `skills/`.
-5. **Frontmatter mentah.** Gap #2 di `skill-import-plan.md` (resources menulis
-   ulang frontmatter dari name/description, field `license`/`metadata`
-   hilang) ikut tersentuh: store value SKILL.md mentah, atau pertahankan apa
-   adanya saat update. **Provenance** (gap #3) juga relevan: tandai
-   `agent_edited_at`/`source: agent` pada writeback.
-6. **Race dua run user sama** — pakai `_workspace_lock(username)` yang sama
-   untuk snapshot+writeback, konsisten dengan materialize.
+1. **Snapshot saat materialize (store→disk).** `materialize_skills` mencatat
+   hash tiap file (`<relpath> → sha256`) per user di dalam
+   `_workspace_lock(username)` yang sudah ada, beserta **generasi**, dan
+   mengembalikan generasi itu ke `chat.py`.
+2. **Writeback di run-end (disk→store).** `sync_skills_to_store` me-diff
+   `skills/` vs snapshot: file baru/berubah → `resources.create_skill` /
+   `update_skill` dengan `raw_markdown` (SKILL.md disimpan verbatim —
+   frontmatter `license`/`metadata` tidak hilang; menutup gap #2 di
+   `skill-import-plan.md`); folder skill dihapus → `resources.delete_skill`;
+   bundled file dihapus → `resources.delete_skill_file`. Validasi frontmatter
+   terjadi di boundary write (pelajaran YantrikDB).
+3. **Reuse resources.\*** yang sudah ada → store write + `agents.invalidate()`
+   otomatis (cache graph dibuang, run berikutnya baca fresh).
+4. **`publish_skill` dipertahankan** sebagai fallback untuk draft di luar
+   `skills/` (`tmp/`, `scripts/`); deskripsi tool + `DEFAULT_SYSTEM_PROMPT`
+   diperbarui: folder authoring utama adalah `skills/`.
+5. **Frontmatter mentah** — poin 2 (`raw_markdown`). Provenance (gap #3 di
+   `skill-import-plan.md`) tetap pekerjaan terpisah.
+6. **Race dua run user sama** — writeback memakai `_workspace_lock(username)`
+   yang sama; guard generasi men-skip writeback yang materialisasinya sudah
+   digantikan run lain (run itulah yang mempersist diff-nya sendiri).
 
 Keamanan: tidak ada jalur eksekusi baru; writeback hanya memanggil CRUD yang
-ada. `allowed-tools` tetap metadata advisory (sesuai `skill-import-plan.md`).
-
----
 
 ## 6. Sumber
 

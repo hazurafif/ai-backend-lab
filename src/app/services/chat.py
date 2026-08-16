@@ -44,7 +44,7 @@ from ..core.exceptions import Conflict
 from ..core.notification_hub import hub
 from ..core.run_manager import ActiveRun, run_manager
 from ..services import agent_configs
-from ..services.workspace import git_commit, materialize_skills
+from ..services.workspace import git_commit, materialize_skills, sync_skills_to_store
 from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
@@ -582,12 +582,14 @@ async def _run_agent(
 
     interrupted = {"flag": False}
     stop_event = active.stop
+    skill_gen: int | None = None
     try:
-        # Materialize the agent's skills into the workspace dir (the only
-        # store -> disk sync; memories/uploads are plain files on the volume).
+        # Materialize the agent's skills into the workspace dir (store ->
+        # disk; the disk copy is the agent's authoring surface, synced back
+        # at run end). memories/uploads are plain files on the volume.
         try:
             spec = await agent_configs.load_spec(persistence.store, agent_name, username)
-            await materialize_skills(persistence.store, username, spec)
+            skill_gen = await materialize_skills(persistence.store, username, spec)
         except Exception:
             logger.exception("skills materialization failed for %s; running without it", username)
         # Run with the user's identity in the runtime context: the workspace
@@ -726,9 +728,15 @@ async def _run_agent(
         raise
     finally:
         # End the run lifecycle first (stream close, resume allowed), then
+        # persist agent-authored skills (disk -> store, best-effort) and
         # version the workspace: every agent change is committed to the
         # workspace's own git repo (best-effort; never fails the run).
         run_manager.finish(thread_id)
+        if skill_gen is not None:
+            try:
+                await sync_skills_to_store(persistence.store, username, skill_gen)
+            except Exception:
+                logger.exception("skills writeback failed for %s", username)
         try:
             await git_commit(f"run {thread_id} ({username})")
         except Exception:

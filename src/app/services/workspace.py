@@ -12,7 +12,9 @@ Layout under ``WORKSPACE_ROOT/<user_id>/`` (scaffolded on user create):
 - ``memories/`` — durable memory the agent reads/writes across threads
 - ``skills/`` — the **user's own skills** ("my skills", /skills API),
   materialized before each run; the admin global pool is never served to
-  default agents (full isolation). Agent edits are overwritten next run
+  default agents (full isolation). It is the agent's authoring surface:
+  write/edit skills here and the changes are synced back into the store at
+  run end (``sync_skills_to_store``), then re-materialized next run.
 - ``uploads/`` — chat uploads (written by the API, see services/uploads.py)
 - ``tmp/`` — scratch space for the agent's scripts and intermediate files
 
@@ -34,7 +36,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -43,6 +47,9 @@ from urllib.parse import urlparse
 from langgraph.store.base import BaseStore
 
 from ..core.config import settings
+from ..core.constants import user_skills_ns
+from ..schema.agent_schema import SkillFileIn, SkillIn
+from ..services import resources
 from ..services.agent_configs import AgentSpec
 
 logger = logging.getLogger(__name__)
@@ -57,6 +64,12 @@ _COMMIT_PREFIX = "[AGENT] "
 # logged as "skills materialization failed; running without it").
 _workspace_locks: dict[str, asyncio.Lock] = {}
 _workspace_locks_guard = asyncio.Lock()
+
+# Per-user skills mirror state for the run-end writeback (guarded by the
+# same per-user lock): generation counter + {relpath: sha256} of the files
+# materialized by the last store -> disk sync.
+_skill_generations: dict[str, int] = {}
+_skill_snapshots: dict[str, tuple[int, dict[str, str]]] = {}
 
 
 async def _workspace_lock(username: str) -> asyncio.Lock:
@@ -253,6 +266,7 @@ def _value_to_bytes(value: dict) -> bytes:
 
 def _replace_skill_files(dest: Path, files: list[tuple[Path, bytes]]) -> None:
     """Clear the skills dir and write the fresh materialization."""
+    dest.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         for child in dest.iterdir():
             if child.is_dir():
@@ -267,9 +281,142 @@ def _replace_skill_files(dest: Path, files: list[tuple[Path, bytes]]) -> None:
         (dest / ".gitkeep").write_text("")
 
 
+def _file_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _walk_skill_files(folder: Path) -> dict[str, bytes]:
+    """{relpath: bytes} of the regular files under ``folder`` (no symlinks)."""
+    out: dict[str, bytes] = {}
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+        for fn in filenames:
+            path = Path(dirpath) / fn
+            if path.is_symlink():
+                continue
+            out[path.relative_to(folder).as_posix()] = path.read_bytes()
+    return out
+
+
+def _skills_on_disk(skills_root: Path) -> dict[str, dict[str, bytes]]:
+    """{name: {relpath: bytes}} for every valid skill dir under ``skills_root``.
+
+    A skill is a directory named per SKILL_NAME_RE containing SKILL.md; the
+    named-agent snapshot subtrees (``<owner>/<name>/``) never match.
+    """
+    out: dict[str, dict[str, bytes]] = {}
+    for child in sorted(skills_root.iterdir()):
+        if child.is_dir() and resources.SKILL_NAME_RE.fullmatch(child.name):
+            files = _walk_skill_files(child)
+            if "SKILL.md" in files:
+                out[child.name] = files
+    return out
+
+
+def _snapshot_skill_files(snapshot: dict[str, str], name: str) -> dict[str, str]:
+    """Snapshot entries under ``<name>/`` as {relpath: sha256}."""
+    prefix = name + "/"
+    return {rel[len(prefix) :]: h for rel, h in snapshot.items() if rel.startswith(prefix)}
+
+
+async def _sync_one_skill(
+    store: BaseStore,
+    username: str,
+    name: str,
+    known: dict[str, str],
+    current: dict[str, dict[str, bytes]],
+) -> None:
+    """Persist one skill dir into the store (create/update/delete as needed).
+
+    ``name`` is the dir name; the store key follows the SKILL.md frontmatter
+    ``name`` (same rule as publish_skill). Unchanged skills are untouched;
+    bundled files the agent removed are deleted from the store.
+    """
+    ns = user_skills_ns(username)
+    old = _snapshot_skill_files(known, name)
+    files = current.get(name)
+    if files is None:
+        # The folder vanished since materialization: drop it from the store.
+        if await resources.get_skill(store, name, ns) is not None:
+            await resources.delete_skill(store, name, ns)
+        return
+    hashes = {rel: _file_sha256(data) for rel, data in files.items()}
+    if old == hashes:
+        return  # untouched since this run's materialization
+    md_text = files["SKILL.md"].decode("utf-8", errors="replace")
+    fname, description, body = resources.parse_skill_frontmatter(md_text)
+    skill = SkillIn(
+        name=fname,
+        description=description,
+        content=body,
+        files=[
+            SkillFileIn(path=rel, content=data.decode("utf-8", errors="replace"))
+            for rel, data in sorted(files.items())
+            if rel != "SKILL.md"
+        ],
+    )
+    if await resources.get_skill(store, fname, ns) is not None:
+        await resources.update_skill(store, fname, skill, ns, raw_markdown=md_text)
+    else:
+        await resources.create_skill(store, skill, ns, raw_markdown=md_text)
+    # Bundled files removed by the agent since materialization.
+    for rel in old:
+        if rel != "SKILL.md" and rel not in hashes:
+            await resources.delete_skill_file(store, fname, rel, ns)
+
+
+async def sync_skills_to_store(store: BaseStore, username: str, generation: int | None) -> None:
+    """Persist agent edits under the user's ``skills/`` dir into the store.
+
+    Called at run end, the counterpart of ``materialize_skills``: the
+    agent's filesystem is the authoring surface (write/edit a skill in
+    ``skills/`` and the change sticks — stored server-side, visible in the
+    frontend skills list, re-materialized next run), while the store stays
+    the durable source of truth. Only skills that changed since this run's
+    materialization are touched; unchanged skills are never rewritten.
+
+    Scope: the user's own skills only (``skills/<name>/`` with SKILL.md).
+    Named-agent snapshot subtrees (``skills/<owner>/<name>/``) are never
+    written back. ``generation`` is the value returned by this run's
+    ``materialize_skills``; when it is stale (another run re-materialized
+    since — that run persists its own diff) the writeback is skipped.
+    Best-effort like ``git_commit``: per-skill failures are logged and never
+    fail the run.
+    """
+    if generation is None:
+        return
+    user = workspace_dir(username)
+    skills_root = user / "skills"
+    async with await _workspace_lock(username):
+        snapshot = _skill_snapshots.get(username)
+        if snapshot is None or snapshot[0] != generation:
+            logger.info(
+                "skills writeback skipped for %s (stale generation %s)", username, generation
+            )
+            return
+        known = snapshot[1]
+        current = _skills_on_disk(skills_root)
+        known_names = {
+            rel[: rel.index("/")]
+            for rel in known
+            if rel.endswith("/SKILL.md") and rel.count("/") == 1
+        }
+        for name in sorted(known_names | set(current)):
+            try:
+                await _sync_one_skill(store, username, name, known, current)
+            except Exception:
+                logger.exception("skills writeback failed for %s skill %r", username, name)
+        # The mirror now equals the store; record it so a second writeback
+        # for the same generation is a no-op.
+        _skill_snapshots[username] = (
+            generation,
+            {rel: _file_sha256(data) for rel, data in _walk_skill_files(skills_root).items()},
+        )
+
+
 async def materialize_skills(
     store: BaseStore, username: str, spec: AgentSpec | None = None
-) -> None:
+) -> int | None:
     """Copy the agent's skills into the workspace.
 
     Called before each run. The builtin default agent gets the **user's own
@@ -277,12 +424,16 @@ async def materialize_skills(
     everyone); named agents get their snapshot namespace ([] = none). The
     target skills dir is cleared first so stale copies (e.g. from before a
     config change) can't linger. Skills are always overwritten — they are
-    user/admin-owned; agent edits are discarded next run.
+    user/admin-owned; agent edits are synced back by ``sync_skills_to_store``
+    at run end.
+
+    Returns the snapshot generation for this materialization (None when the
+    user has no skills source — nothing materialized). Pass the value to
+    ``sync_skills_to_store`` at run end so the writeback only applies to
+    skills as they were materialized for THIS run.
     """
     user = workspace_dir(username)
     if spec is None or spec.skills is None or spec.builtin:
-        from ..core.constants import user_skills_ns
-
         ns = user_skills_ns(username)
         dest = user / "skills"
     elif spec.skills_source:
@@ -294,10 +445,21 @@ async def materialize_skills(
         ns = agent_skills_ns(owner, name)
         dest = user / "skills" / owner / name
     else:
-        return
+        return None
     files = [
         (dest / (item.key or "").lstrip("/"), _value_to_bytes(item.value))
         for item in await store.asearch(ns)
     ]
+    skills_root = user / "skills"
     async with await _workspace_lock(username):
         await asyncio.to_thread(_replace_skill_files, dest, files)
+        # Snapshot what the mirror now contains (paths relative to skills/),
+        # keyed by a generation counter: the run-end writeback diffs against
+        # this snapshot and skips when another run re-materialized since.
+        generation = _skill_generations.get(username, 0) + 1
+        _skill_generations[username] = generation
+        _skill_snapshots[username] = (
+            generation,
+            {path.relative_to(skills_root).as_posix(): _file_sha256(data) for path, data in files},
+        )
+        return generation

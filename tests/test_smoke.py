@@ -664,6 +664,66 @@ async def test_agent_publishes_skill_to_store(memory_persistence):
     )
 
 
+async def test_agent_writes_skill_directly_into_skills_dir(memory_persistence, monkeypatch):
+    """A skill the agent writes straight into skills/ persists to the store.
+
+    Approach B: the workspace filesystem is the authoring surface. The agent
+    calls write_file on /skills/<name>/SKILL.md during a run; the run-end
+    writeback (sync_skills_to_store) stores it — no publish_skill dance, no
+    tmp/ draft — and the skill is frontend-visible and survives future runs.
+    """
+    monkeypatch.setattr(settings, "execute_enabled", True)
+    from app.core.constants import user_skills_ns
+    from app.services import resources
+
+    skill_md = (
+        "---\n"
+        "name: alpha\n"
+        "description: Alpha skill, authored directly in skills/.\n"
+        "---\n\n"
+        "# Alpha\n\n"
+        "1. Do the thing.\n"
+    )
+    model = Scripted(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="write_file",
+                        args={"file_path": "/skills/alpha/SKILL.md", "content": skill_md},
+                    )
+                ],
+            ),
+            AIMessage(content="Skill created."),
+        ]
+    )
+    agent = build_agent(
+        checkpointer=memory_persistence.checkpointer,
+        store=memory_persistence.store,
+        model=model,
+        system_prompt="test",
+    )
+    events = await collect_stream(agent, "tester", message="make me a skill")
+    names = [e for e, _ in events]
+    assert "tool_start" in names and "tool_end" in names, names
+    tool_end = next(d for e, d in events if e == "tool_end")
+    assert tool_end["name"] == "write_file"
+    assert not tool_end.get("is_error"), tool_end
+
+    # The run-end writeback persisted the direct write into the store.
+    ns = user_skills_ns("tester")
+    skill = await resources.get_skill(memory_persistence.store, "alpha", ns)
+    assert skill is not None
+    assert skill.content == skill_md  # raw frontmatter preserved
+    assert [s.name for s in await resources.list_skills(memory_persistence.store, ns)] == ["alpha"]
+
+    # The materialized mirror on disk matches what the agent wrote.
+    on_disk = Path(settings.workspace_root) / "tester" / "skills" / "alpha" / "SKILL.md"
+    assert on_disk.read_text() == skill_md
+
+
 async def test_publish_skill_overwrite_semantics(memory_persistence):
     """Duplicate publish errors without overwrite; overwrite=true replaces."""
     from app.services.agent import build_skill_publish_tool

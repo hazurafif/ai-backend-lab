@@ -45,6 +45,36 @@ SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SKILL_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
 """Skill name + relative file path patterns (schema-aligned, endpoint-side validation)."""
 
+
+def parse_skill_frontmatter(text: str) -> tuple[str, str, str]:
+    """(name, description, body) from a SKILL.md with YAML frontmatter.
+
+    Raises ValueError when the frontmatter is malformed or misses the
+    required `name` / `description` keys (single-line values only).
+    """
+    if not text.startswith("---"):
+        raise ValueError("SKILL.md must start with a YAML frontmatter block ('---')")
+    end = text.find("\n---", 3)
+    if end == -1:
+        raise ValueError("SKILL.md frontmatter is not closed (missing trailing '---')")
+    meta: dict[str, str] = {}
+    for line in text[3:end].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "-", ":")):
+            continue
+        key, sep, value = stripped.partition(":")
+        if not sep:
+            continue
+        meta[key.strip()] = value.strip().strip("\"'")
+    name = meta.get("name", "")
+    description = meta.get("description", "")
+    if not name:
+        raise ValueError("SKILL.md frontmatter is missing the required 'name' field")
+    if not description:
+        raise ValueError("SKILL.md frontmatter is missing the required 'description' field")
+    return name, description, text[end + 4 :].strip("\n")
+
+
 SKILLS_NS = ("agent", "skills")
 
 
@@ -202,36 +232,56 @@ async def get_skill(
 
 
 async def create_skill(
-    store: BaseStore, skill: SkillIn, ns: tuple[str, ...] | None = None
+    store: BaseStore,
+    skill: SkillIn,
+    ns: tuple[str, ...] | None = None,
+    *,
+    raw_markdown: str | None = None,
 ) -> SkillOut:
-    """Create a skill in a namespace (default: global)."""
+    """Create a skill in a namespace (default: global).
+
+    `raw_markdown` stores the SKILL.md text verbatim (agent-authored files:
+    extra frontmatter fields like `license`/`metadata` survive) instead of
+    re-serializing from name/description/content.
+    """
     ns = ns or SKILLS_NS
     _validate_skill_files(skill.files)
-    await store.aput(ns, _skill_file_key(skill.name), _skill_value(_skill_markdown(skill)))
+    content = raw_markdown or _skill_markdown(skill)
+    await store.aput(ns, _skill_file_key(skill.name), _skill_value(content))
     for f in skill.files:
         await store.aput(ns, _skill_aux_key(skill.name, f.path), _skill_value(f.content))
     files = sorted(
         (SkillFileOut(path=f.path, content=f.content) for f in skill.files), key=lambda f: f.path
     )
     path = _skill_path(skill.name) if ns == SKILLS_NS else _user_skill_path(ns[-1], skill.name)
-    return _skill_out(skill.name, _skill_markdown(skill), files, path)
+    return _skill_out(skill.name, content, files, path)
 
 
 async def update_skill(
-    store: BaseStore, name: str, skill: SkillIn, ns: tuple[str, ...] | None = None
+    store: BaseStore,
+    name: str,
+    skill: SkillIn,
+    ns: tuple[str, ...] | None = None,
+    *,
+    raw_markdown: str | None = None,
 ) -> SkillOut:
-    """Replace a skill in a namespace (default: global)."""
+    """Replace a skill in a namespace (default: global).
+
+    `raw_markdown` stores the SKILL.md text verbatim instead of
+    re-serializing from name/description/content (see `create_skill`).
+    """
     ns = ns or SKILLS_NS
     existing = await store.aget(ns, _skill_file_key(name))
     if existing is None:
         raise KeyError(name)
     _validate_skill_files(skill.files)
     # SKILL.md + listed files are replaced; unlisted bundled files are kept.
-    await store.aput(ns, _skill_file_key(name), _skill_value(_skill_markdown(skill)))
+    content = raw_markdown or _skill_markdown(skill)
+    await store.aput(ns, _skill_file_key(name), _skill_value(content))
     for f in skill.files:
         await store.aput(ns, _skill_aux_key(name, f.path), _skill_value(f.content))
     path = _skill_path(name) if ns == SKILLS_NS else _user_skill_path(ns[-1], name)
-    return _skill_out(skill.name, _skill_markdown(skill), await _skill_files(store, name, ns), path)
+    return _skill_out(skill.name, content, await _skill_files(store, name, ns), path)
 
 
 async def delete_skill(store: BaseStore, name: str, ns: tuple[str, ...] | None = None) -> bool:

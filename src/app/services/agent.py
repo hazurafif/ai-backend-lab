@@ -17,7 +17,9 @@ Plus:
   - skills materialized into the user's workspace before each run (see
     services/workspace.materialize_skills), loaded via the store-backed
     /skills CRUD API (no agent rebuild needed — SkillsMiddleware reads the
-    backend on every run).
+    backend on every run). The workspace skills/ dir is the authoring
+    surface: agent writes/edits there are synced back into the store at
+    run end by services/workspace.sync_skills_to_store.
 
 The agent is told its workspace layout (skills/, uploads/, tmp/, memories/)
 by the system prompt — see DEFAULT_SYSTEM_PROMPT in core/constants.py, which
@@ -86,38 +88,6 @@ class PublishSkillInput(BaseModel):
     )
 
 
-def _parse_skill_frontmatter(text: str) -> tuple[str, str, str]:
-    """(name, description, body) from a SKILL.md with YAML frontmatter.
-
-    Raises ValueError when the frontmatter is malformed or misses the
-    required `name` / `description` keys (single-line values only).
-    """
-    if not text.startswith("---"):
-        raise ValueError("SKILL.md must start with a YAML frontmatter block ('---')")
-    end = text.find("\n---", 3)
-    if end == -1:
-        raise ValueError("SKILL.md frontmatter is not closed (missing trailing '---')")
-    meta: dict[str, str] = {}
-    for line in text[3:end].splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith(("#", "-", ":")):
-            continue
-        key, sep, value = stripped.partition(":")
-        if not sep:
-            continue
-        meta[key.strip()] = value.strip().strip("\"'")
-    name = meta.get("name", "")
-    description = meta.get("description", "")
-    if not name:
-        raise ValueError("SKILL.md frontmatter is missing the required 'name' field")
-    if not description:
-        raise ValueError("SKILL.md frontmatter is missing the required 'description' field")
-    return name, description, text[end + 4 :].strip("\n")
-
-
-_SKIP_BUNDLE_DIRS = {".git", ".venv", "__pycache__", "node_modules"}
-
-
 def _resolve_user_folder(path: str) -> Path:
     """Resolve a virtual workspace path under the current user's dir (file-tool rules)."""
     vpath = path if path.startswith("/") else "/" + path
@@ -130,6 +100,9 @@ def _resolve_user_folder(path: str) -> Path:
     except ValueError:
         raise ValueError(f"Path:{path} outside the workspace root") from None
     return full
+
+
+_SKIP_BUNDLE_DIRS = {".git", ".venv", "__pycache__", "node_modules"}
 
 
 def _bundle_files(folder: Path) -> list[SkillFileIn]:
@@ -172,7 +145,7 @@ async def _publish_skill(skill_path: str, overwrite: bool = False) -> str:
             "SKILL.md with YAML frontmatter (name + description)."
         )
     try:
-        name, description, body = _parse_skill_frontmatter(
+        name, description, body = resources.parse_skill_frontmatter(
             skill_md.read_text(encoding="utf-8", errors="replace")
         )
     except ValueError as exc:
@@ -220,8 +193,9 @@ def build_skill_publish_tool() -> BaseTool:
             "(name + description); every other file in the folder is bundled "
             "with it. The skill is stored server-side: it appears in the "
             "frontend skills list immediately and is loaded into your skills/ "
-            "folder at the start of every future run. Use this when the user "
-            "asks you to create a skill."
+            "folder at the start of every future run. Use this to publish a "
+            "draft folder from outside skills/ (e.g. tmp/); skills written "
+            "directly into skills/ are persisted automatically at run end."
         ),
         args_schema=PublishSkillInput,
     )
