@@ -51,6 +51,19 @@ _CREDENTIALS_FILE = ".git-credentials"
 _WORKSPACE_GITIGNORE = f"{_CREDENTIALS_FILE}\n.venv/\n__pycache__/\n"
 _COMMIT_PREFIX = "[AGENT] "
 
+# Serialize store -> disk skills materialization per user: two concurrent
+# runs of the same user race on the skills dir otherwise (TOCTOU between
+# _replace_skill_files' rmtree/unlink and iterdir -> FileNotFoundError,
+# logged as "skills materialization failed; running without it").
+_workspace_locks: dict[str, asyncio.Lock] = {}
+_workspace_locks_guard = asyncio.Lock()
+
+
+async def _workspace_lock(username: str) -> asyncio.Lock:
+    """The per-user lock guarding workspace mutations (materialization)."""
+    async with _workspace_locks_guard:
+        return _workspace_locks.setdefault(username, asyncio.Lock())
+
 
 def workspace_root() -> Path:
     """The workspace root dir (created on demand)."""
@@ -286,4 +299,5 @@ async def materialize_skills(
         (dest / (item.key or "").lstrip("/"), _value_to_bytes(item.value))
         for item in await store.asearch(ns)
     ]
-    await asyncio.to_thread(_replace_skill_files, dest, files)
+    async with await _workspace_lock(username):
+        await asyncio.to_thread(_replace_skill_files, dest, files)
