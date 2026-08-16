@@ -70,6 +70,13 @@ Rules:
   checkpointer/store singleton in `core/database.py`.
 - The SSE event contract in `app/main.py`'s module docstring is **normative** —
   keep it in sync with `services/chat.py`.
+- **Bulk thread delete** — `DELETE /threads` (Bearer, 204, idempotent) removes
+  ALL of the current user's threads in one request: share links, chat history
+  rows, checkpointer state, then store metadata (order matters). It is the
+  counterpart of `DELETE /threads/{id}` and exists so the frontend's "delete
+  all" is one request instead of an N+1 loop. Keep the two delete paths in
+  sync (`core/database.py::ChatHistoryStore.delete_threads`, checkpointer
+  `adelete_thread` loop).
 - Cross-module imports use explicit module paths (e.g.
   `from app.services import resources`), never `import *`.
 - Never import from the repo root — only from `src/app/` (editable install).

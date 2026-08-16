@@ -309,3 +309,41 @@ async def test_task_cancellation_finalizes_as_cancelled(memory_persistence):
         item = await persistence.store.aget(thread_metadata_ns("tester"), "bg-shutdown")
         assert item is not None and item.value.get("status") == "cancelled", item
         assert "run_cancelled" in [e["type"] for e in hub.recent("tester")], hub.recent("tester")
+
+
+async def test_delete_all_threads(memory_persistence):
+    """Bulk DELETE /threads removes every thread of the user, others untouched."""
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+    async with app.router.lifespan_context(app):
+        for user in ("tester", "other"):
+            await persistence.users.create_user(username=user, hashed_password="x")
+        # Seed two threads (metadata + history rows) for tester, one for other.
+        for tid in ("bulk-1", "bulk-2"):
+            await _record_thread_metadata(
+                tid, "tester", f"prompt {tid}", "default", status="completed"
+            )
+            await persistence.chat_history.add_messages(
+                tid, "tester", [{"id": f"m-{tid}", "type": "ai", "content": "hi"}]
+            )
+        await _record_thread_metadata("other-1", "other", "keep", "default", status="completed")
+        await persistence.chat_history.add_messages(
+            "other-1", "other", [{"id": "m-other", "type": "ai", "content": "hi"}]
+        )
+
+        async with await make_client(app) as client:
+            r = await client.delete("/threads")
+            assert r.status_code == 204, r.text
+
+        # Tester's metadata + history are gone.
+        assert await persistence.store.aget(thread_metadata_ns("tester"), "bulk-1") is None
+        assert await persistence.store.aget(thread_metadata_ns("tester"), "bulk-2") is None
+        assert await persistence.chat_history.list_messages("bulk-1") == []
+        assert await persistence.chat_history.list_messages("bulk-2") == []
+        # Other users' threads are untouched.
+        assert await persistence.store.aget(thread_metadata_ns("other"), "other-1") is not None
+        assert len(await persistence.chat_history.list_messages("other-1")) == 1
+
+        # Idempotent: an empty delete-all is a clean 204.
+        async with await make_client(app) as client:
+            r = await client.delete("/threads")
+            assert r.status_code == 204, r.text

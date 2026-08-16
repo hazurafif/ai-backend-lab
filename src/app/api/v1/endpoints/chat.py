@@ -365,6 +365,45 @@ async def recent_notifications(
     return hub.recent(current_user["username"], limit=limit)
 
 
+@router.delete("/threads", status_code=204)
+async def delete_all_threads(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete ALL of the current user's threads: checkpoint state, history, metadata.
+
+    The bulk counterpart of `DELETE /threads/{id}` — one request instead of a
+    per-thread loop, so "delete all" never leaves threads behind when a single
+    request fails mid-way. Shares are revoked with the metadata they live in.
+    """
+    username = current_user["username"]
+    ns = thread_metadata_ns(username)
+    items = await persistence.store.asearch(ns)
+    thread_ids = [item.key for item in items]
+    if not thread_ids:
+        return None
+
+    # Drop share links (the token lives in the thread metadata) before the
+    # metadata rows are removed.
+    for item in items:
+        await share_service.revoke_by_thread(item.key, username, item.value.get("share_token"))
+
+    # History rows: one statement for all of the user's threads.
+    await persistence.chat_history.delete_threads(thread_ids)
+
+    # Checkpoint state per thread via the checkpointer — the same path the
+    # per-thread delete uses (the saver owns checkpoints/blobs/writes).
+    checkpointer = persistence.checkpointer
+    delete_thread = getattr(checkpointer, "adelete_thread", None)
+    if delete_thread is not None:
+        for thread_id in thread_ids:
+            await delete_thread(thread_id)
+
+    for thread_id in thread_ids:
+        await persistence.store.adelete(ns, thread_id)
+    return None
+
+
 @router.delete("/threads/{thread_id}", status_code=204)
 async def delete_thread(
     request: Request,

@@ -321,6 +321,23 @@ class ChatHistoryStore:
         self._memory_ids.pop(thread_id, None)
         return deleted
 
+    async def delete_threads(self, thread_ids: list[str]) -> int:
+        """Remove all message rows of the given threads (bulk delete-all)."""
+        if not thread_ids:
+            return 0
+        if self._pool is not None:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM chat_messages WHERE thread_id = ANY(%s)",
+                    (list(thread_ids),),
+                )
+                return cur.rowcount or 0
+        deleted = 0
+        for thread_id in thread_ids:
+            deleted += len(self._memory.pop(thread_id, []))
+            self._memory_ids.pop(thread_id, None)
+        return deleted
+
     async def list_messages(self, thread_id: str) -> list[dict]:
         """All stored messages of a thread in chronological order.
 
