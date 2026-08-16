@@ -116,7 +116,7 @@ def _configure_git() -> None:
         creds = root / _CREDENTIALS_FILE
         with contextlib.suppress(OSError):
             # Un-stick a previously 0600-chmod'd file: some container bind
-            # mounts (podman on macOS) enforce writes against the file's
+            # mounts (docker on macOS via OrbStack) enforce writes against the file's
             # container-visible mode regardless of uid, so a leftover 0600
             # would lock the file against this very write. Best-effort.
             creds.chmod(0o666)
@@ -124,8 +124,8 @@ def _configure_git() -> None:
         try:
             creds.chmod(0o600)
         except OSError:
-            # Best-effort: on mounts where chmod doesn't stick (podman on
-            # macOS) the host-side mode governs access; keep going.
+            # Best-effort: on mounts where chmod doesn't stick (docker on
+            # macOS via OrbStack) the host-side mode governs access; keep going.
             logger.warning(
                 "could not chmod %s to 0600 (bind-mount limits); keeping host mode", creds
             )

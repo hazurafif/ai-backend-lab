@@ -1,8 +1,8 @@
 # AI backend stack: FastAPI Deep Agents app + Postgres.
 #
-#   podman compose up -d --build          # app (:8000) + Postgres (:5432)
-#   podman compose --profile extras up -d # + searxng (:8092) + weaviate (:8093)
-#   podman compose logs -f app            # follow the app logs
+#   docker compose up -d --build          # app (:8000) + Postgres (:5432)
+#   docker compose --profile extras up -d # + searxng (:8092) + weaviate (:8093)
+#   docker compose logs -f app            # follow the app logs
 #
 # `name` pins the compose project so containers/volumes keep their current
 # names (ai-backend-lab-*) across config changes.
@@ -11,12 +11,12 @@ name: ai-backend-lab
 services:
   app:
     build: .
-    # Run as root INSIDE the container. Reason: podman bind mounts present
+    # Run as root INSIDE the container. Reason: OrbStack bind mounts present
     # host files as root-owned (named volumes get auto-chowned to the
     # container user, bind mounts don't), so the image's non-root appuser
     # could not own the workspace -> git "dubious ownership" + EPERM on
     # .git-credentials. As root, everything written maps to the host user
-    # (root-in-podman == macOS user), so .workspace stays browsable on the
+    # (root-in-OrbStack == macOS user), so .workspace stays browsable on the
     # host. The container is still the boundary — not the host.
     user: "0"
     env_file:
@@ -69,7 +69,7 @@ services:
 
   # Self-hosted metasearch engine backing the agent's web_search tool.
   # JSON API is enabled via ./searxng/settings.yml (required by the backend).
-  # Opt-in: podman compose --profile extras up -d searxng
+  # Opt-in: docker compose --profile extras up -d searxng
   searxng:
     image: searxng/searxng:latest
     profiles: ["extras"]
@@ -81,7 +81,7 @@ services:
 
   # Vector store for the knowledge base (RAG): hybrid search, no vectorizer
   # modules — embeddings are computed in app code (WEAVIATE_URL in .env).
-  # Opt-in: podman compose --profile extras up -d weaviate
+  # Opt-in: docker compose --profile extras up -d weaviate
   weaviate:
     image: cr.weaviate.io/semitechnologies/weaviate:1.30.0
     profiles: ["extras"]

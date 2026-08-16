@@ -30,21 +30,23 @@ uv run uvicorn app.main:app --port 8000 --reload
   (override: `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD`)
 - Without `DATABASE_URI` everything runs in-memory (data lost on restart)
 
-## Container
+## Container (OrbStack)
 
 ```bash
-podman compose up -d --build            # app (:8000) + Postgres (:5432)
-podman compose --profile extras up -d   # + searxng (:8092) + weaviate (:8093)
-podman compose logs -f app              # follow the app logs
+docker compose up -d --build            # app (:8000) + Postgres (:5432)
+docker compose --profile extras up -d   # + searxng (:8092) + weaviate (:8093)
+docker compose logs -f app              # follow the app logs
 ```
 
-`docker compose` works identically. The app container runs as a non-root user
+On macOS the `docker` CLI is provided by [OrbStack](https://orbstack.dev)
+(free, no Docker Desktop needed). The app container runs as a non-root user
 with a `/health` healthcheck and a 1 GB memory cap; the agent's `execute`
 tool (when enabled via `EXECUTE_ENABLED=true`) runs *inside* the app
 container (cwd `/app`), so the container is the boundary — not the host.
 
-No container engine on macOS? `./scripts/run_podman.sh` (`start` | `stop` | `clean`)
-runs the app capped at 1 GB RAM.
+Prefer plain `docker run` over compose? `./scripts/run_orbstack.sh`
+(`start` | `stop` | `clean`) builds and runs the same stack, app capped at
+1 GB RAM.
 
 ## Storage model (what the agent sees)
 
@@ -100,7 +102,7 @@ Everything is env-driven — full list in `.env.example` (`src/app/core/config.p
 | Chat model | `DEEPAGENTS_MODEL=<provider>:<model>` or the default `llm` connection's `extra.model` — no default, unconfigured = loud startup error |
 | Postgres | `DATABASE_URI=postgresql://user:pass@host:5432/dbname` — tables/migrations apply at startup |
 | MCP servers | `MCP_SERVERS_JSON` or `mcp_servers.json`; or store-managed via `/agent/tools` |
-| Web search | `SEARXNG_URL` + `SEARXNG_ENABLED` (`podman compose --profile extras up -d searxng`) |
+| Web search | `SEARXNG_URL` + `SEARXNG_ENABLED` (`docker compose --profile extras up -d searxng`) |
 | Execute tool | `EXECUTE_ENABLED=true` — opt-in, off by default, dev/trusted only |
 | HITL | `INTERRUPT_ON_JSON='{"execute": true, "edit_file": true}'` |
 | KB embeddings | OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`) or **local MLX**: `./scripts/mlx_embeddings.sh` + `EMBEDDINGS_MLX_URL=http://127.0.0.1:8080/v1` (Qwen3-Embedding-0.6B on Apple Silicon, no API fees) |
