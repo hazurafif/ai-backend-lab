@@ -41,10 +41,11 @@ from ..core.constants import (
     user_agents_ns,
     user_skills_ns,
 )
+from ..core.database import persistence
 from ..schema.agent_config_schema import AgentConfigIn, AgentConfigOut
 from ..services import settings as runtime_settings
 from ..services.connections import llm_model_name
-from ..services.model_allowlist import is_model_allowed
+from ..services.model_allowlist import is_model_allowed, role_allows_all
 from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
@@ -324,20 +325,26 @@ async def list_configs(
 
 
 async def _check_model_allowed(store: BaseStore, username: str, model: str | None) -> None:
-    """Reject a user-scoped config whose model is not on the user's allowlist.
+    """Reject a user-scoped config whose model is outside the role allowlist.
 
-    No-op when the allowlist is unrestricted or the model is allowed; raises
-    PermissionDenied otherwise. Global (admin-managed) configs are not gated.
+    The admin-managed global allowlist gates `user`-role accounts (guests
+    and unknown users count as `user`); admins are never restricted.
+    No-op when the allowlist is unrestricted or the model is allowed;
+    raises PermissionDenied otherwise. Global (admin-managed) configs are
+    not gated.
     """
     if not model:
         return
-    if not await is_model_allowed(store, username, model):
+    user = await persistence.users.get_user(username)
+    if role_allows_all((user or {}).get("role")):
+        return
+    if not await is_model_allowed(model):
         from ..core.exceptions import PermissionDenied
 
         raise PermissionDenied(
             detail=(
-                f"Model '{model}' is not allowed for user '{username}' — an admin "
-                "must add it via PUT /users/{username}/allowed-models"
+                f"Model '{model}' is not allowed for user accounts — an admin "
+                "must add it via PUT /allowed-models"
             )
         )
 

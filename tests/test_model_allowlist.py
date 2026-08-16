@@ -1,14 +1,15 @@
-"""Offline tests for per-user model allowlists (admin-managed).
+"""Offline tests for the global model allowlist (admin-managed, role-based).
 
-Covers:
+A single allowlist applies to every `user`-role account (guests included);
+admins are never restricted. Covers:
 
-  - store: get/set/clear/is_restricted/is_model_allowed semantics (memory mode)
-  - endpoints: admin PUT/GET/DELETE /users/{username}/allowed-models, the
-    user-facing GET /users/me/allowed-models, 403 for non-admins, 404 for
-    unknown users
+  - store (app_settings): get/set/clear/is_restricted/is_model_allowed,
+    effective_for_role (admin vs user)
+  - endpoints: admin GET/PUT/DELETE /allowed-models, the user-facing
+    GET /users/me/allowed-models, 403 for non-admins
   - enforcement: user-scoped agent configs reject models outside the
-    allowlist (403) while global (admin) configs and unrestricted users keep
-    working; chat on a restricted model stops with 403
+    allowlist (403) while admin-created configs and unrestricted states keep
+    working; chat on a restricted model stops with 403 for users, not admins
 """
 
 from __future__ import annotations
@@ -72,29 +73,35 @@ def _agent_payload(name: str, model: str, **overrides) -> dict:
 async def test_allowlist_store_semantics():
     await database.persistence.start()
     try:
-        store = database.persistence.store
         # unset -> unrestricted
-        assert await model_allowlist.get_allowed_models(store, "alice") == []
-        assert await model_allowlist.is_restricted(store, "alice") is False
-        assert await model_allowlist.is_model_allowed(store, "alice", "anything") is True
+        assert await model_allowlist.get_allowed_models() == []
+        assert await model_allowlist.is_restricted() is False
+        assert await model_allowlist.is_model_allowed("anything") is True
 
         # set -> only listed models
-        await model_allowlist.set_allowed_models(store, "alice", ["openai:gpt-4o-mini"])
-        assert await model_allowlist.is_restricted(store, "alice") is True
-        assert await model_allowlist.is_model_allowed(store, "alice", "openai:gpt-4o-mini") is True
-        assert await model_allowlist.is_model_allowed(store, "alice", "gemini-2.5-pro") is False
-
-        # per-user isolation
-        assert await model_allowlist.is_model_allowed(store, "bob", "gemini-2.5-pro") is True
+        await model_allowlist.set_allowed_models(["openai:gpt-4o-mini"])
+        assert await model_allowlist.is_restricted() is True
+        assert await model_allowlist.is_model_allowed("openai:gpt-4o-mini") is True
+        assert await model_allowlist.is_model_allowed("gemini-2.5-pro") is False
 
         # empty list -> allow nothing
-        await model_allowlist.set_allowed_models(store, "alice", [])
-        assert await model_allowlist.is_model_allowed(store, "alice", "openai:gpt-4o-mini") is False
+        await model_allowlist.set_allowed_models([])
+        assert await model_allowlist.is_model_allowed("openai:gpt-4o-mini") is False
 
         # clear -> unrestricted again
-        assert await model_allowlist.clear_allowed_models(store, "alice") is True
-        assert await model_allowlist.clear_allowed_models(store, "alice") is False
-        assert await model_allowlist.is_restricted(store, "alice") is False
+        assert await model_allowlist.clear_allowed_models() is True
+        assert await model_allowlist.clear_allowed_models() is False
+        assert await model_allowlist.is_restricted() is False
+
+        # role semantics: admins bypass, users (and guests) don't
+        await model_allowlist.set_allowed_models(["openai:gpt-4o-mini"])
+        assert model_allowlist.role_allows_all("admin") is True
+        assert model_allowlist.role_allows_all("user") is False
+        assert model_allowlist.role_allows_all(None) is False  # guests
+        eff = await model_allowlist.effective_for_role("admin")
+        assert eff == {"restricted": False, "models": ["openai:gpt-4o-mini"]}
+        eff = await model_allowlist.effective_for_role("user")
+        assert eff == {"restricted": True, "models": ["openai:gpt-4o-mini"]}
     finally:
         await database.persistence.stop()
 
@@ -107,16 +114,13 @@ async def test_allowlist_store_semantics():
 async def test_admin_allowlist_crud():
     admin = await _client("root", role="admin")
     async with admin:
-        await database.persistence.users.create_user(username="alice", hashed_password="x")
-        # unknown user -> 404
-        r = await admin.get("/users/ghost/allowed-models")
-        assert r.status_code == 404, r.text
-        r = await admin.put("/users/ghost/allowed-models", json={"models": ["x"]})
-        assert r.status_code == 404, r.text
+        # unset -> unrestricted
+        r = await admin.get("/allowed-models")
+        assert r.status_code == 200 and r.json() == {"restricted": False, "models": []}
 
         # set -> restricted view
         r = await admin.put(
-            "/users/alice/allowed-models",
+            "/allowed-models",
             json={"models": ["openai:gpt-4o-mini", "gemini-2.5-pro"]},
         )
         assert r.status_code == 200, r.text
@@ -126,45 +130,44 @@ async def test_admin_allowlist_crud():
         }
 
         # GET reflects it
-        r = await admin.get("/users/alice/allowed-models")
-        assert r.json()["restricted"] is True
-        assert r.json()["models"] == ["openai:gpt-4o-mini", "gemini-2.5-pro"]
+        r = await admin.get("/allowed-models")
+        assert r.json() == {"restricted": True, "models": ["openai:gpt-4o-mini", "gemini-2.5-pro"]}
 
         # empty list -> allow nothing
-        r = await admin.put("/users/alice/allowed-models", json={"models": []})
+        r = await admin.put("/allowed-models", json={"models": []})
         assert r.json() == {"restricted": True, "models": []}
 
         # DELETE -> unrestricted
-        r = await admin.delete("/users/alice/allowed-models")
+        r = await admin.delete("/allowed-models")
         assert r.status_code == 204, r.text
-        r = await admin.get("/users/alice/allowed-models")
+        r = await admin.get("/allowed-models")
         assert r.json() == {"restricted": False, "models": []}
 
 
-async def test_allowlist_non_admin_forbidden_and_me_view():
-    user = await _client("alice")
-    async with user:
-        # users cannot set (or even manage) allowlists
-        r = await user.put("/users/alice/allowed-models", json={"models": ["x"]})
-        assert r.status_code == 403, r.text
-        r = await user.get("/users/alice/allowed-models")
-        assert r.status_code == 403, r.text
-
-        # but they read their own restriction (unrestricted here)
-        r = await user.get("/users/me/allowed-models")
-        assert r.status_code == 200 and r.json() == {"restricted": False, "models": []}
-
-    # admin restricts, the user sees it via /users/me (same app/store)
+async def test_allowlist_endpoint_permissions_and_me_view():
     app = create_app()
     admin = await _client("root", role="admin", app=app)
     async with admin:
-        await database.persistence.users.create_user(username="alice", hashed_password="x")
-        r = await admin.put("/users/alice/allowed-models", json={"models": ["gemini-2.5-pro"]})
+        r = await admin.put("/allowed-models", json={"models": ["gemini-2.5-pro"]})
         assert r.status_code == 200, r.text
-    user2 = await _client("alice", app=app)
-    async with user2:
-        r = await user2.get("/users/me/allowed-models")
+
+    # users cannot set (or read) the global allowlist
+    user = await _client("alice", app=app)
+    async with user:
+        r = await user.put("/allowed-models", json={"models": ["x"]})
+        assert r.status_code == 403, r.text
+        r = await user.get("/allowed-models")
+        assert r.status_code == 403, r.text
+
+        # but they read their own restriction via /users/me
+        r = await user.get("/users/me/allowed-models")
         assert r.json() == {"restricted": True, "models": ["gemini-2.5-pro"]}
+
+    # admins are never restricted in their own view
+    admin2 = await _client("root", role="admin", app=app)
+    async with admin2:
+        r = await admin2.get("/users/me/allowed-models")
+        assert r.json() == {"restricted": False, "models": ["gemini-2.5-pro"]}
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +179,8 @@ async def test_agent_config_create_respects_allowlist():
     app = create_app()
     admin = await _client("root", role="admin", app=app)
     async with admin:
-        await database.persistence.users.create_user(username="alice", hashed_password="x")
-        await admin.put("/users/alice/allowed-models", json={"models": ["openai:gpt-4o-mini"]})
+        r = await admin.put("/allowed-models", json={"models": ["openai:gpt-4o-mini"]})
+        assert r.status_code == 200, r.text
 
     alice = await _client("alice", app=app)
     async with alice:
@@ -196,32 +199,39 @@ async def test_agent_config_create_respects_allowlist():
         r = await alice.get("/agents/research")
         assert r.json()["model"] == "openai:gpt-4o-mini"
 
-    # unrestricted user is unaffected
-    bob = await _client("bob")
-    async with bob:
-        r = await bob.post("/agents", json=_agent_payload("research", "gemini-2.5-pro"))
-        assert r.status_code == 201, r.text
 
-
-async def test_global_agents_not_gated_by_allowlist():
-    """Admin-created global agents may use any model (admins manage them)."""
-    admin = await _client("root", role="admin")
+async def test_admins_bypass_allowlist():
+    """Admins may create user-scoped agents with any model."""
+    app = create_app()
+    admin = await _client("root", role="admin", app=app)
     async with admin:
-        await database.persistence.users.create_user(username="alice", hashed_password="x")
-        await admin.put("/users/alice/allowed-models", json={"models": ["openai:gpt-4o-mini"]})
+        await admin.put("/allowed-models", json={"models": ["openai:gpt-4o-mini"]})
+        r = await admin.post("/agents", json=_agent_payload("research", "gemini-2.5-pro"))
+        assert r.status_code == 201, r.text
+        # global agents are also unaffected
         r = await admin.post(
-            "/agents",
-            json=_agent_payload("research", "gemini-2.5-pro", scope="global"),
+            "/agents", json=_agent_payload("shared", "gemini-2.5-pro", scope="global")
         )
         assert r.status_code == 201, r.text
 
 
-async def test_chat_blocked_on_restricted_model():
-    """A user chatting on a model outside the allowlist gets 403 (default agent included)."""
+async def test_unrestricted_state_allows_everything():
     app = create_app()
     admin = await _client("root", role="admin", app=app)
     async with admin:
-        await database.persistence.users.create_user(username="alice", hashed_password="x")
+        # never set -> no restriction
+        alice = await _client("alice", app=app)
+        r = await alice.post("/agents", json=_agent_payload("research", "gemini-2.5-pro"))
+        assert r.status_code == 201, r.text
+        r = await alice.get("/users/me/allowed-models")
+        assert r.json() == {"restricted": False, "models": []}
+
+
+async def test_chat_blocked_on_restricted_model_for_users():
+    """Users chatting on a model outside the allowlist get 403 (default agent included)."""
+    app = create_app()
+    admin = await _client("root", role="admin", app=app)
+    async with admin:
         await database.persistence.connections.create(
             {
                 "name": "zen",
@@ -237,7 +247,7 @@ async def test_chat_blocked_on_restricted_model():
         await connection_service.refresh_resolved_connections()
 
         # default agent model is openai:deepseek-v4-flash — not allowed
-        await admin.put("/users/alice/allowed-models", json={"models": ["gemini-2.5-pro"]})
+        await admin.put("/allowed-models", json={"models": ["gemini-2.5-pro"]})
 
     alice = await _client("alice", app=app)
     async with alice:
@@ -245,16 +255,12 @@ async def test_chat_blocked_on_restricted_model():
         assert r.status_code == 403, r.text
         assert "deepseek-v4-flash" in r.json()["detail"]
 
-        # the allowed model is not gated at config time
+        # an allowed model is not gated at config time
         r = await alice.post("/agents", json=_agent_payload("research", "gemini-2.5-pro"))
         assert r.status_code == 201, r.text
 
-        # users/me reflects the restriction
-        r = await alice.get("/users/me/allowed-models")
-        assert r.json() == {"restricted": True, "models": ["gemini-2.5-pro"]}
-
-    # an unrestricted user chats normally on the same default model
-    bob = await _client("bob", app=app)
-    async with bob:
-        r = await bob.post("/chat", json={"message": "hello"})
+    # an admin chats normally on the same default model
+    admin2 = await _client("root", role="admin", app=app)
+    async with admin2:
+        r = await admin2.post("/chat", json={"message": "hello"})
         assert r.status_code == 200, r.text

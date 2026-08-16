@@ -84,13 +84,15 @@ async def _resolve_agent(request: Request, name: str | None, username: str) -> C
     spec = await agent_configs.load_spec(persistence.store, name, username)
     if spec is not None:
         effective = spec.model or llm_model_name()
-        if effective and not await model_allowlist.is_model_allowed(
-            persistence.store, username, effective
-        ):
+        user = await persistence.users.get_user(username)
+        allowed = model_allowlist.role_allows_all((user or {}).get("role")) or (
+            effective is None or await model_allowlist.is_model_allowed(effective)
+        )
+        if not allowed:
             raise PermissionDenied(
                 detail=(
-                    f"Model '{effective}' is not allowed for this user — an admin "
-                    "must add it via PUT /users/{username}/allowed-models"
+                    f"Model '{effective}' is not allowed for user accounts — an "
+                    "admin must add it via PUT /allowed-models"
                 )
             )
     try:
