@@ -37,6 +37,12 @@ resolves the hash server-side via `get_tool_by_hash`, so the proxy never
 needs to know the mapping. With no `server_hint` the call fans out across
 the user's configured servers; a server that doesn't know the name reports
 tool-not-found and the next server is tried (first hit wins).
+
+MCP resources are a client-side concept, so the LangChain agent cannot see
+them — `MCPServers.list_resources` / `read_resource` wrap the raw MCP SDK
+(resource templates included, which list_resources alone hides) and
+`connect()` registers them as the `mcp_list_resources` / `mcp_read_resource`
+bridge tools, attributed to every connected server.
 """
 
 from __future__ import annotations
@@ -49,16 +55,23 @@ from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import create_session
 from langgraph.store.base import BaseStore
 from mcp import ClientSession
 from mcp.shared.exceptions import McpError
-from mcp.types import CallToolResult, TextContent
+from mcp.types import (
+    METHOD_NOT_FOUND,
+    BlobResourceContents,
+    CallToolResult,
+    TextContent,
+    TextResourceContents,
+)
+from pydantic import BaseModel, Field
 
 from ..core.config import settings
-from ..schema.mcp_schema import McpToolCallOut
+from ..schema.mcp_schema import McpResourceOut, McpResourceReadOut, McpToolCallOut
 from .resources import load_tool_server_configs
 
 logger = logging.getLogger(__name__)
@@ -77,6 +90,29 @@ def _is_tool_not_found(message: str) -> bool:
     return bool(_TOOL_NOT_FOUND_RE.search(message))
 
 
+# MCP spec error code for "resource not found" (-32002) — the SDK does not
+# export it. METHOD_NOT_FOUND (-32601) means the server never implements the
+# resources feature (e.g. context7-style tool-only servers) and is treated as
+# "try the next server" in fan-out, never as a failure.
+RESOURCE_NOT_FOUND_CODE = -32002
+
+_RESOURCE_NOT_FOUND_RE = re.compile(
+    r"unknown resource|resource not found|not found: |resource [a-z0-9_.:/-]+ not found",
+    re.IGNORECASE,
+)
+
+
+def _is_resource_not_found(error: McpError) -> bool:
+    """True when an MCP error means "this server doesn't have that resource".
+
+    Covers the spec's -32002 code, FastMCP/gofastmcp message dialects, and
+    -32601 (server without a resources feature at all).
+    """
+    return error.error.code in (RESOURCE_NOT_FOUND_CODE, METHOD_NOT_FOUND) or bool(
+        _RESOURCE_NOT_FOUND_RE.search(str(error))
+    )
+
+
 def _result_text(result: CallToolResult) -> str:
     """Concatenated text of a result's text content blocks (error messages)."""
     return " ".join(c.text for c in result.content if isinstance(c, TextContent) and c.text)
@@ -84,6 +120,10 @@ def _result_text(result: CallToolResult) -> str:
 
 class McpToolNotFoundError(Exception):
     """No configured server knows the requested tool (maps to HTTP 404)."""
+
+
+class McpResourceNotFoundError(McpToolNotFoundError):
+    """No configured server has the requested resource (maps to HTTP 404)."""
 
 
 class McpTransportError(Exception):
@@ -170,6 +210,11 @@ class MCPServers:
                 names.append(tool.name)
                 self.tools.append(tool)
             self.tools_by_server[server_name] = names
+        resource_tools = build_resource_tools(self)
+        if resource_tools and self.tools_by_server:
+            self.tools.extend(resource_tools)
+            for names in self.tools_by_server.values():
+                names.extend(t.name for t in resource_tools)
         if self.failed:
             logger.info(
                 "Connected MCP servers: %s (%d tools total); failed: %s",
@@ -245,6 +290,117 @@ class MCPServers:
             )
         detail = f" (tried: {', '.join(not_found)})" if not_found else ""
         raise McpToolNotFoundError(f"Tool {name!r} not found on any MCP server{detail}")
+
+    # ------------------------------------------------------------------
+    # resources: raw-SDK list (static + templates) and read
+    # ------------------------------------------------------------------
+
+    async def list_resources(self, server_hint: str | None = None) -> list[McpResourceOut]:
+        """List resources + resource templates from MCP server(s).
+
+        `server_hint` restricts to one server; otherwise every configured
+        server contributes. Servers that fail are recorded in `self.failed`
+        and skipped (one dead server never kills the listing); servers that
+        don't implement the resources feature (-32601) are skipped quietly.
+        Templates are included because `list_resources()` hides them —
+        parameterized resources are only discoverable via
+        `list_resource_templates()`.
+        """
+        candidates = [server_hint] if server_hint is not None else list(self._config)
+        if server_hint is not None and server_hint not in self._config:
+            raise McpToolNotFoundError(f"Unknown MCP server {server_hint!r}")
+
+        items: list[McpResourceOut] = []
+        for server in candidates:
+            try:
+                session = await self._get_session(server)
+                listed = await session.list_resources()
+                templates = await session.list_resource_templates()
+            except McpError as e:
+                if e.error.code == METHOD_NOT_FOUND:
+                    continue  # tool-only server: no resources feature
+                await self._close_session(server)
+                self.failed[server] = str(e)
+                logger.warning("MCP resource listing failed: server=%s error=%s", server, e)
+                continue
+            except Exception as e:
+                await self._close_session(server)
+                self.failed[server] = str(e)
+                logger.warning("MCP resource listing failed: server=%s error=%s", server, e)
+                continue
+            for r in listed.resources:
+                items.append(
+                    McpResourceOut(
+                        server=server,
+                        uri=str(r.uri),
+                        name=r.name,
+                        description=r.description,
+                        mime_type=r.mimeType,
+                    )
+                )
+            for t in templates.resourceTemplates:
+                items.append(
+                    McpResourceOut(
+                        server=server,
+                        uri_template=t.uriTemplate,
+                        name=t.name,
+                        description=t.description,
+                        mime_type=t.mimeType,
+                    )
+                )
+        return items
+
+    async def read_resource(self, uri: str, server_hint: str | None = None) -> McpResourceReadOut:
+        """Read a resource from an MCP server (template instantiations included).
+
+        Routing mirrors `call_tool`: `server_hint` is authoritative (no
+        fallback); without it the servers are tried in config order and the
+        first one that has the resource wins. A server without the resource
+        (-32002) or without the resources feature at all (-32601) is skipped;
+        any other failure is a transport error and the cached session is
+        evicted for reconnect. Raises `McpResourceNotFoundError` when no
+        server matched, `McpTransportError` on protocol/transport failures.
+        """
+        candidates = [server_hint] if server_hint is not None else list(self._config)
+        if server_hint is not None and server_hint not in self._config:
+            raise McpToolNotFoundError(f"Unknown MCP server {server_hint!r}")
+
+        not_found: list[str] = []
+        for server in candidates:
+            try:
+                session = await self._get_session(server)
+                result = await session.read_resource(uri)
+            except McpError as e:
+                if _is_resource_not_found(e):
+                    not_found.append(f"{server}: {e}")
+                    continue
+                await self._close_session(server)
+                logger.warning(
+                    "MCP resource read failed: server=%s uri=%s error=%s", server, uri, e
+                )
+                raise McpTransportError(f"{server}: {e}") from e
+            except Exception as e:
+                await self._close_session(server)
+                logger.warning(
+                    "MCP resource read failed: server=%s uri=%s error=%s", server, uri, e
+                )
+                raise McpTransportError(f"{server}: {e}") from e
+            blocks: list[dict[str, Any]] = []
+            for content in result.contents:
+                if isinstance(content, TextResourceContents):
+                    blocks.append({"type": "text", "text": content.text})
+                elif isinstance(content, BlobResourceContents):
+                    blocks.append(
+                        {
+                            "type": "blob",
+                            "blob": content.blob,
+                            "mime_type": content.mimeType,
+                        }
+                    )
+            logger.info("MCP resource read ok: server=%s uri=%s", server, uri)
+            return McpResourceReadOut(uri=uri, content=blocks)
+        detail = f" (tried: {', '.join(not_found)})" if not_found else ""
+        raise McpResourceNotFoundError(f"Resource {uri!r} not found on any MCP server{detail}")
 
     async def _get_session(self, server_name: str) -> ClientSession:
         """Cached, multiplexed ClientSession for a server (lazy connect).
@@ -342,6 +498,130 @@ class MCPServers:
         self._client = None
         self._config = {}
         self._connected = False
+
+
+class ListResourcesInput(BaseModel):
+    """Arguments for the `mcp_list_resources` tool."""
+
+    server: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Optional MCP server name to list resources from (default: every configured server)."
+        ),
+    )
+
+
+class ReadResourceInput(BaseModel):
+    """Arguments for the `mcp_read_resource` tool."""
+
+    uri: str = Field(
+        ...,
+        min_length=1,
+        max_length=2048,
+        description=(
+            "Resource URI to read. For templated resources, substitute "
+            "concrete values first (e.g. 'weather://paris/current' for the "
+            "template 'weather://{city}/current')."
+        ),
+    )
+    server: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Optional MCP server name to read from (default: try every configured server in order)."
+        ),
+    )
+
+
+def _format_resource_list(items: list[McpResourceOut]) -> str:
+    """Human-readable listing of resources/templates, grouped by server."""
+    if not items:
+        return "No MCP resources found."
+    lines: list[str] = []
+    seen_servers: set[str] = set()
+    for item in items:
+        if item.server not in seen_servers:
+            seen_servers.add(item.server)
+            lines.append(f"MCP server '{item.server}':")
+        if item.uri_template is not None:
+            lines.append(
+                f"  template {item.uri_template} - {item.description or item.name or ''}".rstrip(
+                    " -"
+                )
+            )
+        else:
+            lines.append(f"  {item.uri} - {item.description or item.name or ''}".rstrip(" -"))
+    return "\n".join(lines)
+
+
+def build_resource_tools(servers: MCPServers) -> list[BaseTool]:
+    """Agent bridge tools for MCP resources, bound to `servers`.
+
+    The MCP SDK gives clients list/read methods, but the agent can only call
+    what is in its `tools=` list — so the two methods are wrapped as LangChain
+    tools: `mcp_list_resources` (discovery: static resources AND RFC 6570
+    templates, which list_resources alone hides) and `mcp_read_resource`
+    (read any URI, template instantiations included).
+    """
+
+    async def list_resources(server: str | None = None) -> str:
+        """List what MCP resources are available to read."""
+        try:
+            items = await servers.list_resources(server_hint=server)
+        except McpToolNotFoundError as exc:
+            return f"Error: {exc}"
+        text = _format_resource_list(items)
+        if server is None and servers.failed:
+            text += "\n\nUnreachable servers: " + ", ".join(
+                f"{name} ({reason})" for name, reason in servers.failed.items()
+            )
+        return text
+
+    async def read_resource(uri: str, server: str | None = None) -> str:
+        """Read an MCP resource by URI (template instantiations included)."""
+        try:
+            out = await servers.read_resource(uri, server_hint=server)
+        except (McpResourceNotFoundError, McpTransportError, McpToolNotFoundError) as exc:
+            return f"Error: {exc}"
+        parts: list[str] = []
+        for block in out.content:
+            if block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif block.get("type") == "blob":
+                parts.append(
+                    f"[binary content: mime={block.get('mime_type') or 'application/octet-stream'}, "
+                    f"base64 length={len(str(block.get('blob', '')))}]"
+                )
+        return "\n".join(parts) if parts else "(empty resource)"
+
+    return [
+        StructuredTool.from_function(
+            coroutine=list_resources,
+            name="mcp_list_resources",
+            description=(
+                "List resources and resource templates exposed by the configured "
+                "MCP servers. Use this to discover data sources before reading "
+                "one. Resource templates contain {placeholders} (e.g. "
+                "'weather://{city}/current') — substitute concrete values to "
+                "form a URI, then pass it to mcp_read_resource."
+            ),
+            args_schema=ListResourcesInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=read_resource,
+            name="mcp_read_resource",
+            description=(
+                "Read a resource from an MCP server by URI. For templated "
+                "resources, instantiate the template with concrete values "
+                "first (see mcp_list_resources), e.g. 'weather://paris/current' "
+                "for 'weather://{city}/current'. Text content is returned "
+                "verbatim; binary content is summarized with its MIME type "
+                "and size."
+            ),
+            args_schema=ReadResourceInput,
+        ),
+    ]
 
 
 class MCPRegistry:

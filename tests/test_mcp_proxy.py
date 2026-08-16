@@ -9,6 +9,11 @@ with a stateful backend tool, then drives the endpoint over ASGI:
   - fan-out across servers without server_hint (first hit wins)
   - no match -> 404, unknown hint -> 404, auth required, name validation
   - JSON-RPC error paths (new-FastMCP/gofastmcp style) via stub sessions
+
+Plus the raw-SDK resources bridge: the beta server also exposes a static
+resource and a resource template (same @mcp.resource wire format as
+gofastmcp), covered by service-level tests (list/read, fan-out, error
+mapping), bridge-tool invocations, and an end-to-end scripted-agent run.
 """
 
 from __future__ import annotations
@@ -22,18 +27,33 @@ import httpx
 import pytest
 import pytest_asyncio
 from langchain_core.callbacks import CallbackManagerForLLMRun
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
+from langchain_core.messages import AIMessage, HumanMessage, ToolCall
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import Runnable
 from mcp.shared.exceptions import McpError
-from mcp.types import CallToolResult, ErrorData, TextContent
+from mcp.types import (
+    CallToolResult,
+    ErrorData,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    ReadResourceResult,
+    TextContent,
+    TextResourceContents,
+)
 from pydantic import Field
 
 from app.core import config, database
 from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent
-from app.services.mcp import MCPServers, McpToolNotFoundError, McpTransportError, mcp_servers
+from app.services.mcp import (
+    McpResourceNotFoundError,
+    MCPServers,
+    McpToolNotFoundError,
+    McpTransportError,
+    mcp_servers,
+)
 
 pytestmark = [
     pytest.mark.filterwarnings(r"ignore:The v3 streaming protocol on Pregel is experimental."),
@@ -48,6 +68,7 @@ class Scripted(BaseChatModel):
     """Returns a scripted sequence of AIMessages, clamping at the last."""
 
     responses: list[AIMessage] = Field(default_factory=list)
+    tools: Sequence[dict | type] = ()
     _idx: int = 0
 
     @property
@@ -64,6 +85,16 @@ class Scripted(BaseChatModel):
         i = min(self._idx, len(self.responses) - 1)
         self._idx += 1
         return ChatResult(generations=[ChatGeneration(message=self.responses[i])])
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict | type | BaseChatModel],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, AIMessage]:
+        self.tools = tools
+        return self
 
 
 def scripted_model() -> Scripted:
@@ -176,6 +207,16 @@ if role == "beta":
     def boom() -> str:
         \"\"\"Raise -> FastMCP wraps it into an isError result.\"\"\"
         raise RuntimeError("kaboom from beta")
+
+    @mcp.resource("data://greeting")
+    def get_greeting() -> str:
+        \"\"\"Provides a simple greeting message.\"\"\"
+        return "Hello from FastMCP Resources!"
+
+    @mcp.resource("weather://{city}/current")
+    def get_weather(city: str) -> str:
+        \"\"\"Provides weather information for a specific city.\"\"\"
+        return json.dumps({"city": city.capitalize(), "temperature": 22, "condition": "Sunny"})
 
 
 if __name__ == "__main__":
@@ -334,6 +375,120 @@ async def test_stateful_tool_reuses_session(proxy_env):
 
 
 # ---------------------------------------------------------------------------
+# resources: raw-SDK bridge (list + read, templates included)
+# ---------------------------------------------------------------------------
+
+
+async def test_connect_registers_resource_tools(proxy_env):
+    """connect() exposes the resource bridge as agent tools, attributed to
+    every connected server (so per-server tool selection keeps them)."""
+    servers = await mcp_servers.get("tester", store=database.persistence.store)
+    names = [t.name for t in servers.tools]
+    assert "mcp_list_resources" in names
+    assert "mcp_read_resource" in names
+    for server in ("alpha", "beta"):
+        assert "mcp_list_resources" in servers.tools_by_server[server]
+        assert "mcp_read_resource" in servers.tools_by_server[server]
+
+
+async def test_list_resources_includes_templates(proxy_env):
+    """Static resources AND RFC 6570 templates are discovered; a tool-only
+    server (alpha: no resources feature, -32601) is skipped quietly, not
+    recorded as a failure."""
+    servers = await mcp_servers.get("tester", store=database.persistence.store)
+    items = await servers.list_resources()
+    assert {i.server for i in items} == {"beta"}
+    assert "alpha" not in servers.failed
+    static = next(i for i in items if i.uri == "data://greeting")
+    assert static.description == "Provides a simple greeting message."
+    assert static.mime_type == "text/plain"
+    tpl = next(i for i in items if i.uri_template == "weather://{city}/current")
+    assert tpl.description == "Provides weather information for a specific city."
+
+
+async def test_read_resource_static_and_template(proxy_env):
+    """Reading works for static resources and template instantiations (the
+    server resolves {param} matching; the client just sends the URI)."""
+    servers = await mcp_servers.get("tester", store=database.persistence.store)
+    greeting = await servers.read_resource("data://greeting", server_hint="beta")
+    assert greeting.content == [{"type": "text", "text": "Hello from FastMCP Resources!"}]
+    weather = await servers.read_resource("weather://paris/current", server_hint="beta")
+    assert "paris" in weather.content[0]["text"].lower()
+    assert "temperature" in weather.content[0]["text"]
+
+
+async def test_read_resource_fanout_skips_tool_only_server(proxy_env):
+    """Without a hint, a server that never implements resources (-32601) is
+    skipped and the next server answers (first hit wins)."""
+    servers = await mcp_servers.get("tester", store=database.persistence.store)
+    out = await servers.read_resource("data://greeting")
+    assert out.content == [{"type": "text", "text": "Hello from FastMCP Resources!"}]
+
+
+async def test_read_resource_miss_raises(proxy_env):
+    """server_hint is authoritative: a miss on the hinted server is an error;
+    an unknown hint is rejected up front."""
+    servers = await mcp_servers.get("tester", store=database.persistence.store)
+    with pytest.raises(McpResourceNotFoundError):
+        await servers.read_resource("data://nope", server_hint="beta")
+    with pytest.raises(McpToolNotFoundError):
+        await servers.read_resource("data://greeting", server_hint="ghost")
+
+
+async def test_resource_tools_invoke(proxy_env):
+    """The bridge tools are callable as LangChain tools (the agent path):
+    listing shows templates with placeholders, reading instantiates them,
+    and misses surface as Error: strings (tools never raise)."""
+    servers = await mcp_servers.get("tester", store=database.persistence.store)
+    by_name = {t.name: t for t in servers.tools}
+    listing = await by_name["mcp_list_resources"].ainvoke({"server": "beta"})
+    assert "data://greeting" in listing
+    assert "weather://{city}/current" in listing
+    read = await by_name["mcp_read_resource"].ainvoke(
+        {"uri": "weather://paris/current", "server": "beta"}
+    )
+    assert "paris" in read.lower()
+    missing = await by_name["mcp_read_resource"].ainvoke({"uri": "data://nope", "server": "beta"})
+    assert missing.startswith("Error:")
+
+
+async def test_agent_executes_resource_tool(proxy_env):
+    """End-to-end: a scripted agent emits a tool call to mcp_read_resource and
+    the bridge fetches a template-instantiated resource mid-conversation."""
+    servers = await mcp_servers.get("tester", store=database.persistence.store)
+    model = Scripted(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-res",
+                        name="mcp_read_resource",
+                        args={"uri": "weather://paris/current", "server": "beta"},
+                    )
+                ],
+            ),
+            AIMessage(content="It is sunny and 22C in Paris."),
+        ]
+    )
+    agent = build_agent(
+        checkpointer=database.persistence.checkpointer,
+        store=database.persistence.store,
+        mcp_tools=servers.tools,
+        model=model,
+        system_prompt="test",
+    )
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="What is the weather in Paris?")]},
+        config={"configurable": {"thread_id": "resource-thread-1"}},
+    )
+    tool_msgs = [m for m in result["messages"] if getattr(m, "name", None) == "mcp_read_resource"]
+    assert tool_msgs, [m.type for m in result["messages"]]
+    assert "paris" in tool_msgs[0].content.lower()
+    assert result["messages"][-1].content == "It is sunny and 22C in Paris."
+
+
+# ---------------------------------------------------------------------------
 # errors
 # ---------------------------------------------------------------------------
 
@@ -483,3 +638,81 @@ async def test_transport_exception_evicts_session():
     with pytest.raises(McpTransportError):
         await servers.call_tool("x")
     assert "alpha" not in servers._sessions
+
+
+class StubResourceSession:
+    """Minimal stub with the resources surface used by the bridge."""
+
+    def __init__(self, *, read=None, listed=None, templates=None):
+        self._read = read  # ReadResourceResult | Exception
+        self._listed = listed  # list[Resource] | Exception
+        self._templates = templates  # list[ResourceTemplate] | Exception
+        self.read_calls = 0
+
+    async def list_resources(self):
+        if isinstance(self._listed, Exception):
+            raise self._listed
+        return ListResourcesResult(resources=self._listed or [])
+
+    async def list_resource_templates(self):
+        if isinstance(self._templates, Exception):
+            raise self._templates
+        return ListResourceTemplatesResult(resource_templates=self._templates or [])
+
+    async def read_resource(self, uri):
+        self.read_calls += 1
+        if isinstance(self._read, Exception):
+            raise self._read
+        return self._read
+
+
+async def test_resource_not_found_fans_out():
+    """-32002 resource-not-found drives the fan-out (first hit wins)."""
+    not_found = McpError(ErrorData(code=-32002, message="Resource not found: data://nope"))
+    hit = ReadResourceResult(contents=[TextResourceContents(uri="data://greeting", text="Hello")])
+    alpha, beta = StubResourceSession(read=not_found), StubResourceSession(read=hit)
+    servers = _servers_with_sessions({"alpha": alpha, "beta": beta})
+    out = await servers.read_resource("data://greeting")
+    assert alpha.read_calls == 1 and beta.read_calls == 1
+    assert out.content == [{"type": "text", "text": "Hello"}]
+
+
+async def test_resource_method_not_found_skips_server():
+    """-32601 (server without the resources feature) is skipped in fan-out."""
+    not_impl = McpError(ErrorData(code=-32601, message="Method not found"))
+    hit = ReadResourceResult(contents=[TextResourceContents(uri="data://greeting", text="Hello")])
+    alpha, beta = StubResourceSession(read=not_impl), StubResourceSession(read=hit)
+    servers = _servers_with_sessions({"alpha": alpha, "beta": beta})
+    out = await servers.read_resource("data://greeting")
+    assert out.content == [{"type": "text", "text": "Hello"}]
+
+
+async def test_resource_all_not_found_raises():
+    not_found = McpError(ErrorData(code=-32002, message="Resource not found: x"))
+    servers = _servers_with_sessions(
+        {"alpha": StubResourceSession(read=not_found), "beta": StubResourceSession(read=not_found)}
+    )
+    with pytest.raises(McpResourceNotFoundError):
+        await servers.read_resource("x")
+
+
+async def test_resource_transport_failure_evicts_session():
+    """Non-not-found protocol errors are transport failures (session evicted)."""
+    internal = McpError(ErrorData(code=-32603, message="Internal error"))
+    alpha = StubResourceSession(read=internal)
+    servers = _servers_with_sessions({"alpha": alpha})
+    with pytest.raises(McpTransportError):
+        await servers.read_resource("x")
+    assert "alpha" not in servers._sessions
+
+
+async def test_resource_listing_isolates_dead_server():
+    """A failing server is recorded in `failed` and skipped; others still list."""
+    dead = RuntimeError("connection reset")
+    alpha = StubResourceSession(listed=dead, templates=dead)
+    beta = StubResourceSession()
+    servers = _servers_with_sessions({"alpha": alpha, "beta": beta})
+    items = await servers.list_resources()
+    assert items == []
+    assert "alpha" in servers.failed
+    assert "alpha" not in servers._sessions  # dead session evicted
