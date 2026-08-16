@@ -73,3 +73,30 @@ class User(BaseModel):
 
 class UserInDB(User):
     hashed_password: str
+
+
+class AllowedModelsIn(BaseModel):
+    """Body for PUT /users/{username}/allowed-models (admin).
+
+    Model ids as shown by GET /connections/models, e.g.
+    "openai:deepseek-v4-flash" or "gemini-2.5-pro". An empty list allows
+    nothing; DELETE the allowlist to go back to unrestricted.
+    """
+
+    models: list[str] = Field(
+        default_factory=list,
+        min_length=0,
+        max_length=200,
+        description="Model ids this user may use (exact match against the model picker).",
+    )
+
+
+class AllowedModelsOut(BaseModel):
+    """The user's effective model restriction.
+
+    `restricted` True means the admin set an allowlist (possibly empty);
+    False means every model is allowed.
+    """
+
+    restricted: bool = False
+    models: list[str] = Field(default_factory=list)

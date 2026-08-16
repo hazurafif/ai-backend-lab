@@ -29,12 +29,20 @@ from ....core.security import (
 )
 from ....schema.auth_schema import (
     AdminUserCreate,
+    AllowedModelsIn,
+    AllowedModelsOut,
     PasswordChange,
     RefreshRequest,
     Token,
     User,
     UserCreate,
     UserUpdate,
+)
+from ....services.model_allowlist import (
+    clear_allowed_models,
+    get_allowed_models,
+    is_restricted,
+    set_allowed_models,
 )
 from ....services.workspace import ensure_user_workspace, remove_user_workspace
 
@@ -139,6 +147,65 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     return current_user
 
 
+@router.get("/users/me/allowed-models", response_model=AllowedModelsOut)
+async def read_my_allowed_models(current_user: dict = Depends(get_current_user)):
+    """The caller's model restriction: `restricted` + the allowed model ids.
+
+    The frontend uses this to filter the model picker (GET /connections/models
+    stays admin-only). Unrestricted users get `{"restricted": false}`.
+    """
+    username = current_user["username"]
+    return {
+        "restricted": await is_restricted(persistence.store, username),
+        "models": await get_allowed_models(persistence.store, username),
+    }
+
+
+@router.get("/users/{username}/allowed-models", response_model=AllowedModelsOut)
+async def read_user_allowed_models(
+    username: str,
+    _: dict = Depends(get_admin_user),
+):
+    """Admin: a user's model allowlist (404 when the user is unknown)."""
+    if await persistence.users.get_user(username) is None:
+        raise NotFound(detail=f"User '{username}' not found")
+    return {
+        "restricted": await is_restricted(persistence.store, username),
+        "models": await get_allowed_models(persistence.store, username),
+    }
+
+
+@router.put("/users/{username}/allowed-models", response_model=AllowedModelsOut)
+async def set_user_allowed_models(
+    username: str,
+    body: AllowedModelsIn,
+    _: dict = Depends(get_admin_user),
+):
+    """Admin: restrict a user to the given model ids (empty = allow none).
+
+    Takes effect immediately: agent configs referencing other models fail to
+    create/update with 403, and chats on restricted models stop with 403.
+    DELETE the allowlist (or send the full set again) to change it.
+    """
+    if await persistence.users.get_user(username) is None:
+        raise NotFound(detail=f"User '{username}' not found")
+    await set_allowed_models(persistence.store, username, body.models)
+    return {
+        "restricted": True,
+        "models": await get_allowed_models(persistence.store, username),
+    }
+
+
+@router.delete("/users/{username}/allowed-models", status_code=204)
+async def clear_user_allowed_models(
+    username: str,
+    _: dict = Depends(get_admin_user),
+):
+    """Admin: remove the restriction (every model allowed again)."""
+    await clear_allowed_models(persistence.store, username)
+    return None
+
+
 @router.get("/users", response_model=list[User])
 async def list_users(_: dict = Depends(get_admin_user)):
     """Admin: list all users (newest first, no password hashes)."""
@@ -204,12 +271,13 @@ async def delete_user_by_admin(
     for thread_id in thread_ids:
         await persistence.chat_history.delete_thread(thread_id)
     # Purge store namespaces: memories/uploads, thread metadata, user agent
-    # configs + their skill snapshots, user skills.
+    # configs + their skill snapshots, user skills, model allowlist.
     for ns in (
         (username,),
         ("threads", username),
         ("agents", username),
         ("user", "skills", username),
+        ("user", "allowed_models", username),
     ):
         for item in await persistence.store.asearch(ns):
             await persistence.store.adelete(ns, item.key or "")

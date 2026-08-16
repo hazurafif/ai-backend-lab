@@ -23,6 +23,15 @@ def user_skills_ns(username: str) -> tuple[str, ...]:
     return ("user", "skills", username)
 
 
+def user_allowed_models_ns(username: str) -> tuple[str, ...]:
+    """Store namespace for a user's admin-managed model allowlist.
+
+    Key `models` holds {"models": [...]} (model ids as shown by
+    GET /connections/models). No row = unrestricted (all models allowed).
+    """
+    return ("user", "allowed_models", username)
+
+
 def user_mcp_servers_ns(username: str) -> tuple[str, ...]:
     """Store namespace for a user's own MCP tool servers (per-user config).
 

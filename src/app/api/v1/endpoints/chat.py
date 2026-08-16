@@ -11,7 +11,7 @@ from starlette.datastructures import UploadFile
 from ....core.constants import thread_metadata_ns
 from ....core.database import persistence
 from ....core.dependencies import get_current_user
-from ....core.exceptions import NotFound, ServiceUnavailable
+from ....core.exceptions import NotFound, PermissionDenied, ServiceUnavailable
 from ....core.notification_hub import hub
 from ....core.run_manager import run_manager
 from ....core.security import decode_access_token
@@ -28,7 +28,7 @@ from ....schema.chat_schema import (
     ThreadUpdate,
     ThreadUsageOut,
 )
-from ....services import agent_configs, ai_sdk_chat, session_stats
+from ....services import agent_configs, ai_sdk_chat, model_allowlist, session_stats
 from ....services import share as share_service
 from ....services.chat import (
     _serialize_message,
@@ -76,10 +76,29 @@ async def _resolve_agent(request: Request, name: str | None, username: str) -> C
     Always goes through the registry: the system prompt is rendered per user
     ({{username}} placeholders), so the default agent graph is per-user too
     (registry cache keyed by the rendered fingerprint). An unconfigured
-    model (no default llm connection) is a 503, not a
-    500.
+    model (no default llm connection) is a 503, not a 500. When the admin
+    restricted this user's models (allowlist), the agent's effective model
+    must be on it — otherwise 403.
     """
     name = name or "default"
+    spec = await agent_configs.load_spec(persistence.store, name, username)
+    if spec is not None:
+        effective = spec.model or llm_model_name()
+        if effective and not await model_allowlist.is_model_allowed(
+            persistence.store, username, effective
+        ):
+            raise PermissionDenied(
+                detail=(
+                    f"Model '{effective}' is not allowed for this user — an admin "
+                    "must add it via PUT /users/{username}/allowed-models"
+                )
+            )
+    try:
+        return await request.app.state.agents.resolve(name, username)
+    except KeyError:
+        raise NotFound(detail=f"Agent '{name}' not found") from None
+    except ValueError as exc:
+        raise ServiceUnavailable(str(exc)) from None
     try:
         return await request.app.state.agents.resolve(name, username)
     except KeyError:

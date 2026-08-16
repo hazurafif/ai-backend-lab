@@ -44,6 +44,7 @@ from ..core.constants import (
 from ..schema.agent_config_schema import AgentConfigIn, AgentConfigOut
 from ..services import settings as runtime_settings
 from ..services.connections import llm_model_name
+from ..services.model_allowlist import is_model_allowed
 from ..util.date import now_iso
 
 logger = logging.getLogger(__name__)
@@ -322,6 +323,25 @@ async def list_configs(
     return sorted(out, key=lambda c: (c.builtin is not True, c.name))
 
 
+async def _check_model_allowed(store: BaseStore, username: str, model: str | None) -> None:
+    """Reject a user-scoped config whose model is not on the user's allowlist.
+
+    No-op when the allowlist is unrestricted or the model is allowed; raises
+    PermissionDenied otherwise. Global (admin-managed) configs are not gated.
+    """
+    if not model:
+        return
+    if not await is_model_allowed(store, username, model):
+        from ..core.exceptions import PermissionDenied
+
+        raise PermissionDenied(
+            detail=(
+                f"Model '{model}' is not allowed for user '{username}' — an admin "
+                "must add it via PUT /users/{username}/allowed-models"
+            )
+        )
+
+
 async def create_config(
     store: BaseStore,
     cfg: AgentConfigIn,
@@ -334,6 +354,8 @@ async def create_config(
         raise ValueError(f"'{DEFAULT_AGENT_NAME}' is reserved")
     owner = _GLOBAL_OWNER if cfg.scope == "global" else username
     ns = GLOBAL_AGENTS_NS if cfg.scope == "global" else user_agents_ns(username)
+    if cfg.scope != "global":
+        await _check_model_allowed(store, username, cfg.model)
     if (
         await store.aget(user_agents_ns(username), cfg.name) is not None
         or await store.aget(GLOBAL_AGENTS_NS, cfg.name) is not None
@@ -371,6 +393,8 @@ async def update_config(
     if cfg.name != name:
         raise ValueError("name in body must match the path")
     ns = GLOBAL_AGENTS_NS if cfg.scope == "global" else user_agents_ns(username)
+    if cfg.scope != "global":
+        await _check_model_allowed(store, username, cfg.model)
     existing = await store.aget(ns, name)
     if existing is None:
         raise KeyError(name)
