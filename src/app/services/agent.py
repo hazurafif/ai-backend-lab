@@ -39,14 +39,23 @@ from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse, GlobResult
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain_core.language_models import BaseChatModel
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import get_runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
+from pydantic import BaseModel, Field
 
 from ..core.config import settings
-from ..core.constants import GLOBAL_SKILLS_NS, MEMORY_SOURCE, SKILLS_SOURCE
+from ..core.constants import (
+    GLOBAL_SKILLS_NS,
+    MEMORY_SOURCE,
+    SKILLS_SOURCE,
+    user_skills_ns,
+)
+from ..core.database import persistence
+from ..schema.agent_schema import SkillFileIn, SkillIn
+from ..services import resources
 from ..services import settings as runtime_settings
 from ..services.connections import llm_model_kwargs, llm_model_name
 from ..services.kb.tool import build_kb_search_tool
@@ -56,13 +65,177 @@ from .agent_configs import AgentSpec, load_spec
 logger = logging.getLogger(__name__)
 
 
-def build_extra_tools() -> list[BaseTool]:
-    """Optional agent tools: web search (SearXNG) + knowledge base search.
+class PublishSkillInput(BaseModel):
+    """Arguments for the `publish_skill` tool."""
 
-    Each tool is only included when its backend is configured (SEARXNG_URL /
-    WEAVIATE_URL), so an unconfigured service never registers a dead tool.
+    skill_path: str = Field(
+        ...,
+        description=(
+            "Workspace path (virtual, e.g. '/scripts/my-skill' or '/tmp/draft-skill') "
+            "of the folder containing SKILL.md to publish. SKILL.md must start with "
+            "a YAML frontmatter block carrying 'name' and 'description'; every other "
+            "file in the folder is bundled with the skill."
+        ),
+    )
+    overwrite: bool = Field(
+        default=False,
+        description=(
+            "Replace an existing skill of the same name. Without it, publishing "
+            "over an existing name is an error."
+        ),
+    )
+
+
+def _parse_skill_frontmatter(text: str) -> tuple[str, str, str]:
+    """(name, description, body) from a SKILL.md with YAML frontmatter.
+
+    Raises ValueError when the frontmatter is malformed or misses the
+    required `name` / `description` keys (single-line values only).
     """
-    tools: list[BaseTool] = []
+    if not text.startswith("---"):
+        raise ValueError("SKILL.md must start with a YAML frontmatter block ('---')")
+    end = text.find("\n---", 3)
+    if end == -1:
+        raise ValueError("SKILL.md frontmatter is not closed (missing trailing '---')")
+    meta: dict[str, str] = {}
+    for line in text[3:end].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "-", ":")):
+            continue
+        key, sep, value = stripped.partition(":")
+        if not sep:
+            continue
+        meta[key.strip()] = value.strip().strip("\"'")
+    name = meta.get("name", "")
+    description = meta.get("description", "")
+    if not name:
+        raise ValueError("SKILL.md frontmatter is missing the required 'name' field")
+    if not description:
+        raise ValueError("SKILL.md frontmatter is missing the required 'description' field")
+    return name, description, text[end + 4 :].strip("\n")
+
+
+_SKIP_BUNDLE_DIRS = {".git", ".venv", "__pycache__", "node_modules"}
+
+
+def _resolve_user_folder(path: str) -> Path:
+    """Resolve a virtual workspace path under the current user's dir (file-tool rules)."""
+    vpath = path if path.startswith("/") else "/" + path
+    if ".." in vpath or vpath.startswith("~"):
+        raise ValueError("Path traversal not allowed")
+    base = (Path(settings.workspace_root) / _runtime_user_id()).resolve()
+    full = (base / vpath.lstrip("/")).resolve()
+    try:
+        full.relative_to(base)
+    except ValueError:
+        raise ValueError(f"Path:{path} outside the workspace root") from None
+    return full
+
+
+def _bundle_files(folder: Path) -> list[SkillFileIn]:
+    """All files under the skill folder (relative paths), minus SKILL.md and junk dirs."""
+    files: list[SkillFileIn] = []
+    for path in sorted(folder.rglob("*")):
+        if path.is_symlink() or path.is_dir():
+            continue
+        rel = path.relative_to(folder).as_posix()
+        if rel == "SKILL.md":
+            continue
+        if any(part in _SKIP_BUNDLE_DIRS for part in path.parts[len(folder.parts) :]):
+            continue
+        files.append(
+            SkillFileIn(
+                path=rel,
+                content=path.read_text(encoding="utf-8", errors="replace"),
+            )
+        )
+    return files
+
+
+async def _publish_skill(skill_path: str, overwrite: bool = False) -> str:
+    """Tool body: publish the SKILL.md folder at `skill_path` into the user's store.
+
+    Goes through the same `resources.create_skill` code path as the REST API,
+    so a published skill shows up in the frontend skills list and is
+    materialized into the user's workspace skills/ on every future run.
+    """
+    try:
+        folder = _resolve_user_folder(skill_path)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if not folder.is_dir():
+        return f"Error: no folder at '{skill_path}' — create it first (SKILL.md + bundled files)."
+    skill_md = folder / "SKILL.md"
+    if not skill_md.is_file():
+        return (
+            f"Error: no SKILL.md in '{skill_path}' — the folder must contain a "
+            "SKILL.md with YAML frontmatter (name + description)."
+        )
+    try:
+        name, description, body = _parse_skill_frontmatter(
+            skill_md.read_text(encoding="utf-8", errors="replace")
+        )
+    except ValueError as exc:
+        return f"Error: {exc}"
+    try:
+        files = _bundle_files(folder)
+    except ValueError as exc:
+        return f"Error: {exc}"  # e.g. a bundled file path failing the skill schema
+    store = persistence.store
+    if store is None:
+        return "Error: persistence store is not available"
+    ns = user_skills_ns(_runtime_user_id())
+    if await resources.get_skill(store, name, ns) is not None and not overwrite:
+        return (
+            f"Error: skill '{name}' already exists — pass overwrite=true to replace "
+            "it, or pick another name."
+        )
+    try:
+        out = await resources.create_skill(
+            store, SkillIn(name=name, description=description, content=body, files=files), ns
+        )
+    except ValueError as exc:
+        return f"Error: {exc}"
+    note = f" ({len(out.files)} bundled file(s))" if out.files else ""
+    return (
+        f"Published skill '{out.name}'{note}. It is now listed in the user's "
+        "frontend skills library and is loaded into skills/ on every future run."
+    )
+
+
+def build_skill_publish_tool() -> BaseTool:
+    """The `publish_skill` tool: persist a drafted skill into the user's store.
+
+    The agent drafts a skill folder in its workspace (SKILL.md + bundled
+    files) and calls this tool to publish it through the same `resources`
+    code path as the /skills REST API — it appears in the frontend skills
+    list immediately and survives the per-run workspace refresh.
+    """
+    return StructuredTool.from_function(
+        coroutine=_publish_skill,
+        name="publish_skill",
+        description=(
+            "Publish a skill to the user's skill library. The skill must be a "
+            "folder in your workspace containing SKILL.md with YAML frontmatter "
+            "(name + description); every other file in the folder is bundled "
+            "with it. The skill is stored server-side: it appears in the "
+            "frontend skills list immediately and is loaded into your skills/ "
+            "folder at the start of every future run. Use this when the user "
+            "asks you to create a skill."
+        ),
+        args_schema=PublishSkillInput,
+    )
+
+
+def build_extra_tools() -> list[BaseTool]:
+    """Agent tools: skill publishing + optional web search / knowledge base search.
+
+    `publish_skill` is always registered (core capability — the only way the
+    agent can persist a new skill into the store). The search tools are only
+    included when their backend is configured (SEARXNG_URL / WEAVIATE_URL), so
+    an unconfigured service never registers a dead tool.
+    """
+    tools: list[BaseTool] = [build_skill_publish_tool()]
     for candidate in (build_search_tool, build_kb_search_tool):
         tool_ = candidate()
         if tool_ is not None:

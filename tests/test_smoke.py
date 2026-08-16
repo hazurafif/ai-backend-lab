@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -586,3 +587,134 @@ async def test_http_end_to_end(memory_persistence):
                 headers=headers,
             )
             assert r.status_code == 409, r.text
+
+
+async def test_agent_publishes_skill_to_store(memory_persistence):
+    """The publish_skill tool persists a drafted skill into the user's store namespace.
+
+    The agent drafts a skill folder in its workspace (SKILL.md + bundled
+    files), then calls publish_skill; the skill lands in ("user", "skills",
+    <user>) — the same namespace the /skills REST API and the frontend read —
+    with the frontmatter parsed into the canonical name/description/content
+    shape and the helper files bundled.
+    """
+    from app.core.constants import user_skills_ns
+    from app.services import resources
+    from app.services.agent import build_skill_publish_tool
+
+    # What the agent writes with its file tools before publishing.
+    draft = Path(settings.workspace_root) / "tester" / "scripts" / "deep-research"
+    draft.mkdir(parents=True)
+    (draft / "SKILL.md").write_text(
+        "---\n"
+        "name: deep-research\n"
+        "description: Run rigorous multi-step web research.\n"
+        "---\n\n"
+        "# Deep Research\n\n"
+        "1. Scope the question.\n"
+    )
+    (draft / "templates").mkdir()
+    (draft / "templates" / "research-brief.md").write_text("# Research brief\n")
+
+    model = Scripted(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="publish_skill",
+                        args={"skill_path": "/scripts/deep-research"},
+                    )
+                ],
+            ),
+            AIMessage(content="Skill published."),
+        ]
+    )
+    agent = build_agent(
+        checkpointer=memory_persistence.checkpointer,
+        store=memory_persistence.store,
+        mcp_tools=[build_skill_publish_tool()],
+        model=model,
+        system_prompt="test",
+    )
+    events = await collect_stream(agent, "tester", message="make me a skill")
+    names = [e for e, _ in events]
+    assert "tool_start" in names and "tool_end" in names, names
+    tool_end = next(d for e, d in events if e == "tool_end")
+    assert "Published skill 'deep-research'" in tool_end["output"]["content"], tool_end
+
+    # The skill is in the user's store namespace, frontend-visible.
+    ns = user_skills_ns("tester")
+    skill = await resources.get_skill(memory_persistence.store, "deep-research", ns)
+    assert skill is not None
+    assert skill.content.startswith("---\nname: deep-research")
+    assert "1. Scope the question." in skill.content
+    assert [f.path for f in skill.files] == ["templates/research-brief.md"]
+    assert [s.name for s in await resources.list_skills(memory_persistence.store, ns)] == [
+        "deep-research"
+    ]
+
+    # Another user's namespace stays empty (per-user isolation).
+    assert (
+        await resources.get_skill(
+            memory_persistence.store, "deep-research", user_skills_ns("someone-else")
+        )
+        is None
+    )
+
+
+async def test_publish_skill_overwrite_semantics(memory_persistence):
+    """Duplicate publish errors without overwrite; overwrite=true replaces."""
+    from app.services.agent import build_skill_publish_tool
+
+    tool = build_skill_publish_tool()
+    # Outside a run the tool resolves to the "anonymous" user dir.
+    draft = Path(settings.workspace_root) / "anonymous" / "tmp" / "demo"
+    draft.mkdir(parents=True)
+    (draft / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: A demo skill.\n---\n\nBody.\n"
+    )
+
+    first = await tool.ainvoke({"skill_path": "/tmp/demo"})
+    assert "Published skill 'demo-skill'" in first, first
+
+    second = await tool.ainvoke({"skill_path": "/tmp/demo"})
+    assert "already exists" in second, second
+
+    (draft / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: A demo skill, v2.\n---\n\nBody v2.\n"
+    )
+    third = await tool.ainvoke({"skill_path": "/tmp/demo", "overwrite": True})
+    assert "Published skill 'demo-skill'" in third, third
+
+    from app.core.constants import user_skills_ns
+    from app.services import resources
+
+    skill = await resources.get_skill(
+        memory_persistence.store, "demo-skill", user_skills_ns("anonymous")
+    )
+    assert skill is not None and "Body v2." in skill.content
+
+
+async def test_publish_skill_rejects_malformed_drafts(memory_persistence):
+    """Missing folder / SKILL.md / frontmatter return errors instead of raising."""
+    from app.services.agent import build_skill_publish_tool
+
+    tool = build_skill_publish_tool()
+    draft = Path(settings.workspace_root) / "anonymous" / "tmp" / "broken"
+    draft.mkdir(parents=True)
+
+    out = await tool.ainvoke({"skill_path": "/tmp/broken"})
+    assert "no SKILL.md" in out, out
+
+    (draft / "SKILL.md").write_text("no frontmatter here\n")
+    out = await tool.ainvoke({"skill_path": "/tmp/broken"})
+    assert "frontmatter" in out, out
+
+    (draft / "SKILL.md").write_text("---\nname: broken\n---\n\nBody.\n")
+    out = await tool.ainvoke({"skill_path": "/tmp/broken"})
+    assert "description" in out, out
+
+    out = await tool.ainvoke({"skill_path": "/tmp/does-not-exist"})
+    assert "no folder" in out, out
