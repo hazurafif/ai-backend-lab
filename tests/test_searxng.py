@@ -290,6 +290,8 @@ async def test_search_skips_results_without_url():
 
 
 async def test_search_reports_unresponsive_engines():
+    # Some SearXNG versions emit [engine, reason] pairs instead of dicts —
+    # both shapes must be handled (pairs are what the live instance sends).
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -302,6 +304,26 @@ async def test_search_reports_unresponsive_engines():
                     }
                 ],
                 "unresponsive_engines": [
+                    ["google", "Suspended: too many requests"],
+                    ["duckduckgo", "CAPTCHA"],
+                ],
+            },
+        )
+
+    client, _ = make_client(handler)
+    out = await client.search("x")
+    assert "2 engine(s) did not respond" in out
+    assert "google (Suspended: too many requests)" in out
+    assert "duckduckgo (CAPTCHA)" in out
+
+
+async def test_search_reports_unresponsive_engines_dict_shape():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [],
+                "unresponsive_engines": [
                     {"engine": "google", "reason": "SearxEngineCaptcha"},
                     {"engine": "bing", "reason": "SearxEngineTooManyRequests"},
                 ],
@@ -312,6 +334,31 @@ async def test_search_reports_unresponsive_engines():
     out = await client.search("x")
     assert "2 engine(s) did not respond" in out
     assert "google (SearxEngineCaptcha)" in out
+
+
+async def test_search_skips_malformed_results():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    ["not", "a", "dict"],
+                    "not a dict either",
+                    {
+                        "title": "ok",
+                        "url": "https://example.com/",
+                        "content": "fine",
+                    },
+                ],
+                "unresponsive_engines": [["brave", "CAPTCHA"]],
+            },
+        )
+
+    client, _ = make_client(handler)
+    out = await client.search("x")
+    assert "1 result(s)" in out
+    assert "not a dict" not in out
+    assert "brave (CAPTCHA)" in out
 
 
 async def test_search_cache_serves_repeated_queries():

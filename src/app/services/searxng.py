@@ -125,6 +125,21 @@ def search_allowed() -> bool:
     return settings.searxng_enabled if override is None else override
 
 
+def _format_engine_health(entry: Any) -> str:
+    """Human-readable engine health from either JSON shape SearXNG emits.
+
+    Accepts ``{"engine": ..., "reason": ...}`` dicts, ``[engine, reason]``
+    pairs, and bare engine-name strings.
+    """
+    if isinstance(entry, dict):
+        return f"{entry.get('engine', '?')} ({entry.get('reason', 'unresponsive')})"
+    if isinstance(entry, list | tuple):
+        name = entry[0] if entry else "?"
+        reason = entry[1] if len(entry) > 1 else "unresponsive"
+        return f"{name} ({reason})"
+    return f"{entry} (unresponsive)"
+
+
 def _is_private_host(host: str | None) -> bool:
     """True when a hostname/address must not be fetched (SSRF guard).
 
@@ -215,14 +230,28 @@ class SearxngClient:
             return f"Web search failed (invalid response from SearXNG): {exc}"
 
         results = data.get("results") or []
+
+        # Engine health: SearXNG silently drops engines on CAPTCHA/429 for up
+        # to a day — surface it so the model can caveat its answer. The JSON
+        # API has returned both dicts ({"engine", "reason"}) and [engine,
+        # reason] pairs depending on the version, so handle both. Built before
+        # the early returns so an empty result set still explains why.
+        unresponsive = data.get("unresponsive_engines") or []
+        health_note = ""
+        if unresponsive:
+            reasons = ", ".join(_format_engine_health(e) for e in unresponsive)
+            health_note = f"\n\nNote: {len(unresponsive)} engine(s) did not respond: {reasons}."
+
         if not results:
-            return "No results found."
+            return "No results found." + health_note
 
         # Dedupe by URL: engines overlap heavily (SearXNG merges duplicates,
         # but the same URL can still appear twice with different snippets).
         seen: set[str] = set()
         deduped: list[dict[str, Any]] = []
         for r in results:
+            if not isinstance(r, dict):
+                continue  # malformed entry — never let one result kill the call
             url = r.get("url")
             if not url or url in seen:
                 continue
@@ -247,15 +276,7 @@ class SearxngClient:
         shown = len(deduped[: self.max_results])
         total = data.get("number_of_results") or "?"
         out = f"{shown} result(s) (of {total}):\n" + "\n".join(lines)
-
-        # Engine health: SearXNG silently drops engines on CAPTCHA/429 for up
-        # to a day — surface it so the model can caveat its answer.
-        unresponsive = data.get("unresponsive_engines") or []
-        if unresponsive:
-            reasons = ", ".join(
-                f"{e.get('engine', '?')} ({e.get('reason', 'unresponsive')})" for e in unresponsive
-            )
-            out += f"\n\nNote: {len(unresponsive)} engine(s) did not respond: {reasons}."
+        out += health_note
 
         if self.cache_ttl > 0:
             self._cache[cache_key] = (now + self.cache_ttl, out)
