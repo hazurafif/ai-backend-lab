@@ -36,7 +36,13 @@ from app.core.run_manager import run_manager
 from app.core.security import create_access_token
 from app.main import create_app
 from app.services.agent import build_agent
-from app.services.chat import agent_stream, attach_stream, notification_stream
+from app.services.chat import (
+    _record_thread_metadata,
+    agent_stream,
+    attach_stream,
+    notification_stream,
+    reconcile_stale_runs,
+)
 
 pytestmark = pytest.mark.filterwarnings(
     r"ignore:The v3 streaming protocol on Pregel is experimental."
@@ -237,3 +243,69 @@ async def test_attach_stream_and_same_thread_conflict(memory_persistence):
         async with await make_client(app) as client:
             r = await client.get("/threads/bg-attach/stream")
             assert r.status_code == 409, r.text
+
+
+async def test_reconcile_marks_stale_running_threads_cancelled(memory_persistence):
+    """Threads left `running` by a dead process are reconciled to cancelled."""
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+    async with app.router.lifespan_context(app):
+        await persistence.users.create_user(username="tester", hashed_password="x")
+        # Seed a `running` metadata row with no live run behind it — the exact
+        # leftover a process kill produces (finalize never ran).
+        await _record_thread_metadata(
+            "bg-stale", "tester", "old prompt", "default", status="running"
+        )
+
+        count = await reconcile_stale_runs()
+
+        assert count == 1
+        item = await persistence.store.aget(thread_metadata_ns("tester"), "bg-stale")
+        assert item is not None and item.value.get("status") == "cancelled", item
+        assert [e["type"] for e in hub.recent("tester")] == ["run_cancelled"], hub.recent("tester")
+
+
+async def test_reconcile_skips_live_runs(memory_persistence):
+    """A genuinely in-flight run is never stomped by reconciliation."""
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+    async with app.router.lifespan_context(app):
+        await persistence.users.create_user(username="tester", hashed_password="x")
+        agent = build_slow_agent(
+            memory_persistence.checkpointer, memory_persistence.store, delay_s=30
+        )
+        app.state.agent = agent
+        stream = agent_stream(agent, "tester", message="go", thread_id="bg-live")
+        async for _chunk in stream:
+            break  # the run is now in flight
+        assert run_manager.get("bg-live") is not None
+
+        count = await reconcile_stale_runs()
+
+        assert count == 0
+        item = await persistence.store.aget(thread_metadata_ns("tester"), "bg-live")
+        assert item is not None and item.value.get("status") == "running", item
+
+
+async def test_task_cancellation_finalizes_as_cancelled(memory_persistence):
+    """Shutdown (task.cancel on the run task) still finalizes as cancelled."""
+    app = create_app(agent=build_scripted_agent(InMemorySaver(), InMemoryStore()))
+    async with app.router.lifespan_context(app):
+        agent = build_slow_agent(
+            memory_persistence.checkpointer, memory_persistence.store, delay_s=30
+        )
+        app.state.agent = agent
+        stream = agent_stream(agent, "tester", message="go", thread_id="bg-shutdown")
+        async for _chunk in stream:
+            break
+        active = run_manager.get("bg-shutdown")
+        assert active is not None and active.task is not None
+
+        # What uvicorn does to in-flight tasks on graceful shutdown. The run
+        # body must persist `cancelled` (the CancelledError branches skip the
+        # normal terminal paths) and then propagate.
+        active.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active.task
+
+        item = await persistence.store.aget(thread_metadata_ns("tester"), "bg-shutdown")
+        assert item is not None and item.value.get("status") == "cancelled", item
+        assert "run_cancelled" in [e["type"] for e in hub.recent("tester")], hub.recent("tester")
