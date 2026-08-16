@@ -1,15 +1,18 @@
 """Runtime app settings: DB-backed overrides for .env defaults.
 
 Settings are admin-managed key-value rows in `core/database.AppSettingsStore`
-(Postgres `app_settings` table, in-memory in dev). Two keys exist:
+(Postgres `app_settings` table, in-memory in dev). One key exists:
 
 - `execute`   -> {"enabled": bool, "max_timeout": int, "inherit_env": bool}
-- `connections` -> {"fallback_env": bool}
 
 DB values win over .env; when a key has no row the corresponding env/default
 from `core/config` applies. The whole table is cached process-wide (refreshed
 at startup and after every mutation) and read synchronously by agent build
 code, mirroring `services/connections`.
+
+There is no env fallback for credentials: the agent LLM and KB embeddings
+resolve DB connections only (see services/connections) and fail loudly when
+none exists.
 """
 
 from __future__ import annotations
@@ -88,21 +91,3 @@ def interrupt_on() -> dict | None:
         value = row["interrupt_on"]
         return dict(value) if value else None
     return settings.interrupt_on or None
-
-
-# ---------------------------------------------------------------------------
-# connection policy
-# ---------------------------------------------------------------------------
-
-
-def connection_fallback_env() -> bool:
-    """Whether .env credentials are used when no DB connection of a kind exists.
-
-    Default (false) = the DB connection is mandatory: the agent LLM model and
-    KB embeddings fail loudly instead of silently reading .env keys. Env
-    fallback stays opt-in (CONNECTION_FALLBACK_ENV=true or PUT /settings).
-    """
-    row = _row("connections")
-    if row is not None and "fallback_env" in row:
-        return bool(row["fallback_env"])
-    return settings.connection_fallback_env

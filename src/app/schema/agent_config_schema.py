@@ -98,8 +98,8 @@ class AgentConfigOut(BaseModel):
         default=None,
         description=(
             "Provider:model string. None on the builtin default agent when "
-            "DEEPAGENTS_MODEL is unset — the default llm connection's "
-            "extra.model is used then."
+            "no default llm connection is saved — its extra.model is used "
+            "then (there is no env fallback)."
         ),
     )
     system_prompt: str | None = None

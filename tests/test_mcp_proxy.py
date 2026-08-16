@@ -226,7 +226,7 @@ async def proxy_env(tmp_path_factory):
         )
         assert r.status_code == 201, r.text
     # Same path as POST /agent/tools/reconnect (store configs -> live servers).
-    await mcp_servers.connect(store=database.persistence.store)
+    await mcp_servers.connect("tester", store=database.persistence.store)
     try:
         yield http, state_dir
     finally:

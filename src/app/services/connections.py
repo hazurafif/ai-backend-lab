@@ -64,9 +64,8 @@ def llm_model_kwargs() -> dict[str, Any]:
 def llm_model_name() -> str | None:
     """The model of the default llm connection (`extra.model`), or None.
 
-    The connection's model is the fallback for the builtin `default` agent
-    when `DEEPAGENTS_MODEL` is unset; an explicit spec/agent model always
-    wins over it.
+    The connection's model is the source for the builtin `default` agent
+    (no env fallback); an explicit spec/agent model always wins over it.
     """
     conn = resolved_llm()
     if conn is None:

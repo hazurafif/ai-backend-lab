@@ -68,20 +68,16 @@ async def test_store_crud(persistence):
 
 async def test_effective_values_db_overrides_env(persistence, monkeypatch):
     monkeypatch.setattr(config.settings, "execute_enabled", False)
-    monkeypatch.setattr(config.settings, "connection_fallback_env", True)
 
     # No DB rows -> env defaults.
     await settings_service.refresh_app_settings()
     assert settings_service.execute_enabled() is False
-    assert settings_service.connection_fallback_env() is True
 
     # DB row wins.
     await persistence.settings.set("execute", {"enabled": True, "max_timeout": 120})
-    await persistence.settings.set("connections", {"fallback_env": False})
     await settings_service.refresh_app_settings()
     assert settings_service.execute_enabled() is True
     assert settings_service.execute_max_timeout() == 120
-    assert settings_service.connection_fallback_env() is False
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +109,6 @@ async def test_get_settings_reports_source(persistence):
         body = r.json()
         assert body["execute"]["enabled"] is config.settings.execute_enabled
         assert body["execute"]["source"] == "env"
-        assert body["connections"]["fallback_env"] is True  # conftest offline default
-        assert body["connections"]["source"] == "env"
 
 
 async def test_put_settings_flips_execute_and_rebuilds(persistence):
@@ -150,14 +144,6 @@ async def test_put_settings_flips_execute_and_rebuilds(persistence):
         # Health reflects the DB value.
         r = await client.get("/health")
         assert r.json()["execute"]["enabled"] is False
-
-
-async def test_put_settings_connection_policy(persistence):
-    client, _app = await _admin_client()
-    async with client:
-        r = await client.put("/settings", json={"connections": {"fallback_env": False}})
-        assert r.status_code == 200, r.text
-        assert r.json()["connections"] == {"fallback_env": False, "source": "db"}
 
 
 async def test_put_settings_hitl(persistence):
@@ -199,9 +185,8 @@ def _registry(persistence) -> AgentRegistry:
     )
 
 
-async def test_resolve_model_requires_db_connection(persistence, monkeypatch):
-    monkeypatch.setattr(config.settings, "connection_fallback_env", False)
-    await settings_service.refresh_app_settings()  # no DB rows -> env default false
+async def test_resolve_model_requires_db_connection(persistence):
+    await settings_service.refresh_app_settings()
 
     from app.services.agent_configs import AgentSpec
 
@@ -219,14 +204,14 @@ async def test_resolve_model_requires_db_connection(persistence, monkeypatch):
     with pytest.raises(ValueError, match="No default 'llm' connection"):
         _registry(persistence)._resolve_model(spec)
 
-    # With env fallback enabled the string passes through (env-driven init).
-    await persistence.settings.set("connections", {"fallback_env": True})
-    await settings_service.refresh_app_settings()
-    assert _registry(persistence)._resolve_model(spec) == "openai:gpt-4o-mini"
+    # No env fallback exists: even a saved model cannot build without a
+    # connection (spec model + connection credentials are one unit).
+    spec.model = "openai:gpt-4o-mini"
+    with pytest.raises(ValueError, match="No default 'llm' connection"):
+        _registry(persistence)._resolve_model(spec)
 
 
-async def test_resolve_model_uses_db_connection_when_present(persistence, monkeypatch):
-    monkeypatch.setattr(config.settings, "connection_fallback_env", False)
+async def test_resolve_model_uses_db_connection_when_present(persistence):
     await persistence.connections.create(
         {
             "name": "zen",
@@ -262,8 +247,7 @@ async def test_resolve_model_uses_db_connection_when_present(persistence, monkey
 
 
 async def test_resolve_model_uses_connection_model_when_spec_has_none(persistence, monkeypatch):
-    """No DEEPAGENTS_MODEL: the default llm connection's extra.model is used."""
-    monkeypatch.setattr(config.settings, "connection_fallback_env", False)
+    """No env model: the default llm connection's extra.model is used."""
     monkeypatch.setattr(config.settings, "model", None)
     await persistence.connections.create(
         {
@@ -306,7 +290,6 @@ async def test_resolve_model_uses_connection_model_when_spec_has_none(persistenc
 
 async def test_resolve_model_requires_model_when_unconfigured(persistence, monkeypatch):
     """No model anywhere (env + connection) -> loud error, never a default."""
-    monkeypatch.setattr(config.settings, "connection_fallback_env", True)
     monkeypatch.setattr(config.settings, "model", None)
     await settings_service.refresh_app_settings()
     from app.services import connections as connection_service
@@ -337,7 +320,6 @@ async def test_app_starts_without_model_then_configures_at_runtime(persistence, 
     buildable on the next request — no restart needed.
     """
     monkeypatch.setattr(config.settings, "model", None)
-    monkeypatch.setattr(config.settings, "connection_fallback_env", True)
     app = create_app()
     cm = app.router.lifespan_context(app)
     await cm.__aenter__()

@@ -1,17 +1,15 @@
 """Embeddings factory for the knowledge base pipeline.
 
-Resolution order in `build_embeddings()`:
+Resolution in `build_embeddings()`:
 
-1. Saved `embeddings` connection (base URL + API token, see /connections) ->
-   OpenAIEmbeddings, any OpenAI-compatible endpoint.
-2. `EMBEDDINGS_MLX_URL` set (env fallback enabled) -> OpenAIEmbeddings against
-   a local `mlx_lm.server --embedding-model` process serving
-   Qwen3-Embedding-0.6B on Apple Silicon (see scripts/mlx_embeddings.sh).
-3. `OPENAI_API_KEY` present -> OpenAIEmbeddings (default
-   `text-embedding-3-small`).
-4. Otherwise a deterministic local embedder (hash-based bag of words) so the
-   whole pipeline runs offline in dev/tests without any API key. Not meant for
-   production retrieval quality.
+1. Saved `embeddings` connection (base URL + API token, see /connections,
+   admin-managed) -> OpenAIEmbeddings, any OpenAI-compatible endpoint.
+2. Otherwise a deterministic local embedder (hash-based bag of words) so the
+   whole pipeline runs offline in dev/tests without any API key. Not meant
+   for production retrieval quality.
+
+There is no env fallback: env keys (OPENAI_API_KEY, EMBEDDINGS_MLX_URL) are
+never consulted — credentials must come from a saved connection.
 
 Qwen3-Embedding models are instruction-aware: `embed_query()` gets an
 "Instruct: ..." prefix (1-5% retrieval gain), passages are embedded bare.
@@ -22,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import os
 import re
 
 from langchain_core.embeddings import Embeddings
@@ -96,33 +93,20 @@ def _query_instruction(model: str) -> str | None:
 
 
 def build_embeddings() -> Embeddings:
-    """Build the KB embedder: saved connection > MLX > OpenAI env > local.
+    """Build the KB embedder: saved connection, else the local dev embedder.
 
     Credentials resolve from the saved `embeddings` connection (base_url +
-    api_token, see /connections) first. With no connection, .env keys are only
-    consulted when the env fallback is opted in (CONNECTION_FALLBACK_ENV=true /
-    PUT /settings connections.fallback_env); EMBEDDINGS_MLX_URL then wins over
-    OPENAI_API_KEY so local Qwen3-Embedding-0.6B serving (scripts/
-    mlx_embeddings.sh) is the default local path.
+    api_token, see /connections, admin-managed). With no connection the
+    deterministic local embedder is used (offline dev/tests) — env keys are
+    never consulted.
     """
-    from ...services import settings as runtime_settings
     from ...services.connections import resolved_embeddings
 
     conn = resolved_embeddings()
-    fallback_env = runtime_settings.connection_fallback_env()
     api_key: str | None = None
     base_url: str | None = None
     model = settings.embeddings_model
-    if conn is None and fallback_env:
-        if settings.embeddings_mlx_url:
-            # mlx_lm.server ignores auth; the OpenAI client still wants a key.
-            api_key = "mlx-local"
-            base_url = settings.embeddings_mlx_url
-            model = settings.embeddings_mlx_model
-        elif os.environ.get("OPENAI_API_KEY"):
-            api_key = os.environ["OPENAI_API_KEY"]
-            base_url = settings.embeddings_base_url
-    elif conn is not None:
+    if conn is not None:
         api_key = conn.get("api_token")
         base_url = conn.get("base_url") or settings.embeddings_base_url
     if api_key:
@@ -142,10 +126,8 @@ def build_embeddings() -> Embeddings:
             embeddings = InstructionAwareEmbeddings(embeddings, instruction)
         return embeddings
     logger.warning(
-        "No embeddings connection, EMBEDDINGS_MLX_URL, or OPENAI_API_KEY set: "
-        "using the deterministic local embedder for the knowledge base "
-        "(dev/tests only). Save an 'embeddings' connection via POST /connections "
-        "or run scripts/mlx_embeddings.sh + set EMBEDDINGS_MLX_URL for real "
-        "retrieval."
+        "No embeddings connection saved: using the deterministic local "
+        "embedder for the knowledge base (dev/tests only). Save an "
+        "'embeddings' connection via POST /connections for real retrieval."
     )
     return LocalEmbeddings()

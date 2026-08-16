@@ -13,12 +13,23 @@ MEMORY_SOURCE = "/memories/AGENTS.md"
 
 # Store namespaces for agent-level (global, shared by all users) resources.
 GLOBAL_SKILLS_NS = ("agent", "skills")
+# Legacy global MCP server pool; per-user configs live under
+# user_mcp_servers_ns(username) (migrated to the default admin at startup).
 TOOL_SERVERS_NS = ("agent", "mcp_servers")
 
 
 def user_skills_ns(username: str) -> tuple[str, ...]:
     """Store namespace for a user's own skills ("my skills")."""
     return ("user", "skills", username)
+
+
+def user_mcp_servers_ns(username: str) -> tuple[str, ...]:
+    """Store namespace for a user's own MCP tool servers (per-user config).
+
+    Each user configures their own MCP connections; nothing is shared
+    between users (fresh, private data per user).
+    """
+    return ("user", "mcp_servers", username)
 
 
 # Agent configs (customizable agent profiles): global agents are shared by

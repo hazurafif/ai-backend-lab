@@ -16,11 +16,16 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health")
 async def health():
+    # MCP servers are per user now: report the default admin's instance as
+    # the infra summary. Connections (llm/embeddings) are admin-managed and
+    # global — reported from the resolved cache.
+    admin = settings.default_admin_username
+    instance = await mcp_servers.get(admin, persistence.store)
     return {
         "status": "ok",
         "persistence": persistence.backend_name,
-        "mcp_servers": mcp_servers.names,
-        "model": settings.model or llm_model_name(),
+        "mcp_servers": instance.names,
+        "model": llm_model_name(),
         "llm_connection": (resolved_llm() or {}).get("name"),
         "llm_connection_model": llm_model_name(),
         "interrupt_on": runtime_settings.interrupt_on(),
@@ -34,6 +39,6 @@ async def health():
         },
         "agent_resources": {
             "skills": len(await resources.list_skills(persistence.store)),
-            "tool_servers": len(await resources.list_tool_servers(persistence.store)),
+            "tool_servers": len(await resources.list_tool_servers(persistence.store, admin)),
         },
     }

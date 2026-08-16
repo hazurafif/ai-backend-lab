@@ -32,6 +32,7 @@ from app.main import create_app
 from app.schema.agent_config_schema import AgentConfigIn
 from app.services import agent_configs
 from app.services.agent import AgentRegistry, build_backend
+from app.services.connections import llm_model_name
 from app.util.date import now_iso
 
 pytestmark = pytest.mark.filterwarnings(
@@ -214,8 +215,8 @@ async def test_thread_usage_no_usage_metadata(persistence):
         assert body["usage"] is None
         assert body["cost"] is None
         assert body["context"] is None
-        # builtin default agent -> model still resolves
-        assert body["model"] == config.settings.model
+        # builtin default agent -> model resolves from the llm connection
+        assert body["model"] == llm_model_name()
 
 
 async def test_thread_usage_unknown_model_window(persistence):

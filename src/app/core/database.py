@@ -999,7 +999,7 @@ class AppSettingsStore:
 
     Global infra configuration that overrides .env defaults at runtime, e.g.
     `execute` ({"enabled", "max_timeout", "inherit_env"}) and `connections`
-    ({"fallback_env"}). Falls back to in-memory dicts when Postgres is off
+    ({"execute"}). Falls back to in-memory dicts when Postgres is off
     (dev mode).
     """
 

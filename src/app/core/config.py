@@ -119,12 +119,6 @@ class Settings:
     execute_inherit_env: bool = field(
         default_factory=lambda: os.environ.get("EXECUTE_INHERIT_ENV", "false").lower() == "true"
     )
-    # When false (default), missing DB connections are an error instead of a
-    # silent .env fallback for the agent LLM / KB embeddings. DB settings
-    # (`app_settings.connections.fallback_env`) override this at runtime.
-    connection_fallback_env: bool = field(
-        default_factory=lambda: os.environ.get("CONNECTION_FALLBACK_ENV", "false").lower() == "true"
-    )
 
     # --- Chat file uploads ---
     # Uploads are stored as real files in the user's workspace dir (uploads/),

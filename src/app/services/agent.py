@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -352,16 +352,21 @@ class AgentRegistry:
         model_factory: Callable[[str, float | None], str | BaseChatModel] | None = None,
         static_default: CompiledStateGraph | None = None,
         max_cache: int = 16,
+        mcp_provider: Callable[[str], Awaitable[tuple[list[BaseTool], dict[str, list[str]]]]]
+        | None = None,
     ) -> None:
         """Args:
         checkpointer/store/backend: shared persistence + filesystem backend
             (one instance for every graph).
-        mcp_tools: tools loaded from MCP servers.
+        mcp_tools: static tools loaded from MCP servers (tests only — use
+            `mcp_provider` for per-user MCP).
         extra_tools: additional tools, e.g. the SearXNG web_search tool.
         tools_by_server: tool name -> MCP server name attribution, for
             per-agent tool selection (`web_search` is a built-in pseudo-tool).
         model_factory: test hook returning a chat model for (model, temperature).
         static_default: when set (tests), every resolve() returns this graph.
+        mcp_provider: async (username) -> (tools, tools_by_server); resolves
+            the user's own MCP servers at graph-build time.
         """
         self._checkpointer = checkpointer
         self._store = store
@@ -369,6 +374,7 @@ class AgentRegistry:
         self._mcp_tools = list(mcp_tools or [])
         self._extra_tools = list(extra_tools or [])
         self._tools_by_server = dict(tools_by_server or {})
+        self._mcp_provider = mcp_provider
         self._model_factory = model_factory
         self._static_default = static_default
         self._cache: OrderedDict[str, CompiledStateGraph] = OrderedDict()
@@ -384,6 +390,8 @@ class AgentRegistry:
     ) -> CompiledStateGraph:
         """The compiled graph for an agent config (user -> global -> builtin default).
 
+        The graph is per-user: the user's own llm connection (BYOK model
+        credentials) and their own MCP tools are baked in at build time.
         Raises KeyError when the config does not exist.
         """
         if self._static_default is not None:
@@ -391,15 +399,15 @@ class AgentRegistry:
         spec = await load_spec(self._store, name, username)
         if spec is None:
             raise KeyError(name)
-        return await self._build_for(spec)
+        return await self._build_for(spec, username)
 
-    async def _build_for(self, spec: AgentSpec) -> CompiledStateGraph:
-        key = spec.fingerprint()
+    async def _build_for(self, spec: AgentSpec, username: str) -> CompiledStateGraph:
+        key = f"{username}:{spec.fingerprint()}"
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
             return cached
-        tools = self._select_tools(spec)
+        tools = await self._select_tools(spec, username)
         model = self._resolve_model(spec)
         graph = build_agent(
             checkpointer=self._checkpointer,
@@ -419,17 +427,25 @@ class AgentRegistry:
             self._cache.popitem(last=False)
         return graph
 
-    def _select_tools(self, spec: AgentSpec) -> list[BaseTool]:
+    async def _mcp_for(self, username: str) -> tuple[list[BaseTool], dict[str, list[str]]]:
+        """The user's MCP tools: per-user provider when wired, else static lists."""
+        if self._mcp_provider is not None:
+            return await self._mcp_provider(username)
+        return list(self._mcp_tools), dict(self._tools_by_server)
+
+    async def _select_tools(self, spec: AgentSpec, username: str) -> list[BaseTool]:
         """Tools for the agent: inherited (all) or the named selection."""
         if spec.tools is None:
-            return list(self._mcp_tools) + list(self._extra_tools)
+            mcp_tools, _ = await self._mcp_for(username)
+            return list(mcp_tools) + list(self._extra_tools)
+        mcp_tools, tools_by_server = await self._mcp_for(username)
         selected: list[BaseTool] = []
-        by_name = {t.name: t for t in self._mcp_tools}
+        by_name = {t.name: t for t in mcp_tools}
         for name in spec.tools:
             if name == "web_search":
                 selected.extend(t for t in self._extra_tools if t.name == "web_search")
                 continue
-            for tool_name in self._tools_by_server.get(name, []):
+            for tool_name in tools_by_server.get(name, []):
                 if tool_name in by_name and by_name[tool_name] not in selected:
                     selected.append(by_name[tool_name])
         return selected
@@ -437,11 +453,10 @@ class AgentRegistry:
     def _resolve_model(self, spec: AgentSpec) -> str | BaseChatModel:
         if self._model_factory is not None:
             return self._model_factory(spec.model, spec.temperature)
-        # A saved `llm` connection (base URL + API token, see /connections)
-        # overrides .env credentials for the provider. When no default llm
-        # connection exists, env fallback is opt-in (PUT /settings
-        # connections.fallback_env=true); otherwise this fails loudly so the
-        # agent never silently runs on .env credentials.
+        # The saved `llm` connection (base URL + API token, see /connections,
+        # admin-managed) is the ONLY credential source — there is no .env
+        # fallback. Without it the agent refuses to build so it never silently
+        # runs on env credentials.
         kwargs = llm_model_kwargs()
         if spec.temperature is not None:
             kwargs["temperature"] = spec.temperature
@@ -453,21 +468,18 @@ class AgentRegistry:
         model_name = spec.model or llm_model_name()
         if model_name is None:
             raise ValueError(
-                "No model configured: set DEEPAGENTS_MODEL, or save a default "
-                "llm connection carrying the model, e.g. POST /connections "
+                "No model configured: save a default llm connection carrying "
+                "the model, e.g. POST /connections "
                 '{"name": "zen", "kind": "llm", "base_url": "https://.../v1", '
                 '"api_token": "sk-...", "extra": {"model": '
                 '"openai:deepseek-v4-flash"}, "is_default": true}'
             )
         if not kwargs:
-            if not runtime_settings.connection_fallback_env():
-                raise ValueError(
-                    "No default 'llm' connection configured — create one via "
-                    "POST /connections (kind=llm, is_default=true), or allow env "
-                    'credentials via PUT /settings {"connections": '
-                    '{"fallback_env": true}}'
-                )
-            return model_name
+            raise ValueError(
+                "No default 'llm' connection configured — create one via "
+                "POST /connections (kind=llm, is_default=true, base_url + "
+                "api_token); env credentials are never used."
+            )
         from langchain.chat_models import init_chat_model
 
         model = init_chat_model(model_name, **kwargs)

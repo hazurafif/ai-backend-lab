@@ -29,14 +29,3 @@ def _isolated_workspace(tmp_path):
     """
     config.settings.workspace_root = str(tmp_path / "workspace")
     yield
-
-
-@pytest.fixture(autouse=True)
-def _offline_env_fallback():
-    """Offline tests run without DB connections: allow .env-style credentials.
-
-    Production defaults to DB-only connections (missing default `llm`
-    connection -> loud error); the offline suite has no Postgres, so tests
-    opt back into the env fallback unless a test explicitly overrides it.
-    """
-    config.settings.connection_fallback_env = True
