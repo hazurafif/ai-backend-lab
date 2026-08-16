@@ -162,6 +162,7 @@ from .services import resources
 from .services import settings as runtime_settings
 from .services import workspace as workspace_service
 from .services.agent import AgentRegistry, build_backend, build_extra_tools
+from .services.chat import reconcile_stale_runs
 from .services.connections import llm_model_name, refresh_resolved_connections
 from .services.mcp import mcp_servers
 from .services.reasoning_bridge import install as install_reasoning_bridge
@@ -188,6 +189,13 @@ def create_app(
         # Load runtime app settings (execute tool toggle, HITL gating) so DB
         # values override .env from the first request on.
         await runtime_settings.refresh_app_settings()
+        # Stale-run reconciliation: runs live in-process only, so any thread
+        # still marked `running` after a restart was orphaned by the dead
+        # process (its finalize block never ran). Mark it cancelled so the
+        # frontend stops spinning on it.
+        stale = await reconcile_stale_runs()
+        if stale:
+            logger.warning("startup: marked %d stale thread(s) as cancelled", stale)
         # One-time migrations: legacy global skills + MCP tool servers fold
         # into the default admin's own namespace (skills and MCP servers are
         # fully per-user now).

@@ -248,6 +248,44 @@ def _run_event(status: str, thread_id: str, metadata: dict | None, agent_name: s
     }
 
 
+async def reconcile_stale_runs() -> int:
+    """Mark threads left `running` by a dead process as cancelled.
+
+    Runs are in-process only: after a restart every `running` thread with no
+    ActiveRun is stale (the finalize block never ran), so without this the
+    frontend shows these threads as running forever (sidebar spinner, tool
+    cards stuck on "Running", composer in background-run mode). Returns the
+    number of threads reconciled.
+    """
+    reconciled = 0
+    try:
+        users = await persistence.users.list_users()
+        for user in users:
+            username = user["username"]
+            ns = thread_metadata_ns(username)
+            for item in await persistence.store.asearch(ns):
+                value = item.value
+                if value.get("status") != "running":
+                    continue
+                if run_manager.get(item.key) is not None:
+                    continue  # genuinely in flight in this process
+                # Reuse the metadata upsert for consistent shape/ordering.
+                meta = await _record_thread_metadata(
+                    item.key, username, None, value.get("agent") or "default", status="cancelled"
+                )
+                hub.publish(
+                    username,
+                    _run_event("cancelled", item.key, meta, meta.get("agent") or "default"),
+                )
+                logger.warning(
+                    "reconciled stale run: thread %s (%s) -> cancelled", item.key, username
+                )
+                reconciled += 1
+    except Exception:
+        logger.exception("stale-run reconciliation failed")
+    return reconciled
+
+
 def agent_stream(
     agent: CompiledStateGraph,
     username: str,
@@ -398,7 +436,11 @@ async def _run_agent(
     resume: Any,
     agent_name: str,
 ) -> None:
-    """Background run body: stream the agent, persist, notify. Never raises."""
+    """Background run body: stream the agent, persist, notify.
+
+    Never raises, except for task cancellation (shutdown), which is finalized
+    as `cancelled` before propagating.
+    """
     config = {"configurable": {"thread_id": thread_id}}
 
     # Show the thread in history immediately, marked as running.
@@ -540,14 +582,14 @@ async def _run_agent(
 
     interrupted = {"flag": False}
     stop_event = active.stop
-    # Materialize the agent's skills into the workspace dir (the only
-    # store -> disk sync; memories/uploads are plain files on the volume).
     try:
-        spec = await agent_configs.load_spec(persistence.store, agent_name, username)
-        await materialize_skills(persistence.store, username, spec)
-    except Exception:
-        logger.exception("skills materialization failed for %s; running without it", username)
-    try:
+        # Materialize the agent's skills into the workspace dir (the only
+        # store -> disk sync; memories/uploads are plain files on the volume).
+        try:
+            spec = await agent_configs.load_spec(persistence.store, agent_name, username)
+            await materialize_skills(persistence.store, username, spec)
+        except Exception:
+            logger.exception("skills materialization failed for %s; running without it", username)
         # Run with the user's identity in the runtime context: the workspace
         # filesystem backend and the knowledge base search tool scope per user.
         context = {"user_id": username}
@@ -666,6 +708,22 @@ async def _run_agent(
             hub.publish(username, _run_event("failed", thread_id, metadata, agent_name))
             run_manager.publish(active, "error", {"source": "final", "message": str(exc)})
             run_manager.publish(active, "done", {"thread_id": thread_id, "messages": finalized})
+    except asyncio.CancelledError:
+        # Graceful shutdown (uvicorn cancels the run task): CancelledError is a
+        # BaseException in 3.12, so the branches above never run for it —
+        # persist the partial run exactly like a manual cancel, then propagate
+        # (the finally block still ends the run lifecycle). Attached at the
+        # guarded level so a cancellation anywhere in the run body (skills
+        # materialization, astream_events, the pump loop, finalize) lands here.
+        await _save_history(thread_id, username, finalized)
+        metadata = await _record_thread_metadata(
+            thread_id, username, message, agent_name, status="cancelled"
+        )
+        hub.publish(username, _run_event("cancelled", thread_id, metadata, agent_name))
+        run_manager.publish(
+            active, "done", {"thread_id": thread_id, "messages": [], "cancelled": True}
+        )
+        raise
     finally:
         # End the run lifecycle first (stream close, resume allowed), then
         # version the workspace: every agent change is committed to the
