@@ -103,6 +103,18 @@ class Settings:
     searxng_timeout: float = field(
         default_factory=lambda: float(os.environ.get("SEARXNG_TIMEOUT", "10"))
     )
+    searxng_fetch_timeout: float = field(
+        default_factory=lambda: float(os.environ.get("SEARXNG_FETCH_TIMEOUT", "15"))
+    )
+    searxng_max_page_chars: int = field(
+        default_factory=lambda: int(os.environ.get("SEARXNG_MAX_PAGE_CHARS", "6000"))
+    )
+    # In-process TTL cache for identical repeated searches (0 disables):
+    # SearXNG suspends engines that see query bursts, so pacing repeat
+    # queries keeps engine health up.
+    searxng_cache_ttl: float = field(
+        default_factory=lambda: float(os.environ.get("SEARXNG_CACHE_TTL", "300"))
+    )
 
     # --- Shell execution (execute tool) ---
     # Opt-in: EXECUTE_ENABLED=true swaps the default StateBackend for a
