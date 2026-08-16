@@ -20,6 +20,7 @@ knowledge-base tuning, HITL and sharing.
 | `POST /threads/{id}/followup` | Bearer (owner) | **Post-run follow-up for the frontend**: call after a chat `done` event — generates an LLM title only when missing/still the raw truncation (`{"force": true}` always regenerates), plus up to **3 suggested follow-up questions** the user can click to continue the conversation; returns `{thread_id, title, generated, followups}` |
 | `PATCH /threads/{id}` | Bearer | Rename a thread |
 | `DELETE /threads/{id}` | Bearer | Delete a thread (state + history + metadata) |
+| `DELETE /threads` | Bearer | **Delete ALL of the current user's threads** in one request (state + history + metadata + share links; the bulk counterpart of `DELETE /threads/{id}`) |
 | `POST /threads/{id}/resume` | Bearer | Resume a run paused for human approval |
 | `POST /threads/{id}/cancel` | Bearer | Abort the active run of a thread (`done` event carries `cancelled: true`) |
 | `POST /threads/{id}/share` | Bearer | Create a public share link (owner; idempotent) |

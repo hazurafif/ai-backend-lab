@@ -59,7 +59,7 @@ from ..services import resources
 from ..services import settings as runtime_settings
 from ..services.connections import llm_model_kwargs, llm_model_name, model_kwargs_from
 from ..services.kb.tool import build_kb_search_tool
-from ..services.searxng import build_search_tool
+from ..services.searxng import build_fetch_page_tool, build_search_tool
 from .agent_configs import AgentSpec, load_spec
 
 logger = logging.getLogger(__name__)
@@ -227,6 +227,11 @@ def build_skill_publish_tool() -> BaseTool:
     )
 
 
+# Agent tools that are built in (not MCP servers): selectable by name in
+# per-agent tool lists without a matching MCP server.
+BUILTIN_PSEUDO_TOOLS = ("web_search", "fetch_page")
+
+
 def build_extra_tools() -> list[BaseTool]:
     """Agent tools: skill publishing + optional web search / knowledge base search.
 
@@ -236,7 +241,7 @@ def build_extra_tools() -> list[BaseTool]:
     an unconfigured service never registers a dead tool.
     """
     tools: list[BaseTool] = [build_skill_publish_tool()]
-    for candidate in (build_search_tool, build_kb_search_tool):
+    for candidate in (build_search_tool, build_fetch_page_tool, build_kb_search_tool):
         tool_ = candidate()
         if tool_ is not None:
             tools.append(tool_)
@@ -615,8 +620,8 @@ class AgentRegistry:
         selected: list[BaseTool] = []
         by_name = {t.name: t for t in mcp_tools}
         for name in spec.tools:
-            if name == "web_search":
-                selected.extend(t for t in self._extra_tools if t.name == "web_search")
+            if name in BUILTIN_PSEUDO_TOOLS:
+                selected.extend(t for t in self._extra_tools if t.name == name)
                 continue
             for tool_name in tools_by_server.get(name, []):
                 if tool_name in by_name and by_name[tool_name] not in selected:

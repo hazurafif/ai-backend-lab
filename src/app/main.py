@@ -29,6 +29,8 @@ Endpoints:
                                     {thread_id, title, generated, followups}
   PATCH /threads/{id}             -> rename a thread
   DELETE /threads/{id}            -> delete a thread
+  DELETE /threads                 -> delete ALL of the current user's threads
+                                   (state + history + metadata, one request)
   POST /threads/{id}/resume       -> resume an interrupted (HITL) run
   POST /threads/{id}/cancel       -> abort the active run of a thread
   GET  /threads/{id}/stream       -> attach a live SSE stream to an active run

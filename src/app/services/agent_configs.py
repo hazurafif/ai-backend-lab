@@ -181,10 +181,10 @@ def _skill_file_key(name: str) -> str:
 
 
 def _validate_tools(tools: list[str] | None, known_servers: list[str]) -> None:
-    """Reject unknown tool server names (the 'web_search' pseudo-tool is built in)."""
+    """Reject unknown tool server names ('web_search'/'fetch_page' are built in)."""
     if not tools:
         return
-    unknown = [t for t in tools if t != "web_search" and t not in known_servers]
+    unknown = [t for t in tools if t not in ("web_search", "fetch_page") and t not in known_servers]
     if unknown:
         raise ValueError(f"Unknown tool server(s): {', '.join(unknown)}")
 
