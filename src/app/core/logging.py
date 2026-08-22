@@ -106,6 +106,10 @@ def setup_logging() -> None:
     access = logging.getLogger("uvicorn.access")
     access.setLevel(logging.WARNING)
     access.propagate = False
+    # Library chatter at INFO (every outbound HTTP call) — the app's own
+    # request log and the SSE tool events already cover this path.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     _configured = True
 
 

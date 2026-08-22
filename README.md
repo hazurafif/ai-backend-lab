@@ -105,6 +105,7 @@ Everything is env-driven — full list in `.env.example` (`src/app/core/config.p
 | Web search | `SEARXNG_URL` + `SEARXNG_ENABLED` (`docker compose --profile extras up -d searxng`) |
 | Execute tool | `EXECUTE_ENABLED=true` — opt-in, off by default, dev/trusted only |
 | HITL | `INTERRUPT_ON_JSON='{"execute": true, "edit_file": true}'` |
+| Logging | `LOG_LEVEL` (default `INFO`) — one console line per request with user + timing via `RequestLogMiddleware`; every log record carries `request_id`/`user_id` (echo `X-Request-ID`) |
 | KB embeddings | OpenAI (`EMBEDDINGS_MODEL`, default `text-embedding-3-small`) or **local MLX**: `./scripts/mlx_embeddings.sh` + `EMBEDDINGS_MLX_URL=http://127.0.0.1:8080/v1` (Qwen3-Embedding-0.6B on Apple Silicon, no API fees) |
 
 **Stored connections (preferred over .env):** admin-managed provider credentials

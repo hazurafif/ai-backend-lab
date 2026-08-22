@@ -38,6 +38,8 @@ src/app/          package (src layout, installed editable by uv sync)
     migrations.py     SQL migration runner (applies migrations/*.sql at startup)
     dependencies.py   get_current_user (loads the user from the users store) + get_admin_user (role check)
     security.py       bcrypt + JWT (access + refresh tokens)
+    logging.py        structured console logging: request_id/user_id contextvars,
+                      one log line per HTTP request (RequestLogMiddleware)
     rate_limit.py     in-memory sliding-window login limiter
     run_registry.py   active agent runs keyed by thread_id (cancel support)
     exceptions.py     HTTP exception hierarchy (NotFound, Conflict, ...)
