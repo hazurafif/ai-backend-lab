@@ -160,6 +160,7 @@ from langgraph.graph.state import CompiledStateGraph
 from .api.v1.routes import api_router
 from .core.config import settings
 from .core.database import persistence
+from .core.logging import RequestLogMiddleware, setup_logging
 from .services import resources
 from .services import settings as runtime_settings
 from .services import workspace as workspace_service
@@ -177,6 +178,9 @@ def create_app(
     agent: CompiledStateGraph | None = None,
     agent_registry: AgentRegistry | None = None,
 ) -> FastAPI:
+    # Structured console logging before anything else logs; `create_app()`
+    # also runs on import, so uvicorn's own loggers keep their handlers.
+    setup_logging()
     # Lift `reasoning_content` deltas (DeepSeek-style providers) into reasoning
     # content blocks so thinking streams through ms.reasoning -> reasoning_delta.
     install_reasoning_bridge()
@@ -287,6 +291,9 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Outermost middleware: logs every request with user + timing, sets and
+    # echoes X-Request-ID (replaces uvicorn's access log).
+    app.add_middleware(RequestLogMiddleware)
     app.include_router(api_router)
     return app
 

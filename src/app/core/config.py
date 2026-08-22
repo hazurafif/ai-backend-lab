@@ -269,6 +269,10 @@ class Settings:
         default_factory=lambda: os.environ.get("SECRET_KEY", "dev-secret-change-me")
     )
 
+    # --- Logging ---
+    # Root logger level for app logs (NOTSET -> the setup falls back to INFO).
+    log_level: str = field(default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO"))
+
     # --- Rate limiting (login brute-force protection, in-memory) ---
     # Failed logins per (client IP + username) within the window; past the
     # cap the endpoint returns 429 until failures age out.
