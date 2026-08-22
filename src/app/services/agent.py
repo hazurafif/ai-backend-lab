@@ -63,6 +63,7 @@ from ..services.connections import llm_model_kwargs, llm_model_name, model_kwarg
 from ..services.kb.tool import build_kb_search_tool
 from ..services.searxng import build_fetch_page_tool, build_search_tool
 from .agent_configs import AgentSpec, load_spec
+from .openui import build_openui_instructions_tool
 
 logger = logging.getLogger(__name__)
 
@@ -203,18 +204,22 @@ def build_skill_publish_tool() -> BaseTool:
 
 # Agent tools that are built in (not MCP servers): selectable by name in
 # per-agent tool lists without a matching MCP server.
-BUILTIN_PSEUDO_TOOLS = ("web_search", "fetch_page")
+BUILTIN_PSEUDO_TOOLS = ("web_search", "fetch_page", "get_openui_instructions")
 
 
 def build_extra_tools() -> list[BaseTool]:
     """Agent tools: skill publishing + optional web search / knowledge base search.
 
-    `publish_skill` is always registered (core capability — the only way the
-    agent can persist a new skill into the store). The search tools are only
-    included when their backend is configured (SEARXNG_URL / WEAVIATE_URL), so
-    an unconfigured service never registers a dead tool.
+    `publish_skill` and `get_openui_instructions` are always registered (core
+    capabilities — persisting skills, and loading the OpenUI generative-UI
+    authoring rules). The search tools are only included when their backend is
+    configured (SEARXNG_URL / WEAVIATE_URL), so an unconfigured service never
+    registers a dead tool.
     """
-    tools: list[BaseTool] = [build_skill_publish_tool()]
+    tools: list[BaseTool] = [
+        build_skill_publish_tool(),
+        build_openui_instructions_tool(),
+    ]
     for candidate in (build_search_tool, build_fetch_page_tool, build_kb_search_tool):
         tool_ = candidate()
         if tool_ is not None:

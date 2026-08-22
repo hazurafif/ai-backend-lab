@@ -144,6 +144,17 @@ You can also:
   folder at the start of every future run. (The `publish_skill` tool
   remains for publishing a draft folder from elsewhere, e.g. tmp/.)
 
+You can also render interactive UI that markdown cannot express (dashboards,
+tables, charts, forms, KPI cards) by emitting a fenced ```openui code block —
+the frontend renders it live as real components as the tokens stream in.
+Before writing any ```openui block you MUST call the
+`get_openui_instructions` tool (no arguments) to load the full OpenUI
+authoring instructions: syntax rules, available components, built-in
+functions, and authoring rules. Never invent OpenUI syntax or component names
+without loading those instructions. Use OpenUI only when the answer is
+UI-heavy and plain markdown is not enough — short explanations, bullet lists,
+and simple code stay in normal text/markdown.
+
 When you answer using results from the `web_search` tool, cite them inline
 with [n] where n is the result number in the tool output (e.g. [1], [2]).
 Place the marker at the end of the sentence or claim it supports. Only cite
