@@ -621,10 +621,16 @@ class AgentRegistry:
         conn = None
         if spec.connection:
             conn = await persistence.connections.get(spec.connection)
-            if conn is None or conn.get("kind") != "llm":
+            if conn is None:
                 raise ValueError(
                     f"Agent '{spec.name}' references unknown llm connection "
                     f"'{spec.connection}' — save it via POST /connections first"
+                )
+            if conn.get("kind") != "llm" or not conn.get("enabled", True):
+                raise ValueError(
+                    f"Agent '{spec.name}' references llm connection "
+                    f"'{spec.connection}', which is disabled or not an llm kind — "
+                    "enable it via PUT /connections/{name} first"
                 )
         kwargs = model_kwargs_from(conn) if conn is not None else llm_model_kwargs()
         if spec.temperature is not None:

@@ -801,6 +801,7 @@ class ConnectionStore:
             "api_token": kw.get("api_token"),
             "extra": kw.get("extra") or {},
             "is_default": bool(kw.get("is_default", False)),
+            "enabled": bool(kw.get("enabled", True)),
             "created_at": kw.get("created_at") or now_iso(),
             "updated_at": kw.get("updated_at") or now_iso(),
         }
@@ -823,8 +824,8 @@ class ConnectionStore:
         """Insert a connection; returns the row, or None when the name is taken.
 
         `connection` is the raw payload dict (name, kind, base_url, api_token,
-        extra, is_default); when `is_default` is true it becomes the only
-        default of its kind.
+        extra, is_default, enabled); when `is_default` is true it becomes the
+        only default of its kind.
         """
         now = now_iso()
         if connection.get("is_default"):
@@ -832,8 +833,8 @@ class ConnectionStore:
         if self._pool is not None:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    "INSERT INTO connections (name, kind, base_url, api_token, extra, is_default) "
-                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO NOTHING "
+                    "INSERT INTO connections (name, kind, base_url, api_token, extra, is_default, enabled) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO NOTHING "
                     "RETURNING id, created_at, updated_at",
                     (
                         connection["name"],
@@ -842,6 +843,7 @@ class ConnectionStore:
                         connection.get("api_token"),
                         Jsonb(connection.get("extra") or {}),
                         connection.get("is_default", False),
+                        connection.get("enabled", True),
                     ),
                 )
                 row = await cur.fetchone()
@@ -866,7 +868,7 @@ class ConnectionStore:
         if self._pool is not None:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT id, name, kind, base_url, api_token, extra, is_default, "
+                    "SELECT id, name, kind, base_url, api_token, extra, is_default, enabled, "
                     "created_at, updated_at FROM connections WHERE name = %s",
                     (name,),
                 )
@@ -881,8 +883,9 @@ class ConnectionStore:
                     "api_token": row[4],
                     "extra": row[5] or {},
                     "is_default": row[6],
-                    "created_at": row[7].isoformat(),
-                    "updated_at": row[8].isoformat(),
+                    "enabled": bool(row[7]),
+                    "created_at": row[8].isoformat(),
+                    "updated_at": row[9].isoformat(),
                 }
         row = self._memory.get(name)
         return dict(row) if row is not None else None
@@ -892,7 +895,7 @@ class ConnectionStore:
         if self._pool is not None:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT id, name, kind, base_url, api_token, extra, is_default, "
+                    "SELECT id, name, kind, base_url, api_token, extra, is_default, enabled, "
                     "created_at, updated_at FROM connections ORDER BY created_at DESC"
                 )
                 return [
@@ -904,8 +907,9 @@ class ConnectionStore:
                         "api_token": r[4],
                         "extra": r[5] or {},
                         "is_default": r[6],
-                        "created_at": r[7].isoformat(),
-                        "updated_at": r[8].isoformat(),
+                        "enabled": bool(r[7]),
+                        "created_at": r[8].isoformat(),
+                        "updated_at": r[9].isoformat(),
                     }
                     for r in await cur.fetchall()
                 ]
@@ -915,8 +919,8 @@ class ConnectionStore:
 
     async def update(self, name: str, patch: dict) -> dict | None:
         """Update a connection; None when unknown. `patch` may carry any subset
-        of kind/base_url/api_token/extra/is_default. When is_default is set it
-        becomes the only default of its kind.
+        of kind/base_url/api_token/extra/is_default/enabled. When is_default
+        is set it becomes the only default of its kind.
         """
         existing = await self.get(name)
         if existing is None:
@@ -930,6 +934,7 @@ class ConnectionStore:
                 ("base_url", "base_url"),
                 ("api_token", "api_token"),
                 ("is_default", "is_default"),
+                ("enabled", "enabled"),
             ):
                 if key in patch:
                     sets.append(f"{col} = %s")
@@ -944,7 +949,7 @@ class ConnectionStore:
                 await cur.execute(
                     f"UPDATE connections SET {', '.join(sets)}, updated_at = now() "
                     "WHERE name = %s RETURNING id, name, kind, base_url, api_token, "
-                    "extra, is_default, created_at, updated_at",
+                    "extra, is_default, enabled, created_at, updated_at",
                     tuple(params),
                 )
                 row = await cur.fetchone()
@@ -958,15 +963,17 @@ class ConnectionStore:
                     "api_token": row[4],
                     "extra": row[5] or {},
                     "is_default": row[6],
-                    "created_at": row[7].isoformat(),
-                    "updated_at": row[8].isoformat(),
+                    "enabled": bool(row[7]),
+                    "created_at": row[8].isoformat(),
+                    "updated_at": row[9].isoformat(),
                 }
                 self._memory[name] = out
                 return out
-        for key in ("kind", "base_url", "api_token", "extra", "is_default"):
+        for key in ("kind", "base_url", "api_token", "extra", "is_default", "enabled"):
             if key in patch:
                 existing[key] = patch[key]
         existing["updated_at"] = now_iso()
+        self._memory[name] = existing
         return dict(existing)
 
     async def delete(self, name: str) -> bool:
@@ -981,13 +988,17 @@ class ConnectionStore:
         return self._memory.pop(name, None) is not None
 
     async def get_default(self, kind: str) -> dict | None:
-        """The default connection of a kind: is_default first, else first created."""
+        """The default enabled connection of a kind: is_default first, else
+        first created. Disabled connections are skipped, so toggling a
+        connection off makes consumers fall back to the next enabled one
+        (or None).
+        """
         if self._pool is not None:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT id, name, kind, base_url, api_token, extra, is_default, "
+                    "SELECT id, name, kind, base_url, api_token, extra, is_default, enabled, "
                     "created_at, updated_at FROM connections "
-                    "WHERE kind = %s ORDER BY is_default DESC, created_at ASC LIMIT 1",
+                    "WHERE kind = %s AND enabled ORDER BY is_default DESC, created_at ASC LIMIT 1",
                     (kind,),
                 )
                 row = await cur.fetchone()
@@ -1001,10 +1012,13 @@ class ConnectionStore:
                     "api_token": row[4],
                     "extra": row[5] or {},
                     "is_default": row[6],
-                    "created_at": row[7].isoformat(),
-                    "updated_at": row[8].isoformat(),
+                    "enabled": bool(row[7]),
+                    "created_at": row[8].isoformat(),
+                    "updated_at": row[9].isoformat(),
                 }
-        candidates = [r for r in self._memory.values() if r["kind"] == kind]
+        candidates = [
+            r for r in self._memory.values() if r["kind"] == kind and r.get("enabled", True)
+        ]
         if not candidates:
             return None
         candidates.sort(key=lambda r: (not r["is_default"], r["created_at"]))

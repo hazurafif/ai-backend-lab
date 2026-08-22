@@ -101,6 +101,7 @@ async def test_crud_cycle_and_masking():
         assert created["has_token"] is True
         assert created["base_url"] == "http://localhost:9999/v1"
         assert created["extra"] == {"model": "qwen-72b"}
+        assert created["enabled"] is True
 
         # duplicate name -> 409
         r = await client.post("/connections", json=payload())
@@ -124,6 +125,18 @@ async def test_crud_cycle_and_masking():
         # replace with a new token -> rotated
         r = await client.put("/connections/my-vllm", json=payload(api_token="sk-rotated-9999"))
         assert r.json()["api_token"] == "sk-r…9999"
+
+        # toggle off -> the switch state persists through GET responses
+        r = await client.put("/connections/my-vllm", json=payload(name="my-vllm", enabled=False))
+        assert r.status_code == 200, r.text
+        assert r.json()["enabled"] is False
+        r = await client.get("/connections/my-vllm")
+        assert r.json()["enabled"] is False
+        r = await client.get("/connections")
+        assert r.json()[0]["enabled"] is False
+        # toggle back on
+        r = await client.put("/connections/my-vllm", json=payload(name="my-vllm", enabled=True))
+        assert r.json()["enabled"] is True
 
         # delete -> 204, then 404
         r = await client.delete("/connections/my-vllm")
@@ -199,6 +212,37 @@ async def test_default_connection_per_kind_and_cache():
         assert connection_service.llm_model_kwargs() == {}
 
 
+async def test_disabled_connection_skipped_by_resolution():
+    """Toggling a connection off excludes it from default resolution."""
+    client, _app = await client_for()
+    async with client:
+        # mark a default connection as disabled
+        await client.post("/connections", json=payload(name="llm-a", is_default=True))
+        r = await client.put(
+            "/connections/llm-a",
+            json=payload(name="llm-a", is_default=True, enabled=False),
+        )
+        assert r.json()["enabled"] is False
+
+        # falls back to the next enabled connection of the kind
+        await client.post("/connections", json=payload(name="llm-b", kind="llm", is_default=False))
+        llm = await database.persistence.connections.get_default("llm")
+        assert llm["name"] == "llm-b"
+        await connection_service.refresh_resolved_connections()
+        assert connection_service.resolved_llm()["name"] == "llm-b"
+
+        # disabling everything clears the resolved cache
+        await client.put("/connections/llm-b", json=payload(name="llm-b", enabled=False))
+        await connection_service.refresh_resolved_connections()
+        assert connection_service.resolved_llm() is None
+        assert connection_service.llm_model_kwargs() == {}
+
+        # re-enabling restores it
+        await client.put("/connections/llm-b", json=payload(name="llm-b", enabled=True))
+        await connection_service.refresh_resolved_connections()
+        assert connection_service.resolved_llm()["name"] == "llm-b"
+
+
 async def test_mask_token_short():
     assert connection_service.mask_token(None) is None
     assert connection_service.mask_token("short") == "••••"
@@ -242,6 +286,23 @@ async def test_agent_model_uses_llm_connection(persistence):
     assert isinstance(model, BaseChatModel)
     assert getattr(model, "openai_api_base", None) == "http://localhost:9999/v1"
     assert model.openai_api_key.get_secret_value() == "sk-conn-token"
+    # Explicit binding to a disabled connection refuses to build.
+    await database.persistence.connections.update("openai", {"enabled": False})
+    bound = AgentSpec(
+        name="bound",
+        model="openai:gpt-4o-mini",
+        connection="openai",
+        system_prompt=None,
+        skills=None,
+        tools=None,
+        temperature=None,
+        interrupt_on=None,
+        thinking=None,
+        builtin=False,
+    )
+    with pytest.raises(ValueError, match="disabled"):
+        await registry._resolve_model(bound)
+    await database.persistence.connections.update("openai", {"enabled": True})
     # No env fallback: without a connection the model refuses to build.
     await database.persistence.connections.delete("openai")
     await connection_service.refresh_resolved_connections()
@@ -320,6 +381,18 @@ async def test_discover_models_aggregates_all_llm_sources():
             "api_token": "sk-2",
             "extra": {},
             "is_default": False,
+        }
+    )
+    # Disabled llm connections never feed the model picker.
+    await database.persistence.connections.create(
+        {
+            "name": "turned-off",
+            "kind": "llm",
+            "base_url": "https://turned-off.test/v1",
+            "api_token": "sk-0",
+            "extra": {},
+            "is_default": False,
+            "enabled": False,
         }
     )
     # Non-llm connections are never queried.

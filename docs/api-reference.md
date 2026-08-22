@@ -86,6 +86,9 @@ curl -X POST http://127.0.0.1:8000/connections \
   token keeps the stored one)
 - Kinds: `llm`, `embeddings`, `mcp`, `weaviate`, `searxng`; one connection
   per kind is the resolved default (`is_default`)
+- `enabled` toggle (default `true`): a disabled connection is skipped by
+  default resolution, `/connections/models` discovery and agent binding —
+  the row stays visible for editing / re-enabling (settings UI switch)
 - The agent LLM and KB embeddings resolve the default `llm` / `embeddings`
   connection at startup and after every mutation; without one, env-based
   behavior stays. Connections target OpenAI-compatible endpoints

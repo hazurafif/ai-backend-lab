@@ -49,6 +49,10 @@ class ConnectionIn(BaseModel):
         default=False,
         description="Resolved by consumers of this kind when multiple exist; one default per kind.",
     )
+    enabled: bool = Field(
+        default=True,
+        description="False disables the connection: it is skipped by default resolution, model discovery and agent binding (the row stays editable).",
+    )
 
 
 class ConnectionOut(BaseModel):
@@ -64,6 +68,7 @@ class ConnectionOut(BaseModel):
     has_token: bool = False
     extra: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
+    enabled: bool = True
     created_at: str | None = None
     updated_at: str | None = None
 

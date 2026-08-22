@@ -125,7 +125,9 @@ async def discover_models(client: httpx.AsyncClient | None = None) -> list[dict]
     rows = await persistence.connections.list()
     sources: list[dict] = []
     for row in rows:
-        if row.get("kind") != "llm":
+        if row.get("kind") != "llm" or not row.get("enabled", True):
+            # Disabled connections never feed the model picker (the admin
+            # toggle in settings) — they stay visible in the CRUD list.
             continue
         entry: dict[str, Any] = {
             "connection": row["name"],
