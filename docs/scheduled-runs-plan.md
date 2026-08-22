@@ -141,10 +141,10 @@ Schema inti:
 ```python
 class ScheduleIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
-    agent: str | None = Field(default=None, max_length=64)   # None = default
-    cron: str = Field(..., max_length=32)                     # divalidasi croniter di schema
-    prompt: str = Field(..., min_length=1)                    # template, lihat §5.2
-    timezone: str = Field(default="UTC")                      # IANA, divalidasi zoneinfo
+    agent: str | None = Field(default=None, max_length=64)  # None = default
+    cron: str = Field(..., max_length=32)  # divalidasi croniter di schema
+    prompt: str = Field(..., min_length=1)  # template, lihat §5.2
+    timezone: str = Field(default="UTC")  # IANA, divalidasi zoneinfo
     thread_mode: Literal["new", "fixed"] = "new"
     fixed_thread_id: str | None = Field(default=None, max_length=128)
     overlap_policy: Literal["skip"] = "skip"
@@ -220,7 +220,9 @@ Implementasi: `str.replace` loop sederhana — **bukan** engine template
 
 ```python
 scheduler_enabled: bool = field(default_factory=lambda: _bool_env("SCHEDULER_ENABLED", True))
-scheduler_poll_seconds: int = field(default_factory=lambda: int(os.environ.get("SCHEDULER_POLL_SECONDS", "60")))
+scheduler_poll_seconds: int = field(
+    default_factory=lambda: int(os.environ.get("SCHEDULER_POLL_SECONDS", "60"))
+)
 ```
 
 ---
